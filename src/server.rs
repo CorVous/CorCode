@@ -27,6 +27,9 @@ pub const SESSION_COOKIE: &str = "corcode_session";
 /// Where visitors without a session are sent.
 const LOGIN_PATH: &str = "/login";
 
+/// The unauthenticated liveness probe (ADR-0003).
+const HEALTH_PATH: &str = "/health";
+
 /// Build the application's routes. Every route is gated except the handful
 /// [`is_public`] names, so a route added here is protected by default
 /// (ADR-0003).
@@ -35,7 +38,7 @@ pub fn router(config: &Config) -> Result<Router> {
     Ok(Router::new()
         .route("/", get(home))
         .route("/logout-all", post(logout_all))
-        .route("/health", get(health))
+        .route(HEALTH_PATH, get(health))
         .route(LOGIN_PATH, get(login_form).post(submit_login))
         .layer(from_fn_with_state(Arc::clone(&gate), require_session))
         .layer(from_fn(same_origin))
@@ -46,7 +49,7 @@ pub fn router(config: &Config) -> Result<Router> {
 /// probe and the login form itself (ADR-0003).
 fn is_public(method: &Method, path: &str) -> bool {
     match path {
-        "/health" => method == Method::GET,
+        HEALTH_PATH => method == Method::GET,
         LOGIN_PATH => matches!(*method, Method::GET | Method::POST),
         _ => false,
     }
@@ -75,7 +78,8 @@ async fn require_session(State(gate): State<Arc<Gate>>, request: Request, next: 
         return next.run(request).await;
     }
     let now = SystemTime::now();
-    let Some(session) = session_cookie(request.headers()).and_then(|c| gate.recognise(c, now))
+    let Some(session) =
+        session_cookie(request.headers()).and_then(|cookie| gate.recognise(cookie, now))
     else {
         return Redirect::to(LOGIN_PATH).into_response();
     };
