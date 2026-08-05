@@ -5,12 +5,17 @@ mod events;
 mod liveness;
 mod manifest;
 
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
+use ulid::Ulid;
+
+use manifest::SchemaTag;
 
 pub use error::StoreError;
 pub use events::Event;
@@ -18,10 +23,10 @@ pub use liveness::{ContainerLiveness, RuntimeStatus, runtime_status};
 pub use manifest::{ChatState, MANIFEST_SCHEMA, Manifest, NewChat};
 
 const CHATS_DIR: &str = "chats";
+const INCOMING_DIR: &str = ".incoming";
 const WORKSPACES_DIR: &str = "workspaces";
 const CLAUDE_DIR: &str = "claude";
 const MANIFEST_FILE: &str = "manifest.json";
-const MANIFEST_TEMP_FILE: &str = "manifest.json.tmp";
 const EVENTS_FILE: &str = "events.jsonl";
 
 /// Reader and writer of every chat under one dataset root.
@@ -53,16 +58,20 @@ impl ChatStore {
         self.root.join(WORKSPACES_DIR).join(chat_id)
     }
 
-    /// Lay down both trees for a new chat and persist its manifest.
+    /// Lay down both trees for a new chat, publishing the chat dir whole.
     pub fn create_chat(&self, new_chat: NewChat) -> Result<Manifest, StoreError> {
         let manifest = Manifest::open(new_chat);
         let chat_id = &manifest.chat_id;
-        for dir in [self.claude_dir(chat_id), self.workspace_dir(chat_id)] {
-            fs::create_dir_all(&dir).map_err(StoreError::writing(&dir))?;
-        }
-        let events = self.events_path(chat_id);
+        let workspace = self.workspace_dir(chat_id);
+        fs::create_dir_all(&workspace).map_err(StoreError::writing(&workspace))?;
+        let staged = self.staging_dir(chat_id);
+        let claude = staged.join(CLAUDE_DIR);
+        fs::create_dir_all(&claude).map_err(StoreError::writing(&claude))?;
+        let events = staged.join(EVENTS_FILE);
         File::create_new(&events).map_err(StoreError::writing(&events))?;
-        self.write_manifest(&manifest)?;
+        write_manifest_in(&staged, &manifest)?;
+        let chat_dir = self.chat_dir(chat_id);
+        fs::rename(&staged, &chat_dir).map_err(StoreError::writing(&chat_dir))?;
         Ok(manifest)
     }
 
@@ -72,6 +81,9 @@ impl ChatStore {
         let mut manifests = Vec::new();
         for entry in fs::read_dir(&chats).map_err(StoreError::reading(&chats))? {
             let entry = entry.map_err(StoreError::reading(&chats))?;
+            if is_hidden(&entry.file_name()) {
+                continue;
+            }
             manifests.push(read_manifest_at(&entry.path().join(MANIFEST_FILE))?);
         }
         manifests.sort_by(|left, right| {
@@ -89,13 +101,7 @@ impl ChatStore {
 
     /// Replace a chat's manifest in one atomic step.
     pub fn write_manifest(&self, manifest: &Manifest) -> Result<(), StoreError> {
-        let temp = self.chat_dir(&manifest.chat_id).join(MANIFEST_TEMP_FILE);
-        let json = serde_json::to_string_pretty(manifest).expect("manifest should serialize");
-        let mut file = File::create(&temp).map_err(StoreError::writing(&temp))?;
-        writeln!(file, "{json}").map_err(StoreError::writing(&temp))?;
-        file.sync_all().map_err(StoreError::writing(&temp))?;
-        let path = self.manifest_path(&manifest.chat_id);
-        fs::rename(&temp, &path).map_err(StoreError::writing(&path))
+        write_manifest_in(&self.chat_dir(&manifest.chat_id), manifest)
     }
 
     /// Append one ACP payload to the chat's display record, flushed on return.
@@ -129,6 +135,11 @@ impl ChatStore {
             .collect()
     }
 
+    /// Where a chat is assembled before it is published under its own id.
+    fn staging_dir(&self, chat_id: &str) -> PathBuf {
+        self.root.join(CHATS_DIR).join(INCOMING_DIR).join(chat_id)
+    }
+
     fn manifest_path(&self, chat_id: &str) -> PathBuf {
         self.chat_dir(chat_id).join(MANIFEST_FILE)
     }
@@ -138,23 +149,55 @@ impl ChatStore {
     }
 }
 
+/// Publish a manifest into `chat_dir`, replacing any older one wholesale.
+fn write_manifest_in(chat_dir: &Path, manifest: &Manifest) -> Result<(), StoreError> {
+    let temp = chat_dir.join(format!("{MANIFEST_FILE}.{}.tmp", Ulid::generate()));
+    let json = serde_json::to_string_pretty(manifest).expect("manifest should serialize");
+    let mut file = File::create(&temp).map_err(StoreError::writing(&temp))?;
+    writeln!(file, "{json}").map_err(StoreError::writing(&temp))?;
+    file.sync_all().map_err(StoreError::writing(&temp))?;
+    let path = chat_dir.join(MANIFEST_FILE);
+    fs::rename(&temp, &path).map_err(StoreError::writing(&path))
+}
+
+/// Dot-prefixed entries under `chats/` are the store's own scratch space,
+/// never chats.
+fn is_hidden(entry_name: &OsStr) -> bool {
+    entry_name.to_string_lossy().starts_with('.')
+}
+
 /// Read one manifest, refusing anything this build does not understand
 /// (ADR-0007 rule 5: no auto-repair, no skipping).
 fn read_manifest_at(path: &Path) -> Result<Manifest, StoreError> {
     let json = fs::read_to_string(path).map_err(StoreError::reading(path))?;
-    let manifest: Manifest =
-        serde_json::from_str(&json).map_err(|source| StoreError::Manifest {
+    let tag: SchemaTag = parse_manifest_json(path, &json)?;
+    if tag.schema != MANIFEST_SCHEMA {
+        return Err(StoreError::ManifestSchema {
             path: path.to_owned(),
-            source,
-        })?;
-    if manifest.schema == MANIFEST_SCHEMA {
+            schema: tag.schema,
+        });
+    }
+    let manifest: Manifest = parse_manifest_json(path, &json)?;
+    if OsStr::new(manifest.chat_id.as_str()) == owning_dir_name(path) {
         Ok(manifest)
     } else {
-        Err(StoreError::ManifestSchema {
+        Err(StoreError::ChatIdMismatch {
             path: path.to_owned(),
-            schema: manifest.schema,
+            chat_id: manifest.chat_id,
         })
     }
+}
+
+fn parse_manifest_json<T: DeserializeOwned>(path: &Path, json: &str) -> Result<T, StoreError> {
+    serde_json::from_str(json).map_err(|source| StoreError::Manifest {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// Name of the chat dir a file sits in — the second witness to a chat's id.
+fn owning_dir_name(path: &Path) -> &OsStr {
+    path.parent().and_then(Path::file_name).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -171,6 +214,15 @@ mod tests {
         let root = TempDir::new().expect("temp dataset root should be created");
         let store = ChatStore::new(root.path());
         (root, store)
+    }
+
+    /// Identity of the file itself, not of its name: a rename publishes a
+    /// different inode, an in-place truncate reuses one.
+    #[cfg(unix)]
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt as _;
+
+        fs::metadata(path).expect("manifest should exist").ino()
     }
 
     fn new_chat(title: &str) -> NewChat {
@@ -205,6 +257,60 @@ mod tests {
                 .read_manifest(&manifest.chat_id)
                 .expect("manifest should read back"),
             manifest
+        );
+    }
+
+    #[test]
+    fn create_chat_leaves_no_half_built_chat_behind() {
+        let (_root, store) = store();
+
+        let manifest = store
+            .create_chat(new_chat("staged"))
+            .expect("chat should be created");
+
+        let staging = store.staging_dir(&manifest.chat_id);
+        assert!(!staging.exists(), "staged chat should have been moved");
+        let residue: Vec<PathBuf> = fs::read_dir(
+            staging
+                .parent()
+                .expect("staging dir should sit under the staging area"),
+        )
+        .expect("staging area should be readable")
+        .map(|entry| entry.expect("entry should be readable").path())
+        .collect();
+        assert!(residue.is_empty(), "staging area holds: {residue:?}");
+    }
+
+    #[test]
+    fn scan_ignores_the_staging_area() {
+        let (_root, store) = store();
+        store
+            .create_chat(new_chat("published"))
+            .expect("chat should be created");
+        let crashed = store.staging_dir("01KZCRASHEDMIDCREATE00000");
+        fs::create_dir_all(&crashed).expect("staging leftovers should be creatable");
+
+        let chats = store.scan().expect("scan should ignore the staging area");
+
+        assert_eq!(chats.len(), 1);
+    }
+
+    #[test]
+    fn scan_still_fails_on_a_visible_directory_without_a_manifest() {
+        let (_root, store) = store();
+        store
+            .create_chat(new_chat("published"))
+            .expect("chat should be created");
+        let intruder = store.chat_dir("not-a-chat");
+        fs::create_dir_all(&intruder).expect("intruder dir should be creatable");
+
+        let error = store
+            .scan()
+            .expect_err("a manifest-less chat dir should fail");
+
+        assert!(
+            format!("{error}").contains(&intruder.join(MANIFEST_FILE).display().to_string()),
+            "error should name the missing manifest, got: {error}"
         );
     }
 
@@ -260,16 +366,38 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).expect("manifest should be readable"))
                 .expect("manifest should be json");
         fields["schema"] = json!(2);
+        fields["mood"] = json!("a field this build has never heard of");
         fs::write(&path, fields.to_string()).expect("manifest should be rewritable");
 
         let error = store
             .read_manifest(&manifest.chat_id)
             .expect_err("unknown schema should fail");
 
+        assert!(
+            matches!(&error, StoreError::ManifestSchema { path: named, schema: 2 } if named == &path),
+            "version skew should read as version skew, got: {error}"
+        );
+    }
+
+    #[test]
+    fn scan_rejects_a_manifest_that_claims_another_chats_id() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("original"))
+            .expect("chat should be created");
+        let copy = store.chat_dir("01KZCOPYOFANOTHERCHATSDIR");
+        fs::create_dir_all(&copy).expect("copied chat dir should be creatable");
+        let copied_manifest = copy.join(MANIFEST_FILE);
+        fs::copy(store.manifest_path(&manifest.chat_id), &copied_manifest)
+            .expect("manifest should be copyable");
+
+        let error = store.scan().expect_err("a copied chat dir should fail");
+
         let message = format!("{error}");
         assert!(
-            message.contains(&path.display().to_string()) && message.contains("schema 2"),
-            "error should name the file and the schema, got: {message}"
+            message.contains(&copied_manifest.display().to_string())
+                && message.contains(&manifest.chat_id),
+            "error should name the file and the id it claims, got: {message}"
         );
     }
 
@@ -279,6 +407,8 @@ mod tests {
         let mut manifest = store
             .create_chat(new_chat("renamed"))
             .expect("chat should be created");
+        #[cfg(unix)]
+        let published = inode(&store.manifest_path(&manifest.chat_id));
         manifest.title = "Renamed".to_owned();
         manifest.acp_session_id = Some("session-uuid".to_owned());
 
@@ -286,6 +416,12 @@ mod tests {
             .write_manifest(&manifest)
             .expect("manifest should be written");
 
+        #[cfg(unix)]
+        assert_ne!(
+            published,
+            inode(&store.manifest_path(&manifest.chat_id)),
+            "a rewrite reusing the file in place is not atomic"
+        );
         assert_eq!(
             store
                 .read_manifest(&manifest.chat_id)

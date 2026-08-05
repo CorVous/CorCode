@@ -1,0 +1,15 @@
+{
+  "claudeMd": "# Working in a CorCode workspace\n\n`/workspace` is a git clone on a chat branch. Git is the only durable record of your work: the container is disposable and can be torn down between turns.\n\n- Commit as work progresses, in meaningful units with messages that explain the change. Do not batch a whole session into one mechanical snapshot.\n- Push every commit. A branch with no upstream is pushed with `git push -u origin HEAD`.\n- End every turn with a clean tree and nothing unpushed. A stop hook checks this and hands the turn back to you when work is still unsaved.\n- When a push fails, say so in the reply and carry on. Do not invent workarounds such as rewriting history or pushing elsewhere.\n",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/corcode-stop-hook"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -33,6 +33,12 @@ pub struct Manifest {
     pub last_active_at: DateTime<Utc>,
 }
 
+/// The version tag alone, read before the fields it governs.
+#[derive(Deserialize)]
+pub(super) struct SchemaTag {
+    pub schema: u32,
+}
+
 /// What the caller has to decide when a chat is created; the rest is ours.
 pub struct NewChat {
     pub title: String,
