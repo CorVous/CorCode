@@ -1,6 +1,6 @@
 //! Docker-gated: the whole new-chat vertical against the real workspace
 //! image — a hardened container, the real ACP adapter, a real session id.
-//! Skipped, loudly, wherever the daemon, the image, or a key is missing.
+//! Skipped, loudly, wherever the socket, the image, or a key is missing.
 
 use std::fs;
 use std::net::SocketAddr;
@@ -58,9 +58,32 @@ async fn the_real_adapter_opens_a_session_inside_a_hardened_container() {
     }));
     let cookie = sign_in(address).await;
 
+    let created = create_a_chat(address, &cookie, data_dir.path()).await;
+
+    if let Some(chat_id) = only_chat(data_dir.path()) {
+        teardown(&deployment, &chat_id).await;
+    }
+    shutdown.send(()).expect("server should be listening");
+    server
+        .await
+        .expect("server task should not panic")
+        .expect("server should shut down cleanly");
+    assert_created(&created);
+}
+
+/// What the run leaves behind, gathered before anything is torn down so that
+/// a failed assertion cannot strand a container.
+struct Created {
+    status: StatusCode,
+    chat_id: Option<String>,
+    manifest: Option<Value>,
+    console: String,
+}
+
+async fn create_a_chat(address: SocketAddr, cookie: &str, data_dir: &Path) -> Created {
     let response = client()
         .post(format!("http://{address}/chats"))
-        .header("cookie", &cookie)
+        .header("cookie", cookie)
         .form(&[
             ("repo", REPO),
             ("base_branch", "main"),
@@ -69,27 +92,41 @@ async fn the_real_adapter_opens_a_session_inside_a_hardened_container() {
         .send()
         .await
         .expect("request");
+    let status = response.status();
+    let chat_id = only_chat(data_dir);
+    let manifest = chat_id.as_ref().and_then(|chat_id| {
+        let path = data_dir.join("chats").join(chat_id).join("manifest.json");
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|json| serde_json::from_str(&json).ok())
+    });
+    let console = client()
+        .get(format!("http://{address}/"))
+        .header("cookie", cookie)
+        .send()
+        .await
+        .expect("request")
+        .text()
+        .await
+        .expect("body");
+    Created {
+        status,
+        chat_id,
+        manifest,
+        console,
+    }
+}
 
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let chat_id = response
-        .headers()
-        .get("location")
-        .expect("a created chat redirects to itself")
-        .to_str()
-        .expect("a location is text")
-        .trim_start_matches("/chats/")
-        .to_owned();
-    let manifest: Value = serde_json::from_str(
-        &fs::read_to_string(
-            data_dir
-                .path()
-                .join("chats")
-                .join(&chat_id)
-                .join("manifest.json"),
-        )
-        .expect("the manifest should be readable"),
-    )
-    .expect("the manifest should be json");
+fn assert_created(created: &Created) {
+    assert_eq!(created.status, StatusCode::SEE_OTHER);
+    let chat_id = created
+        .chat_id
+        .as_ref()
+        .expect("the dataset should hold the new chat");
+    let manifest = created
+        .manifest
+        .as_ref()
+        .expect("the new chat should have a manifest");
     let session_id = manifest["acp_session_id"]
         .as_str()
         .expect("the real adapter should hand back a session id");
@@ -97,15 +134,7 @@ async fn the_real_adapter_opens_a_session_inside_a_hardened_container() {
         !session_id.is_empty(),
         "the adapter opened a session under no id"
     );
-    let console = client()
-        .get(format!("http://{address}/"))
-        .header("cookie", &cookie)
-        .send()
-        .await
-        .expect("request")
-        .text()
-        .await
-        .expect("body");
+    let console = &created.console;
     let live = console
         .find("<h2>Live</h2>")
         .expect("the console has groups");
@@ -113,19 +142,22 @@ async fn the_real_adapter_opens_a_session_inside_a_hardened_container() {
         .find("<h2>Parked</h2>")
         .expect("the console has groups");
     let row = console
-        .find(&chat_id)
+        .find(chat_id.as_str())
         .expect("the new chat should be on the console");
     assert!(
         live < row && row < parked,
         "the new chat is not live on the console: {console}"
     );
+}
 
-    teardown(&deployment, &chat_id).await;
-    shutdown.send(()).expect("server should be listening");
-    server
-        .await
-        .expect("server task should not panic")
-        .expect("server should shut down cleanly");
+/// The one chat the dataset holds, whether or not creating it got as far as
+/// the redirect: a chat that failed halfway may still own a container.
+fn only_chat(data_dir: &Path) -> Option<String> {
+    fs::read_dir(data_dir.join("chats"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| !name.starts_with('.'))
 }
 
 /// What this deployment needs before the test means anything: a daemon, the
@@ -136,7 +168,7 @@ struct Deployment {
 }
 
 fn deployment() -> Option<Deployment> {
-    let reachable = Path::new(DOCKER_SOCKET).exists() || std::env::var_os("DOCKER_HOST").is_some();
+    let reachable = socket_is_there();
     let image = std::env::var("CORCODE_WORKSPACE_IMAGE").ok();
     let anthropic_api_key = std::env::var("CORCODE_ANTHROPIC_API_KEY")
         .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
@@ -154,12 +186,19 @@ fn deployment() -> Option<Deployment> {
                     "no ANTHROPIC_API_KEY"
                 }
             } else {
-                "no docker daemon"
+                "no docker socket"
             };
             eprintln!("SKIPPED {TEST_NAME}: {missing}");
             None
         }
     }
+}
+
+/// Whether the socket bollard will open is there. `DOCKER_HOST` is no help:
+/// the local-defaults connector never reads it, so a `tcp://` daemon is a
+/// daemon this test cannot reach.
+fn socket_is_there() -> bool {
+    Path::new(DOCKER_SOCKET).exists()
 }
 
 /// The container the chat ran in, gone again whatever the test decided.

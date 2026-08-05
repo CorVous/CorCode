@@ -24,6 +24,7 @@ pub fn run() -> Result<()> {
 
 async fn serve(config: &Config) -> Result<()> {
     ChatStore::new(&config.data_dir).prepare()?;
+    let router = server::router(config, chats(config)?)?;
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;
@@ -32,16 +33,12 @@ async fn serve(config: &Config) -> Result<()> {
         config.bind_addr,
         config.data_dir.display()
     );
-    server::serve(
-        listener,
-        server::router(config, chats(config)?)?,
-        server::shutdown_signal(),
-    )
-    .await
+    server::serve(listener, router, server::shutdown_signal()).await
 }
 
 /// The dataset as this deployment reaches it: real containers, real adapters,
-/// real repositories on GitHub.
+/// real repositories on GitHub. Both Docker clients want the daemon's socket
+/// to be there before the address is taken.
 fn chats(config: &Config) -> Result<Chats<DockerPlane, DockerExec>> {
     let plane = DockerPlane::connect(PlaneSettings {
         image: config.workspace_image.clone(),
