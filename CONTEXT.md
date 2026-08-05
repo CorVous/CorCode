@@ -6,6 +6,12 @@ Code. Decisions live in `docs/adr/`; this file holds the vocabulary.
 
 ## Glossary
 
+- **Core** — the single long-running Rust service, run as a TrueNAS Custom
+  App: serves the htmx UI and auth (ADR-0003, ADR-0008), owns the warm
+  pool and workspace containers (ADR-0001, ADR-0002), speaks ACP to each
+  chat's adapter, appends the events log (ADR-0006), and reads the active
+  workspace-image tag from config, pulling it lazily at spawn (ADR-0004,
+  ADR-0009).
 - **Chat** — the durable unit of work: one conversation, one repo+branch,
   one persistent record under `chats/<chat-id>/`. Survives archive; the thing
   the UI lists. States: `open` or `archived` (ADR-0002, ADR-0006).
@@ -46,3 +52,7 @@ Code. Decisions live in `docs/adr/`; this file holds the vocabulary.
 - **Checkpoint branch** — `<branch>-chkpt-<stamp>`, minted by the
   close/archive gate when dirty state can't land on the chat branch
   (ADR-0005).
+- **Bump PR** — the weekly scheduled PR that moves the image's exact
+  `@anthropic-ai/claude-agent-sdk` override pin to the newest release;
+  merging it triggers the CI image build. The freshness loop's only
+  notification (ADR-0009).

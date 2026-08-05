@@ -1,7 +1,8 @@
 # ADR-0008: Web UI — one-screen-deep console, near-unstyled HTML
 
 Date: 2026-08-05
-Status: Accepted
+Status: Accepted, amended by ADR-0009 (dead-simple premise scoped to the
+app, not project tooling)
 Wayfinder: [decision #10](https://github.com/CorVous/CorCode/issues/10)
 
 ## Context
@@ -53,4 +54,7 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
 - Visual polish is consciously deferred; nothing in the DOM blocks a
   future stylesheet, but adding one is a new decision.
 - The dead-simple premise is recorded on the wayfinder map as standing
-  guidance for every remaining MVP decision, UI or not.
+  guidance for every remaining MVP decision, UI or not. _(Amended by
+  ADR-0009: the premise constrains the app — product surface and
+  architecture — not the project's tooling; CI and build automation are
+  fair game.)_

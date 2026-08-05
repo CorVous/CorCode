@@ -1,7 +1,8 @@
 # ADR-0004: One pinned workspace image, built on-box, minimal baked home
 
 Date: 2026-08-05
-Status: Accepted
+Status: Accepted, amended by ADR-0009 (build moved to CI/GHCR; SDK
+freshness override)
 Wayfinder: [decision #6](https://github.com/CorVous/CorCode/issues/6)
 
 ## Context
@@ -29,7 +30,10 @@ the Dockerfile — not the image store — is the artifact to preserve.
   MVP builds are a small script run by hand on the NAS shell — pull,
   `docker build`, stamp an **immutable date tag** (`corcode-workspace:
   YYYY-MM-DD`). The core reads the active tag from config: upgrade = build
-  and flip config, rollback = flip back. No registry, no CI.
+  and flip config, rollback = flip back. No registry, no CI. _(Amended by
+  ADR-0009: builds run in GitHub Actions and push to GHCR; the on-box
+  script is superseded. Date tags, config-held active tag, and
+  flip-to-upgrade/rollback all stand.)_
 - **Baked home** (image's non-root user): git identity (owner name + noreply
   email) and a skeleton Claude Code config with sane defaults. No personal
   dotfiles. Secrets stay env-at-spawn; per-repo instructions stay in each
