@@ -3,8 +3,11 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use tempfile::TempDir;
+
 #[tokio::test]
 async fn serve_binds_the_configured_address() {
+    let data_dir = TempDir::new().expect("temp dir should be creatable");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral port should bind");
     let addr = listener
         .local_addr()
@@ -13,7 +16,7 @@ async fn serve_binds_the_configured_address() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_cor-code"))
         .env_remove("RUST_LOG")
-        .env("CORCODE_DATA_DIR", "/tmp/corcode-serve-e2e")
+        .env("CORCODE_DATA_DIR", data_dir.path())
         .env("CORCODE_BIND_ADDR", addr.to_string())
         .env("CORCODE_USERNAME", "cassidy")
         .env(
