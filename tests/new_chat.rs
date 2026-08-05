@@ -152,6 +152,53 @@ async fn a_clone_that_fails_leaves_the_chat_on_disk_and_nothing_running() {
     app.stop().await;
 }
 
+#[tokio::test]
+async fn creating_a_chat_is_behind_the_session_gate() {
+    let app = TestApp::start().await;
+
+    let response = client()
+        .post(app.url("/chats"))
+        .form(&[("repo", REPO), ("base_branch", "main"), ("slug", "sneaked")])
+        .send()
+        .await
+        .expect("request");
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .expect("a turned-away request is sent to the login form")
+            .to_str()
+            .expect("a location is text"),
+        "/login"
+    );
+    assert_eq!(app.chats_on_disk(), 0, "an ungated chat was built");
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_chat_cannot_be_created_from_another_origin() {
+    let app = TestApp::start().await;
+
+    let response = client()
+        .post(app.url("/chats"))
+        .header("cookie", &app.cookie)
+        .header("origin", "http://evil.example")
+        .form(&[
+            ("repo", REPO),
+            ("base_branch", "main"),
+            ("slug", "cross-site"),
+        ])
+        .send()
+        .await
+        .expect("request");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(app.chats_on_disk(), 0, "a cross-site chat was built");
+    app.stop().await;
+}
+
 /// The chat id the redirect points a browser at.
 fn chat_id_of(response: &reqwest::Response) -> String {
     let location = response

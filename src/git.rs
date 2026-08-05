@@ -282,6 +282,28 @@ mod tests {
         assert!(dest.join("README.md").is_file());
     }
 
+    /// The workspace is bind-mounted into the agent's container (ADR-0001),
+    /// so anything git writes into `.git/config` is the agent's to read.
+    #[test]
+    fn a_clone_leaves_no_credential_behind_in_the_workspace() {
+        let (_origin_dir, origin) = credentialed_repository();
+        let into = TempDir::new().expect("clone target should be created");
+        let dest = into.path().join("workspace");
+
+        clone_at(&origin, "main", &dest).expect("the credentialed repo should clone");
+
+        let config = std::fs::read_to_string(dest.join(".git").join("config"))
+            .expect("a clone writes a config");
+        assert!(
+            !config.contains(TOKEN),
+            "the token was left where the agent can read it: {config}"
+        );
+        assert!(
+            git_says(&dest, &["remote", "get-url", "origin"]).contains("github.com"),
+            "the workspace was left pointing at nowhere it could push"
+        );
+    }
+
     #[test]
     fn a_clone_of_a_branch_that_is_not_there_fails_loudly() {
         let (_origin_dir, remotes) = seeded_repository();
@@ -343,16 +365,36 @@ mod tests {
     /// so that no test needs the network.
     fn seeded_repository() -> (TempDir, Remotes) {
         let dir = TempDir::new().expect("origin dir should be created");
-        let bare = dir.path().join(BARE);
-        let work = dir.path().join("seed");
+        seed(dir.path(), &dir.path().join(BARE));
+        let served_from = format!("file://{}", spelled(dir.path()));
+        (dir, Remotes::new(served_from, None))
+    }
+
+    /// A repository whose clone URL carries a credential the way GitHub's
+    /// does. The credential is spelled into a path a real clone can reach, so
+    /// what git writes into the workspace is the real thing.
+    fn credentialed_repository() -> (TempDir, Origin) {
+        let dir = TempDir::new().expect("origin dir should be created");
+        let bare = dir
+            .path()
+            .join(format!("{TOKEN_USER}:{TOKEN}@github.com"))
+            .join(BARE);
+        seed(dir.path(), &bare);
+        let origin = Origin {
+            url: format!("file://{}", spelled(&bare)),
+            token: Some(TOKEN.to_owned()),
+        };
+        (dir, origin)
+    }
+
+    /// Two commits on `main`, pushed into a bare repository at `bare`.
+    fn seed(dir: &Path, bare: &Path) {
+        let work = dir.join("seed");
         run(
-            dir.path(),
-            &["init", "--bare", "--initial-branch=main", &spelled(&bare)],
+            dir,
+            &["init", "--bare", "--initial-branch=main", &spelled(bare)],
         );
-        run(
-            dir.path(),
-            &["init", "--initial-branch=main", &spelled(&work)],
-        );
+        run(dir, &["init", "--initial-branch=main", &spelled(&work)]);
         run(&work, &["config", "user.email", "seed@example.invalid"]);
         run(&work, &["config", "user.name", "Seed"]);
         for (file, message) in [("README.md", "first"), ("second.txt", "second")] {
@@ -360,10 +402,8 @@ mod tests {
             run(&work, &["add", "."]);
             run(&work, &["commit", "-m", message]);
         }
-        run(&work, &["remote", "add", "origin", &spelled(&bare)]);
+        run(&work, &["remote", "add", "origin", &spelled(bare)]);
         run(&work, &["push", "origin", "main"]);
-        let served_from = format!("file://{}", spelled(dir.path()));
-        (dir, Remotes::new(served_from, None))
     }
 
     fn spelled(path: &Path) -> String {
