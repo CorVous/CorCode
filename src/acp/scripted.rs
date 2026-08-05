@@ -23,10 +23,20 @@ enum Answer {
 /// What the fake answers to each method it knows.
 type Script = BTreeMap<String, Answer>;
 
+/// Where a fake stops responding altogether, so that a client's patience can
+/// be proved rather than assumed.
+#[derive(Clone, Copy)]
+enum Stall {
+    Nowhere,
+    Starting,
+    Taking,
+}
+
 /// Answers ACP calls from a canned script and remembers what it was asked.
 pub struct ScriptedAdapter {
     answers: Arc<Script>,
     heard: Arc<Mutex<Heard>>,
+    stall: Stall,
 }
 
 /// Everything the fake was told, for the assertions to read back.
@@ -59,6 +69,20 @@ impl ScriptedAdapter {
         Self::reading(Script::new())
     }
 
+    /// An adapter whose start never finishes, as a wedged container's exec
+    /// does.
+    #[must_use]
+    pub fn never_starting() -> Self {
+        Self::stalling(Stall::Starting)
+    }
+
+    /// An adapter that starts and then never takes a message, as a pipe
+    /// nobody is draining does.
+    #[must_use]
+    pub fn never_taking() -> Self {
+        Self::stalling(Stall::Taking)
+    }
+
     /// The containers an adapter was started in, in order.
     #[must_use]
     pub fn containers(&self) -> Vec<String> {
@@ -82,6 +106,14 @@ impl ScriptedAdapter {
         Self {
             answers: Arc::new(script),
             heard: Arc::new(Mutex::new(Heard::default())),
+            stall: Stall::Nowhere,
+        }
+    }
+
+    fn stalling(stall: Stall) -> Self {
+        Self {
+            stall,
+            ..Self::reading(Script::new())
         }
     }
 
@@ -112,10 +144,14 @@ impl AcpTransport for ScriptedAdapter {
 
     async fn open(&self, container: &str) -> Result<Self::Channel, AcpError> {
         self.heard().containers.push(container.to_owned());
+        if matches!(self.stall, Stall::Starting) {
+            std::future::pending::<()>().await;
+        }
         Ok(ScriptedChannel {
             answers: Arc::clone(&self.answers),
             heard: Arc::clone(&self.heard),
             unread: VecDeque::new(),
+            stall: self.stall,
         })
     }
 }
@@ -125,10 +161,14 @@ pub struct ScriptedChannel {
     answers: Arc<Script>,
     heard: Arc<Mutex<Heard>>,
     unread: VecDeque<String>,
+    stall: Stall,
 }
 
 impl AcpChannel for ScriptedChannel {
     async fn send(&mut self, message: &str) -> Result<(), AcpError> {
+        if matches!(self.stall, Stall::Taking) {
+            std::future::pending::<()>().await;
+        }
         let request: Value = serde_json::from_str(message).expect("the client should send JSON");
         let method = request["method"].as_str().unwrap_or_default().to_owned();
         let id = request["id"].clone();

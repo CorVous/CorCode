@@ -253,6 +253,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_adapter_that_never_starts_gives_up_rather_than_hangs() {
+        let adapter = Adapter::waiting(ScriptedAdapter::never_starting(), IMPATIENT);
+
+        let error = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect_err("a start that never finishes should fail");
+
+        assert!(
+            format!("{error}").contains(CONTAINER),
+            "error should name the container that would not start an adapter, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adapter_that_never_takes_a_message_gives_up_rather_than_hangs() {
+        let adapter = Adapter::waiting(ScriptedAdapter::never_taking(), IMPATIENT);
+
+        let error = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect_err("a message that cannot be handed over should fail");
+
+        assert!(
+            format!("{error}").contains("initialize"),
+            "error should name the call that hung, got: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn an_adapter_that_says_nothing_gives_up_rather_than_hangs() {
         let adapter = Adapter::waiting(ScriptedAdapter::silent(), IMPATIENT);
 
