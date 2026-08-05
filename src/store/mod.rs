@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde_json::Value;
+use ulid::Ulid;
 
 pub use error::StoreError;
 pub use events::Event;
@@ -21,7 +22,6 @@ const CHATS_DIR: &str = "chats";
 const WORKSPACES_DIR: &str = "workspaces";
 const CLAUDE_DIR: &str = "claude";
 const MANIFEST_FILE: &str = "manifest.json";
-const MANIFEST_TEMP_FILE: &str = "manifest.json.tmp";
 const EVENTS_FILE: &str = "events.jsonl";
 
 /// Reader and writer of every chat under one dataset root.
@@ -89,7 +89,9 @@ impl ChatStore {
 
     /// Replace a chat's manifest in one atomic step.
     pub fn write_manifest(&self, manifest: &Manifest) -> Result<(), StoreError> {
-        let temp = self.chat_dir(&manifest.chat_id).join(MANIFEST_TEMP_FILE);
+        let temp = self
+            .chat_dir(&manifest.chat_id)
+            .join(format!("{MANIFEST_FILE}.{}.tmp", Ulid::generate()));
         let json = serde_json::to_string_pretty(manifest).expect("manifest should serialize");
         let mut file = File::create(&temp).map_err(StoreError::writing(&temp))?;
         writeln!(file, "{json}").map_err(StoreError::writing(&temp))?;
