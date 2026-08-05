@@ -32,6 +32,21 @@ async fn an_unauthenticated_request_is_sent_to_the_login_form() {
 }
 
 #[tokio::test]
+async fn a_route_outside_the_public_list_is_gated_without_opting_in() {
+    let app = TestApp::start().await;
+
+    let response = client()
+        .get(app.url("/a-route-a-later-increment-adds"))
+        .send()
+        .await
+        .expect("request");
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(location(&response), "/login");
+    app.stop().await;
+}
+
+#[tokio::test]
 async fn the_login_form_is_served_without_a_session() {
     let app = TestApp::start().await;
 
