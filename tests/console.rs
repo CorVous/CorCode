@@ -21,6 +21,9 @@ use cor_code::store::{ChatStore, Manifest, NewChat};
 const USERNAME: &str = "cassidy";
 const PASSWORD: &str = "correct horse battery staple";
 
+/// The one answer a chat id that is not a chat ever gets.
+const NO_SUCH_CHAT: &str = "No such chat.\n";
+
 #[tokio::test]
 async fn the_console_lists_a_chat_from_the_dataset() {
     let app = TestApp::start(with_fixture_chat()).await;
@@ -121,33 +124,56 @@ async fn the_console_is_still_behind_the_session_gate() {
 }
 
 #[tokio::test]
-async fn serving_a_fresh_dataset_creates_the_chats_dir_and_renders() {
-    let data_dir = TempDir::new().expect("temp dir");
-    let path = data_dir.path().to_path_buf();
+async fn a_fresh_dataset_renders_an_empty_console() {
+    let app = TestApp::start(TempDir::new().expect("temp dir")).await;
 
-    let app = TestApp::start(data_dir).await;
-
-    assert!(path.join("chats").is_dir(), "chats/ was not laid down");
     assert!(app.body("/").await.contains("<h2>Live</h2>"));
     app.stop().await;
 }
 
 #[tokio::test]
-async fn a_dataset_root_that_is_not_mounted_refuses_to_serve() {
-    let parent = TempDir::new().expect("temp dir");
-    let config = test_config(parent.path().join("unmounted"));
+async fn a_chat_id_that_climbs_out_of_the_dataset_is_not_a_chat() {
+    let (data_dir, _) = fixture_chat();
+    plant_secret(&data_dir);
+    let app = TestApp::start(data_dir).await;
 
-    let failure = server::router(&config, MemoryPlane::default())
-        .expect_err("a missing dataset root should not serve");
+    for path in [
+        "/chats/..%2Fsecret",
+        "/chats/%2e%2e%2fsecret",
+        "/chats/..%2f..%2f..%2fetc",
+    ] {
+        let response = app.get(path).await;
 
-    assert!(
-        format!("{failure:#}").contains("unmounted"),
-        "the failure does not name the dataset: {failure:#}"
-    );
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} was served");
+        assert_eq!(
+            response.text().await.expect("body"),
+            NO_SUCH_CHAT,
+            "{path} answered with more than a refusal"
+        );
+    }
+    app.stop().await;
 }
 
-/// A dataset holding one chat whose log covers a prompt, agent text, and an
-/// event shape this build has never heard of.
+#[tokio::test]
+async fn an_unknown_chat_id_says_nothing_about_the_filesystem() {
+    let (data_dir, _) = fixture_chat();
+    let vanished = vanished_chat(&data_dir);
+    let app = TestApp::start(data_dir).await;
+
+    let response = app.get(&format!("/chats/{vanished}")).await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.text().await.expect("body"),
+        NO_SUCH_CHAT,
+        "the body is a path oracle"
+    );
+    app.stop().await;
+}
+
+/// A dataset holding one chat whose log covers an outbound prompt, agent
+/// text, and an event shape this build has never heard of, in the shapes
+/// ADR-0006 records.
 fn fixture_chat() -> (TempDir, String) {
     let data_dir = TempDir::new().expect("temp dir should be creatable");
     let store = ChatStore::new(data_dir.path());
@@ -160,8 +186,14 @@ fn fixture_chat() -> (TempDir, String) {
         })
         .expect("fixture chat should be created");
     for payload in [
-        json!({"sessionUpdate": "user_message_chunk", "text": "ship the ladder"}),
-        json!({"sessionUpdate": "agent_message_chunk", "text": "on it"}),
+        json!({
+            "sessionId": "3f2b1c4d-0000-4000-8000-000000000001",
+            "prompt": [{"type": "text", "text": "ship the ladder"}],
+        }),
+        json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "on it"},
+        }),
         json!({"sessionUpdate": "plan", "entries": []}),
     ] {
         store
@@ -174,6 +206,43 @@ fn fixture_chat() -> (TempDir, String) {
 
 fn with_fixture_chat() -> TempDir {
     fixture_chat().0
+}
+
+/// A chat dir planted outside `chats/`, where no URL should reach it.
+fn plant_secret(data_dir: &TempDir) {
+    let secret = data_dir.path().join("secret");
+    fs::create_dir_all(&secret).expect("secret dir should be creatable");
+    let manifest = json!({
+        "schema": 1,
+        "chat_id": "secret",
+        "title": "TOP SECRET",
+        "state": "open",
+        "repo": "CorVous/CorCode",
+        "branch": "secret",
+        "base_branch": "main",
+        "last_pushed_commit": null,
+        "acp_session_id": null,
+        "created_at": "2026-08-05T00:00:00Z",
+        "last_active_at": "2026-08-05T00:00:00Z",
+    });
+    fs::write(secret.join("manifest.json"), manifest.to_string())
+        .expect("secret manifest should be writable");
+    fs::write(secret.join("events.jsonl"), "").expect("secret log should be writable");
+}
+
+/// A well-formed chat id with nothing behind it: minted, then removed.
+fn vanished_chat(data_dir: &TempDir) -> String {
+    let store = ChatStore::new(data_dir.path());
+    let manifest = store
+        .create_chat(NewChat {
+            title: "Gone".to_owned(),
+            repo: "CorVous/CorCode".to_owned(),
+            branch: "chat/2026-08-05-gone".to_owned(),
+            base_branch: "main".to_owned(),
+        })
+        .expect("chat should be created");
+    fs::remove_dir_all(store.chat_dir(&manifest.chat_id)).expect("chat dir should be removable");
+    manifest.chat_id
 }
 
 struct TestApp {
@@ -191,6 +260,9 @@ impl TestApp {
             .expect("ephemeral port should bind");
         let address = listener.local_addr().expect("listener reports its address");
         let config = test_config(data_dir.path().to_path_buf());
+        ChatStore::new(data_dir.path())
+            .prepare()
+            .expect("the dataset should prepare, as serving does");
         let router = server::router(&config, MemoryPlane::default()).expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {

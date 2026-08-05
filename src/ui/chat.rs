@@ -118,11 +118,76 @@ mod tests {
             .unwrap_or_else(|| panic!("{needle} is missing from: {rendered}"))
     }
 
+    /// The outbound `session/prompt` the core records for the user (ADR-0006).
+    fn outbound_prompt(said: &str) -> Value {
+        json!({
+            "sessionId": "3f2b1c4d-0000-4000-8000-000000000001",
+            "prompt": [{"type": "text", "text": said}],
+        })
+    }
+
+    /// An inbound `sessionUpdate` chunk, text inside a content block.
+    fn chunk(update: &str, said: &str) -> Value {
+        json!({"sessionUpdate": update, "content": {"type": "text", "text": said}})
+    }
+
+    #[test]
+    fn an_outbound_prompt_renders_as_the_users_own_block() {
+        let events = log(&[outbound_prompt("ship the ladder")]);
+
+        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+
+        assert!(
+            rendered.contains("<b>you:</b> ship the ladder"),
+            "the prompt is not the user's own block: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_of_several_content_blocks_reads_as_one() {
+        let events = log(&[json!({
+            "sessionId": "s",
+            "prompt": [
+                {"type": "text", "text": "ship "},
+                {"type": "resource_link", "uri": "file:///workspace/src/ui/chat.rs"},
+                {"type": "text", "text": "the ladder"},
+            ],
+        })]);
+
+        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+
+        assert!(
+            rendered.contains("<b>you:</b> ship the ladder"),
+            "the prompt's text blocks did not join up: {rendered}"
+        );
+    }
+
+    #[test]
+    fn agent_text_comes_out_of_its_content_block() {
+        let events = log(&[chunk("agent_message_chunk", "on it")]);
+
+        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+
+        assert!(
+            rendered.contains("<p>on it</p>"),
+            "the agent's words vanished: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_replayed_user_chunk_reads_as_the_user_too() {
+        let events = log(&[chunk("user_message_chunk", "ship the ladder")]);
+
+        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+
+        assert!(rendered.contains("<b>you:</b> ship the ladder"));
+    }
+
     #[test]
     fn prompts_and_agent_text_render_in_the_order_they_happened() {
         let events = log(&[
-            json!({"sessionUpdate": "user_message_chunk", "text": "ship the ladder"}),
-            json!({"sessionUpdate": "agent_message_chunk", "text": "on it"}),
+            outbound_prompt("ship the ladder"),
+            chunk("agent_message_chunk", "on it"),
         ]);
 
         let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
@@ -135,13 +200,34 @@ mod tests {
 
     #[test]
     fn a_tool_call_renders_as_a_small_inline_line() {
-        let events = log(&[json!({"sessionUpdate": "tool_call", "title": "git commit"})]);
+        let events = log(&[json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_1",
+            "title": "git commit",
+            "kind": "execute",
+            "status": "pending",
+        })]);
 
         let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
 
         assert!(
             rendered.contains("<small>git commit</small>"),
             "the tool call is not a small inline line: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_core_injected_reset_notice_renders_as_a_block_quote() {
+        let events = log(&[json!({
+            "corcode": "reset_notice",
+            "text": "Agent memory was reset; the log below is the whole record.",
+        })]);
+
+        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+
+        assert!(
+            rendered.contains("<blockquote>Agent memory was reset"),
+            "the reset notice is not a block quote: {rendered}"
         );
     }
 
@@ -202,6 +288,15 @@ mod tests {
     }
 
     #[test]
+    fn the_chat_view_styles_itself_only_from_the_stylesheet() {
+        let events = log(&[chunk("agent_message_chunk", "on it")]);
+
+        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+
+        crate::ui::tests::assert_styling_is_only_the_stylesheet(&rendered);
+    }
+
+    #[test]
     fn the_prompt_box_is_inert() {
         let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &[]);
 
@@ -213,9 +308,7 @@ mod tests {
 
     #[test]
     fn agent_text_cannot_smuggle_markup_into_the_log() {
-        let events = log(&[
-            json!({"sessionUpdate": "agent_message_chunk", "text": "<script>alert(1)</script>"}),
-        ]);
+        let events = log(&[chunk("agent_message_chunk", "<script>alert(1)</script>")]);
 
         let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
 

@@ -319,6 +319,16 @@ mod tests {
     }
 
     #[test]
+    fn the_branch_preview_slugifies_what_you_type() {
+        let rendered = console_page(&[], IMAGE);
+
+        assert!(
+            rendered.contains("toLowerCase()") && rendered.contains("[^a-z0-9]+"),
+            "the preview would show a slug no branch could carry: {rendered}"
+        );
+    }
+
+    #[test]
     fn nothing_on_the_console_can_be_submitted_yet() {
         let rendered = console_page(&every_state(), IMAGE);
 

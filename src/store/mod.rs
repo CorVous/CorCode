@@ -491,8 +491,11 @@ mod tests {
             .create_chat(new_chat("events"))
             .expect("chat should be created");
         let payloads = [
-            json!({"sessionUpdate": "user_message_chunk", "text": "hello"}),
-            json!({"sessionUpdate": "agent_message_chunk", "text": "hi"}),
+            json!({"sessionId": "s", "prompt": [{"type": "text", "text": "hello"}]}),
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "hi"},
+            }),
         ];
         for payload in &payloads {
             store
@@ -516,7 +519,7 @@ mod tests {
             .create_chat(new_chat("torn"))
             .expect("chat should be created");
         store
-            .append_event(&manifest.chat_id, &json!({"sessionUpdate": "plan"}))
+            .append_event(&manifest.chat_id, &json!({"sessionUpdate": "plan", "entries": []}))
             .expect("event should append");
         let path = store.chat_dir(&manifest.chat_id).join(EVENTS_FILE);
         let torn = format!(

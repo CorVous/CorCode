@@ -91,6 +91,25 @@ mod tests {
         }
     }
 
+    /// ADR-0008's budget only means anything if the stylesheet is the whole
+    /// of the styling: one `<style>` block and no inline attribute anywhere.
+    pub fn assert_styling_is_only_the_stylesheet(rendered: &str) {
+        assert_eq!(
+            rendered.matches("<style>").count(),
+            1,
+            "styling is not one block: {rendered}"
+        );
+        assert!(
+            !rendered.contains("style=\""),
+            "an inline style slipped past the budget: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_console_styles_itself_only_from_the_stylesheet() {
+        assert_styling_is_only_the_stylesheet(&console_page(&[], "ghcr.io/corvous/x:2026-08-05"));
+    }
+
     #[test]
     fn every_page_asks_for_the_mobile_viewport() {
         assert!(
