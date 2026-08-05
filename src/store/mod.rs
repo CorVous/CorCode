@@ -5,8 +5,11 @@ mod events;
 mod liveness;
 mod manifest;
 
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use serde_json::Value;
 
 pub use error::StoreError;
@@ -18,6 +21,7 @@ const CHATS_DIR: &str = "chats";
 const WORKSPACES_DIR: &str = "workspaces";
 const CLAUDE_DIR: &str = "claude";
 const MANIFEST_FILE: &str = "manifest.json";
+const MANIFEST_TEMP_FILE: &str = "manifest.json.tmp";
 const EVENTS_FILE: &str = "events.jsonl";
 
 /// Reader and writer of every chat under one dataset root.
@@ -50,31 +54,106 @@ impl ChatStore {
     }
 
     /// Lay down both trees for a new chat and persist its manifest.
-    pub fn create_chat(&self, _new_chat: NewChat) -> Result<Manifest, StoreError> {
-        todo!("B3")
+    pub fn create_chat(&self, new_chat: NewChat) -> Result<Manifest, StoreError> {
+        let manifest = Manifest::open(new_chat);
+        let chat_id = &manifest.chat_id;
+        for dir in [self.claude_dir(chat_id), self.workspace_dir(chat_id)] {
+            fs::create_dir_all(&dir).map_err(StoreError::writing(&dir))?;
+        }
+        let events = self.events_path(chat_id);
+        File::create_new(&events).map_err(StoreError::writing(&events))?;
+        self.write_manifest(&manifest)?;
+        Ok(manifest)
     }
 
     /// Every chat on disk, most recently active first.
     pub fn scan(&self) -> Result<Vec<Manifest>, StoreError> {
-        todo!("B3")
+        let chats = self.root.join(CHATS_DIR);
+        let mut manifests = Vec::new();
+        for entry in fs::read_dir(&chats).map_err(StoreError::reading(&chats))? {
+            let entry = entry.map_err(StoreError::reading(&chats))?;
+            manifests.push(read_manifest_at(&entry.path().join(MANIFEST_FILE))?);
+        }
+        manifests.sort_by(|left, right| {
+            right
+                .last_active_at
+                .cmp(&left.last_active_at)
+                .then_with(|| left.chat_id.cmp(&right.chat_id))
+        });
+        Ok(manifests)
     }
 
-    pub fn read_manifest(&self, _chat_id: &str) -> Result<Manifest, StoreError> {
-        todo!("B3")
+    pub fn read_manifest(&self, chat_id: &str) -> Result<Manifest, StoreError> {
+        read_manifest_at(&self.manifest_path(chat_id))
     }
 
     /// Replace a chat's manifest in one atomic step.
-    pub fn write_manifest(&self, _manifest: &Manifest) -> Result<(), StoreError> {
-        todo!("B3")
+    pub fn write_manifest(&self, manifest: &Manifest) -> Result<(), StoreError> {
+        let chat_dir = self.chat_dir(&manifest.chat_id);
+        let temp = chat_dir.join(MANIFEST_TEMP_FILE);
+        let json = serde_json::to_string_pretty(manifest).expect("manifest should serialize");
+        let mut file = File::create(&temp).map_err(StoreError::writing(&temp))?;
+        writeln!(file, "{json}").map_err(StoreError::writing(&temp))?;
+        file.sync_all().map_err(StoreError::writing(&temp))?;
+        let path = chat_dir.join(MANIFEST_FILE);
+        fs::rename(&temp, &path).map_err(StoreError::writing(&path))
     }
 
     /// Append one ACP payload to the chat's display record, flushed on return.
-    pub fn append_event(&self, _chat_id: &str, _event: &Value) -> Result<(), StoreError> {
-        todo!("B3")
+    pub fn append_event(&self, chat_id: &str, event: &Value) -> Result<(), StoreError> {
+        let line = serde_json::to_string(&Event {
+            ts: Utc::now(),
+            event: event.clone(),
+        })
+        .expect("event should serialize");
+        let path = self.events_path(chat_id);
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .map_err(StoreError::writing(&path))?;
+        writeln!(file, "{line}").map_err(StoreError::writing(&path))?;
+        file.flush().map_err(StoreError::writing(&path))
     }
 
-    pub fn read_events(&self, _chat_id: &str) -> Result<Vec<Event>, StoreError> {
-        todo!("B3")
+    pub fn read_events(&self, chat_id: &str) -> Result<Vec<Event>, StoreError> {
+        let path = self.events_path(chat_id);
+        let log = fs::read_to_string(&path).map_err(StoreError::reading(&path))?;
+        log.lines()
+            .enumerate()
+            .map(|(index, line)| {
+                serde_json::from_str(line).map_err(|source| StoreError::Event {
+                    path: path.clone(),
+                    line: index + 1,
+                    source,
+                })
+            })
+            .collect()
+    }
+
+    fn manifest_path(&self, chat_id: &str) -> PathBuf {
+        self.chat_dir(chat_id).join(MANIFEST_FILE)
+    }
+
+    fn events_path(&self, chat_id: &str) -> PathBuf {
+        self.chat_dir(chat_id).join(EVENTS_FILE)
+    }
+}
+
+/// Read one manifest, refusing anything this build does not understand
+/// (ADR-0007 rule 5: no auto-repair, no skipping).
+fn read_manifest_at(path: &Path) -> Result<Manifest, StoreError> {
+    let json = fs::read_to_string(path).map_err(StoreError::reading(path))?;
+    let manifest: Manifest = serde_json::from_str(&json).map_err(|source| StoreError::Manifest {
+        path: path.to_owned(),
+        source,
+    })?;
+    if manifest.schema == MANIFEST_SCHEMA {
+        Ok(manifest)
+    } else {
+        Err(StoreError::ManifestSchema {
+            path: path.to_owned(),
+            schema: manifest.schema,
+        })
     }
 }
 

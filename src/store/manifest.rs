@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use ulid::Ulid;
 
 /// The only manifest schema this build understands.
 pub const MANIFEST_SCHEMA: u32 = 1;
@@ -43,7 +44,20 @@ pub struct NewChat {
 impl Manifest {
     /// Open a brand new chat under a freshly minted id.
     #[must_use]
-    pub fn open(_new_chat: NewChat) -> Self {
-        todo!("B3")
+    pub fn open(new_chat: NewChat) -> Self {
+        let now = Utc::now();
+        Self {
+            schema: MANIFEST_SCHEMA,
+            chat_id: Ulid::generate().to_string(),
+            title: new_chat.title,
+            state: ChatState::Open,
+            repo: new_chat.repo,
+            branch: new_chat.branch,
+            base_branch: new_chat.base_branch,
+            last_pushed_commit: None,
+            acp_session_id: None,
+            created_at: now,
+            last_active_at: now,
+        }
     }
 }

@@ -22,8 +22,12 @@ pub enum RuntimeStatus {
 
 /// Derive a chat's runtime status; `parked` exists only here, never on disk.
 #[must_use]
-pub fn runtime_status(_manifest: &Manifest, _live_chat_ids: &HashSet<String>) -> RuntimeStatus {
-    todo!("B3")
+pub fn runtime_status(manifest: &Manifest, live_chat_ids: &HashSet<String>) -> RuntimeStatus {
+    match manifest.state {
+        ChatState::Archived => RuntimeStatus::Archived,
+        ChatState::Open if live_chat_ids.contains(&manifest.chat_id) => RuntimeStatus::Live,
+        ChatState::Open => RuntimeStatus::Parked,
+    }
 }
 
 #[cfg(test)]
