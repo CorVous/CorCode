@@ -56,7 +56,6 @@ RUN pinned="$(node -p 'require("/opt/corcode-agent/package.json").overrides["@an
     fi
 
 COPY managed-settings.json /etc/claude-code/managed-settings.json
-COPY agent-instructions.md /etc/claude-code/CLAUDE.md
 COPY stop-hook.sh /usr/local/bin/corcode-stop-hook
 RUN chmod 0755 /usr/local/bin/corcode-stop-hook
 
