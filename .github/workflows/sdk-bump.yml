@@ -1,0 +1,70 @@
+name: SDK bump
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Move the pins to the newest releases
+        id: pins
+        working-directory: docker/workspace
+        run: |
+          set -euo pipefail
+          paths=(
+            'dependencies.@zed-industries/claude-agent-acp'
+            'overrides.@anthropic-ai/claude-agent-sdk'
+          )
+          changed=false
+          summary=''
+          for path in "${paths[@]}"; do
+            package="${path#*.}"
+            pinned="$(npm pkg get "$path" | tr -d '"')"
+            case "$pinned" in
+              ''|*[!0-9.]*)
+                echo "no exact version pinned at $path: $pinned" >&2
+                exit 1
+                ;;
+            esac
+            latest="$(npm view "$package" version)"
+            if [ "$pinned" != "$latest" ]; then
+              npm pkg set "$path=$latest"
+              summary+="- \`$package\`: $pinned -> $latest"$'\n'
+              changed=true
+            fi
+          done
+          {
+            echo "changed=$changed"
+            echo 'summary<<PINS'
+            printf '%s' "$summary"
+            echo 'PINS'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Relock the dependency tree
+        if: steps.pins.outputs.changed == 'true'
+        working-directory: docker/workspace
+        run: npm install --package-lock-only --no-audit --no-fund
+
+      - name: Open the bump PR
+        if: steps.pins.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: bump/claude-agent-pins
+          delete-branch: true
+          title: 'Bump the pinned Claude agent versions'
+          commit-message: 'Bump the pinned Claude agent versions'
+          body: |
+            Newer releases are on npm:
+
+            ${{ steps.pins.outputs.summary }}
+            Merging rebuilds the workspace image and pushes a fresh date tag
+            (ADR-0009). The build only tags an image whose ACP handshake
+            smoke test passes.
