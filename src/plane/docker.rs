@@ -328,7 +328,7 @@ mod tests {
             Some(vec!["no-new-privileges:true".to_owned()])
         );
         assert_ne!(host_config.privileged, Some(true));
-        assert_eq!(body().user, Some(AGENT_USER.to_owned()));
+        assert_eq!(body().user, Some("1000:1000".to_owned()));
     }
 
     #[test]
@@ -339,8 +339,8 @@ mod tests {
         assert_eq!(
             host_config.tmpfs,
             Some(HashMap::from([(
-                SCRATCH_MOUNT.to_owned(),
-                SCRATCH_OPTIONS.to_owned()
+                "/tmp".to_owned(),
+                "rw,nosuid,nodev,noexec,size=256m".to_owned()
             )]))
         );
         assert_eq!(
@@ -360,7 +360,7 @@ mod tests {
 
         assert_eq!(host_config.memory, Some(512 * 1024 * 1024));
         assert_eq!(host_config.nano_cpus, Some(3_000_000_000));
-        assert_eq!(host_config.network_mode, Some(NETWORK.to_owned()));
+        assert_eq!(host_config.network_mode, Some("corcode-agents".to_owned()));
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
         assert_eq!(
             body.labels,
             Some(HashMap::from([(
-                CHAT_ID_LABEL.to_owned(),
+                "corcode.chat-id".to_owned(),
                 CHAT_ID.to_owned()
             )]))
         );

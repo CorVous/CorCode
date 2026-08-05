@@ -62,7 +62,6 @@ impl ContainerLiveness for MemoryPlane {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::plane::container_name;
     use crate::store::{ChatState, MANIFEST_SCHEMA, Manifest, RuntimeStatus, runtime_status};
 
     use super::*;
@@ -88,7 +87,7 @@ mod tests {
         let container = spawn(&plane, "01K1TESTCHATID0000000000").await;
 
         assert_eq!(container.chat_id, "01K1TESTCHATID0000000000");
-        assert_eq!(container.name, container_name("01K1TESTCHATID0000000000"));
+        assert_eq!(container.name, "corcode-chat-01K1TESTCHATID0000000000");
         assert_eq!(
             plane.list_live().await.expect("liveness should answer"),
             HashSet::from(["01K1TESTCHATID0000000000".to_owned()])
