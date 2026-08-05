@@ -22,19 +22,29 @@ pub struct LoginLimiter {
 impl LoginLimiter {
     /// Whether login attempts are being refused right now.
     #[must_use]
-    pub fn is_locked(&self, _now: SystemTime) -> bool {
-        todo!()
+    pub fn is_locked(&self, now: SystemTime) -> bool {
+        self.locked_until.is_some_and(|until| until > now)
     }
 
     /// Count a rejected attempt, extending the lockout.
-    pub fn record_failure(&mut self, _now: SystemTime) {
-        todo!()
+    pub fn record_failure(&mut self, now: SystemTime) {
+        self.failures = self.failures.saturating_add(1);
+        if let Some(excess) = self.failures.checked_sub(FREE_ATTEMPTS) {
+            self.locked_until = Some(now + lockout(excess));
+        }
     }
 
     /// Forget past failures after a successful login.
-    pub fn record_success(&mut self) {
-        todo!()
+    pub const fn record_success(&mut self) {
+        self.failures = 0;
+        self.locked_until = None;
     }
+}
+
+/// The lockout earned by a failure `excess` attempts past the threshold.
+fn lockout(excess: u32) -> Duration {
+    let doubling = 1u32.checked_shl(excess).unwrap_or(u32::MAX);
+    FIRST_LOCKOUT.saturating_mul(doubling).min(LONGEST_LOCKOUT)
 }
 
 #[cfg(test)]
