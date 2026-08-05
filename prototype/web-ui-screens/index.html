@@ -1,0 +1,827 @@
+<!-- PROTOTYPE — throwaway. Three variants of the CorCode MVP web UI (wayfinder ticket #10),
+     switchable via the floating bar or ←/→ keys. Hash routes: #/<variant>/<screen>.
+     Open this file directly in a browser; no build, no server. -->
+<title>CorCode UI Prototype</title>
+<style>
+  /* ---------- wrapper (not part of the design under evaluation) ---------- */
+  :root {
+    --wrap-bg: #e8e9ec;
+    --wrap-fg: #17181a;
+    --pill-bg: #17181a;
+    --pill-fg: #f5f5f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --wrap-bg: #0c0d0f; --wrap-fg: #e8e9ec; --pill-bg: #f5f5f4; --pill-fg: #17181a; }
+  }
+  :root[data-theme="dark"] { --wrap-bg: #0c0d0f; --wrap-fg: #e8e9ec; --pill-bg: #f5f5f4; --pill-fg: #17181a; }
+  :root[data-theme="light"] { --wrap-bg: #e8e9ec; --wrap-fg: #17181a; --pill-bg: #17181a; --pill-fg: #f5f5f4; }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--wrap-bg); color: var(--wrap-fg);
+    font-family: system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  .phone {
+    max-width: 430px; margin: 0 auto; min-height: 100vh;
+    display: flex; flex-direction: column; position: relative;
+    box-shadow: 0 0 0 1px rgb(128 128 128 / .25);
+  }
+  @media (max-width: 430px) { .phone { box-shadow: none; } }
+
+  .switcher {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    z-index: 99; display: flex; align-items: center; gap: 2px;
+    background: var(--pill-bg); color: var(--pill-fg);
+    border-radius: 999px; padding: 4px 6px;
+    box-shadow: 0 4px 16px rgb(0 0 0 / .35);
+    font: 600 13px/1 system-ui, sans-serif;
+  }
+  .switcher button {
+    background: none; border: 0; color: inherit; font: inherit;
+    padding: 6px 10px; cursor: pointer; border-radius: 999px;
+  }
+  .switcher button:hover { background: rgb(128 128 128 / .3); }
+  .switcher button:focus-visible { outline: 2px solid currentColor; }
+  .switcher .lbl { padding: 0 6px; min-width: 120px; text-align: center; }
+
+  /* ============================================================
+     VARIANT A — "Inbox" (messenger idiom)
+     ============================================================ */
+  .va {
+    --bg: #f4f6f9; --card: #ffffff; --ink: #1c2530; --dim: #66707d;
+    --line: #e2e7ee; --accent: #2563b0; --accent-ink: #ffffff;
+    --live: #2e9e5b; --parked: #c98a1b; --archived: #8b93a0;
+    --bubble-me: #2563b0; --bubble-me-ink: #ffffff; --bubble-ag: #e9edf3;
+    background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    .va { --bg: #12161c; --card: #1b212a; --ink: #e6eaf0; --dim: #8d97a5;
+          --line: #2a323d; --accent: #5b96d6; --accent-ink: #0e1319;
+          --bubble-me: #2b5c94; --bubble-me-ink: #eaf1f9; --bubble-ag: #232b36; }
+  }
+  :root[data-theme="dark"] .va { --bg: #12161c; --card: #1b212a; --ink: #e6eaf0; --dim: #8d97a5;
+          --line: #2a323d; --accent: #5b96d6; --accent-ink: #0e1319;
+          --bubble-me: #2b5c94; --bubble-me-ink: #eaf1f9; --bubble-ag: #232b36; }
+  :root[data-theme="light"] .va { --bg: #f4f6f9; --card: #ffffff; --ink: #1c2530; --dim: #66707d;
+          --line: #e2e7ee; --accent: #2563b0; --accent-ink: #ffffff;
+          --bubble-me: #2563b0; --bubble-me-ink: #ffffff; --bubble-ag: #e9edf3; }
+
+  .va { display: flex; flex-direction: column; flex: 1; }
+  .va .top {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px 10px; background: var(--bg);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .va .top h1 { font-size: 22px; margin: 0; flex: 1; letter-spacing: -.02em; }
+  .va .top .sub { font-size: 12px; color: var(--dim); }
+  .va .iconbtn {
+    width: 34px; height: 34px; border-radius: 50%; border: 0;
+    background: var(--accent); color: var(--accent-ink);
+    font-size: 20px; line-height: 1; cursor: pointer;
+  }
+  .va .iconbtn.ghost { background: var(--card); color: var(--ink); border: 1px solid var(--line); font-size: 16px; }
+  .va .rows { flex: 1; overflow-y: auto; padding-bottom: 120px; }
+  .va .row {
+    display: flex; gap: 12px; align-items: center;
+    padding: 12px 16px; background: none; border: 0; width: 100%;
+    text-align: left; cursor: pointer; font: inherit; color: inherit;
+  }
+  .va .row + .row { border-top: 1px solid var(--line); }
+  .va .row:hover { background: var(--card); }
+  .va .avatar {
+    width: 44px; height: 44px; border-radius: 14px; flex: none;
+    display: grid; place-items: center; font-weight: 700; font-size: 16px;
+    background: var(--accent); color: var(--accent-ink); position: relative;
+  }
+  .va .avatar.alt { background: #7c5bd6; }
+  .va .dot {
+    position: absolute; right: -2px; bottom: -2px; width: 12px; height: 12px;
+    border-radius: 50%; border: 2px solid var(--bg);
+  }
+  .va .dot.live { background: var(--live); }
+  .va .dot.parked { background: var(--parked); }
+  .va .dot.archived { background: var(--archived); }
+  .va .row .mid { flex: 1; min-width: 0; }
+  .va .row .name { font-weight: 600; font-size: 15px; }
+  .va .row .snippet {
+    font-size: 13px; color: var(--dim); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; margin-top: 2px;
+  }
+  .va .row .meta { text-align: right; font-size: 11px; color: var(--dim); flex: none; }
+  .va .row .meta .state { display: block; margin-top: 3px; font-weight: 600; text-transform: capitalize; }
+  .va .row .meta .state.live { color: var(--live); }
+  .va .row .meta .state.parked { color: var(--parked); }
+  .va .section-label {
+    padding: 14px 16px 4px; font-size: 11px; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--dim);
+  }
+  .va .tabs {
+    position: sticky; bottom: 0; display: flex; border-top: 1px solid var(--line);
+    background: var(--card); z-index: 5;
+  }
+  .va .tabs button {
+    flex: 1; padding: 10px 0 14px; background: none; border: 0; cursor: pointer;
+    font: 600 11px system-ui, sans-serif; color: var(--dim);
+  }
+  .va .tabs button .ic { display: block; font-size: 20px; margin-bottom: 2px; }
+  .va .tabs button.on { color: var(--accent); }
+
+  /* A: chat view */
+  .va .chat-head {
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+    background: var(--card); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 5;
+  }
+  .va .chat-head .back { background: none; border: 0; font-size: 22px; color: var(--accent); cursor: pointer; padding: 4px 6px; }
+  .va .chat-head .t { flex: 1; min-width: 0; }
+  .va .chat-head .t .n { font-weight: 700; font-size: 15px; }
+  .va .chat-head .t .b { font-size: 11px; color: var(--dim); font-family: ui-monospace, monospace; }
+  .va .chat-head .st { font-size: 11px; font-weight: 700; }
+  .va .chat-head .st.live { color: var(--live); }
+  .va .chat-head .st.parked { color: var(--parked); }
+  .va .chat-head .st.archived { color: var(--archived); }
+  .va .msgs { flex: 1; overflow-y: auto; padding: 12px 12px 140px; display: flex; flex-direction: column; gap: 10px; }
+  .va .bubble { max-width: 82%; padding: 9px 13px; border-radius: 18px; font-size: 14px; line-height: 1.45; }
+  .va .bubble.me { align-self: flex-end; background: var(--bubble-me); color: var(--bubble-me-ink); border-bottom-right-radius: 6px; }
+  .va .bubble.agent { align-self: flex-start; background: var(--bubble-ag); border-bottom-left-radius: 6px; }
+  .va .chip {
+    align-self: flex-start; display: inline-flex; gap: 6px; align-items: center;
+    font: 500 12px ui-monospace, monospace; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px;
+  }
+  .va .sysline { align-self: center; font-size: 11px; color: var(--dim); text-align: center; }
+  .va .sysline code { font-family: ui-monospace, monospace; }
+  .va .notice {
+    align-self: stretch; border: 1px dashed var(--parked); border-radius: 12px;
+    padding: 10px 12px; font-size: 12.5px; color: var(--ink); background: color-mix(in srgb, var(--parked) 8%, transparent);
+  }
+  .va .notice b { color: var(--parked); }
+  .va .inputbar {
+    position: sticky; bottom: 0; display: flex; gap: 8px; padding: 10px 12px 14px;
+    background: var(--bg); border-top: 1px solid var(--line);
+  }
+  .va .inputbar input {
+    flex: 1; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    border-radius: 999px; padding: 10px 16px; font: 14px system-ui, sans-serif;
+  }
+  .va .inputbar button {
+    border: 0; background: var(--accent); color: var(--accent-ink);
+    border-radius: 999px; padding: 0 16px; font-weight: 700; cursor: pointer;
+  }
+  .va .parkhint { position: sticky; bottom: 62px; margin: 0 12px; text-align: center; font-size: 11.5px; color: var(--parked); }
+
+  /* A: new chat wizard */
+  .va .wiz { padding: 16px; display: flex; flex-direction: column; gap: 18px; padding-bottom: 120px; }
+  .va .wiz h2 { margin: 0; font-size: 20px; }
+  .va .steps { display: flex; gap: 6px; }
+  .va .steps span { flex: 1; height: 4px; border-radius: 2px; background: var(--line); }
+  .va .steps span.on { background: var(--accent); }
+  .va .field label { display: block; font-size: 12px; font-weight: 700; color: var(--dim); margin-bottom: 6px; }
+  .va .field input, .va .field select {
+    width: 100%; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    border-radius: 12px; padding: 12px 14px; font: 15px system-ui, sans-serif;
+  }
+  .va .hint { font-size: 12px; color: var(--dim); margin-top: 6px; }
+  .va .hint code { font-family: ui-monospace, monospace; }
+  .va .togglerow { display: flex; align-items: center; gap: 10px; font-size: 13.5px; }
+  .va .cta {
+    border: 0; background: var(--accent); color: var(--accent-ink); border-radius: 14px;
+    padding: 14px; font: 700 15px system-ui, sans-serif; cursor: pointer;
+  }
+
+  /* A: machines */
+  .va .mach { padding: 16px; display: flex; flex-direction: column; gap: 12px; padding-bottom: 120px; }
+  .va .mcard { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; }
+  .va .mcard .k { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); }
+  .va .mcard .v { font-size: 15px; margin-top: 4px; }
+  .va .mcard .v code { font-family: ui-monospace, monospace; font-size: 13px; }
+
+  /* ============================================================
+     VARIANT B — "Console" (ops-log idiom)
+     ============================================================ */
+  .vb {
+    --bg: #f7f6f2; --ink: #24251f; --dim: #7b7b70; --line: #dedcd2;
+    --accent: #a8530e; --live: #3d7a2f; --parked: #a8760e; --err: #b3362a;
+    --strip: #eceade;
+    background: var(--bg); color: var(--ink);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+  @media (prefers-color-scheme: dark) {
+    .vb { --bg: #101210; --ink: #d9dbd2; --dim: #7d8177; --line: #262a24;
+          --accent: #e08a45; --live: #7bc266; --parked: #d4a545; --err: #e06a5e;
+          --strip: #161a15; }
+  }
+  :root[data-theme="dark"] .vb { --bg: #101210; --ink: #d9dbd2; --dim: #7d8177; --line: #262a24;
+          --accent: #e08a45; --live: #7bc266; --parked: #d4a545; --err: #e06a5e; --strip: #161a15; }
+  :root[data-theme="light"] .vb { --bg: #f7f6f2; --ink: #24251f; --dim: #7b7b70; --line: #dedcd2;
+          --accent: #a8530e; --live: #3d7a2f; --parked: #a8760e; --err: #b3362a; --strip: #eceade; }
+
+  .vb { display: flex; flex-direction: column; flex: 1; }
+  .vb .strip {
+    position: sticky; top: 0; z-index: 5;
+    background: var(--strip); border-bottom: 1px solid var(--line);
+    padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 4px 14px;
+    font-size: 11.5px; cursor: pointer;
+  }
+  .vb .strip .item b { font-weight: 700; }
+  .vb .strip .ok { color: var(--live); }
+  .vb .strip .warn { color: var(--parked); }
+  .vb .strippanel { background: var(--strip); border-bottom: 1px solid var(--line); padding: 10px 12px; font-size: 12px; }
+  .vb .strippanel table { border-collapse: collapse; width: 100%; }
+  .vb .strippanel td { padding: 3px 8px 3px 0; vertical-align: top; }
+  .vb .strippanel td:first-child { color: var(--dim); white-space: nowrap; }
+  .vb .list { flex: 1; overflow-y: auto; padding-bottom: 120px; }
+  .vb .grp { padding: 12px 12px 2px; color: var(--dim); font-size: 11px; letter-spacing: .1em; }
+  .vb .grp .cnt { color: var(--ink); }
+  .vb .crow {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    border-bottom: 1px solid var(--line); padding: 8px 12px; cursor: pointer;
+    font: inherit; color: inherit;
+  }
+  .vb .crow:hover { background: var(--strip); }
+  .vb .crow .l1 { display: flex; gap: 8px; align-items: baseline; }
+  .vb .crow .st { font-weight: 700; width: 12px; flex: none; }
+  .vb .crow .st.live { color: var(--live); }
+  .vb .crow .st.parked { color: var(--parked); }
+  .vb .crow .st.archived { color: var(--dim); }
+  .vb .crow .nm { font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vb .crow .tm { color: var(--dim); font-size: 11px; flex: none; }
+  .vb .crow .l2 { color: var(--dim); font-size: 11.5px; margin-top: 2px; padding-left: 20px;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vb .newbar {
+    display: block; width: 100%; text-align: left; background: none; border: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 10px 12px; color: var(--accent); font: inherit; font-weight: 700; cursor: pointer;
+  }
+  .vb .newform { border-bottom: 1px solid var(--line); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--strip); }
+  .vb .newform .fr { display: flex; gap: 8px; align-items: center; }
+  .vb .newform label { color: var(--dim); width: 78px; flex: none; font-size: 11.5px; }
+  .vb .newform input, .vb .newform select {
+    flex: 1; background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+    padding: 6px 8px; font: 12.5px ui-monospace, monospace; border-radius: 3px; min-width: 0;
+  }
+  .vb .newform .go { align-self: flex-start; background: var(--accent); color: var(--bg); border: 0; padding: 7px 14px; font: 700 12.5px ui-monospace, monospace; cursor: pointer; border-radius: 3px; }
+  .vb .newform .note { color: var(--dim); font-size: 11px; }
+
+  /* B: log view */
+  .vb .loghead {
+    position: sticky; top: 0; z-index: 5; background: var(--strip); border-bottom: 1px solid var(--line);
+    padding: 8px 12px; display: flex; gap: 10px; align-items: baseline;
+  }
+  .vb .loghead .back { background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer; padding: 0; }
+  .vb .loghead .nm { font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vb .loghead .st { font-size: 11px; font-weight: 700; }
+  .vb .loghead .st.live { color: var(--live); } .vb .loghead .st.parked { color: var(--parked); } .vb .loghead .st.archived { color: var(--dim); }
+  .vb .logmeta { border-bottom: 1px solid var(--line); padding: 6px 12px; color: var(--dim); font-size: 11px; display: flex; flex-wrap: wrap; gap: 2px 14px; }
+  .vb .log { flex: 1; overflow-y: auto; padding: 8px 0 150px; }
+  .vb .ev { padding: 3px 12px; display: flex; gap: 8px; line-height: 1.5; }
+  .vb .ev:hover { background: var(--strip); }
+  .vb .ev .ts { color: var(--dim); font-size: 10.5px; flex: none; width: 40px; padding-top: 2px; }
+  .vb .ev .pf { flex: none; width: 14px; font-weight: 700; }
+  .vb .ev.user .pf { color: var(--accent); }
+  .vb .ev.agent .pf { color: var(--dim); }
+  .vb .ev.tool .pf, .vb .ev.tool .tx { color: var(--dim); font-size: 12px; }
+  .vb .ev.git .pf, .vb .ev.git .tx { color: var(--live); font-size: 12px; }
+  .vb .ev.notice { border-left: 3px solid var(--parked); margin: 4px 12px; padding: 6px 9px; background: var(--strip); display: block; font-size: 12px; }
+  .vb .ev.notice .hd { color: var(--parked); font-weight: 700; }
+  .vb .ev .tx { min-width: 0; white-space: pre-wrap; word-break: break-word; }
+  .vb .cmdline {
+    position: sticky; bottom: 0; display: flex; gap: 8px; align-items: center;
+    background: var(--strip); border-top: 1px solid var(--line); padding: 10px 12px 14px;
+  }
+  .vb .cmdline .pr { color: var(--accent); font-weight: 700; }
+  .vb .cmdline input { flex: 1; background: none; border: 0; color: var(--ink); font: 13px ui-monospace, monospace; outline: none; }
+  .vb .cmdline .hint { position: absolute; top: -20px; left: 12px; right: 12px; font-size: 10.5px; color: var(--parked); }
+
+  /* ============================================================
+     VARIANT C — "Workbench" (git-forward cards)
+     ============================================================ */
+  .vc {
+    --bg: #eef0ee; --card: #ffffff; --ink: #1d221f; --dim: #6b736e;
+    --line: #dbdfdb; --accent: #22694a; --accent-ink: #ffffff;
+    --live: #22694a; --parked: #9a6d13; --archived: #79817b; --rail: #c9cfc9;
+    background: var(--bg); color: var(--ink);
+    font-family: system-ui, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    .vc { --bg: #14171a; --card: #1d2126; --ink: #e2e6e3; --dim: #8e968f;
+          --line: #2c3138; --accent: #4fa87c; --accent-ink: #0e1512;
+          --live: #4fa87c; --parked: #cfa14a; --archived: #79817b; --rail: #3a4148; }
+  }
+  :root[data-theme="dark"] .vc { --bg: #14171a; --card: #1d2126; --ink: #e2e6e3; --dim: #8e968f;
+          --line: #2c3138; --accent: #4fa87c; --accent-ink: #0e1512;
+          --live: #4fa87c; --parked: #cfa14a; --archived: #79817b; --rail: #3a4148; }
+  :root[data-theme="light"] .vc { --bg: #eef0ee; --card: #ffffff; --ink: #1d221f; --dim: #6b736e;
+          --line: #dbdfdb; --accent: #22694a; --accent-ink: #ffffff;
+          --live: #22694a; --parked: #9a6d13; --archived: #79817b; --rail: #c9cfc9; }
+
+  .vc { display: flex; flex-direction: column; flex: 1; }
+  .vc .hd { padding: 16px 16px 8px; display: flex; align-items: baseline; gap: 10px;
+            position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  .vc .hd h1 { margin: 0; font-size: 17px; letter-spacing: -.01em; flex: 1; }
+  .vc .hd .navlink { background: none; border: 0; color: var(--dim); font: 600 12px system-ui, sans-serif; cursor: pointer; padding: 4px; }
+  .vc .hd .navlink.on { color: var(--accent); }
+  .vc .cap { font-size: 10.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); }
+  .vc .cards { flex: 1; overflow-y: auto; padding: 8px 12px 130px; display: flex; flex-direction: column; gap: 10px; }
+  .vc .ccard {
+    width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer;
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .vc .ccard:hover { border-color: var(--accent); }
+  .vc .ccard .r1 { display: flex; align-items: center; gap: 8px; }
+  .vc .ccard .nm { font-weight: 650; font-size: 14.5px; flex: 1; min-width: 0; }
+  .vc .pill {
+    font: 700 10px system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase;
+    border-radius: 4px; padding: 3px 7px; flex: none;
+  }
+  .vc .pill.live { background: color-mix(in srgb, var(--live) 15%, transparent); color: var(--live); }
+  .vc .pill.parked { background: color-mix(in srgb, var(--parked) 15%, transparent); color: var(--parked); }
+  .vc .pill.archived { background: color-mix(in srgb, var(--archived) 18%, transparent); color: var(--archived); }
+  .vc .gitline {
+    display: flex; gap: 8px; align-items: center; font: 11.5px ui-monospace, monospace;
+    color: var(--dim); overflow: hidden; white-space: nowrap;
+  }
+  .vc .gitline .br { color: var(--accent); overflow: hidden; text-overflow: ellipsis; }
+  .vc .ccard .last { font-size: 12.5px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vc .ccard .last b { color: var(--ink); font-weight: 600; }
+  .vc .fab {
+    position: fixed; right: max(16px, calc(50% - 199px)); bottom: 64px; z-index: 50;
+    width: 52px; height: 52px; border-radius: 16px; border: 0; cursor: pointer;
+    background: var(--accent); color: var(--accent-ink); font-size: 26px; line-height: 1;
+    box-shadow: 0 6px 18px rgb(0 0 0 / .25);
+  }
+
+  /* C: chat view */
+  .vc .cv-head { position: sticky; top: 0; z-index: 6; background: var(--bg); }
+  .vc .cv-head .r { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px; }
+  .vc .cv-head .back { background: none; border: 0; font-size: 20px; color: var(--accent); cursor: pointer; padding: 2px 6px; }
+  .vc .cv-head .nm { font-weight: 700; font-size: 15px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vc .gitbar {
+    margin: 0 12px; background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 10px; display: flex; flex-wrap: wrap; gap: 3px 12px;
+    font: 11px ui-monospace, monospace; color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .vc .gitbar .b { color: var(--accent); }
+  .vc .gitbar .ok { color: var(--live); }
+  .vc .gitbar .warn { color: var(--parked); }
+  .vc .tl { flex: 1; overflow-y: auto; padding: 14px 12px 150px 12px; }
+  .vc .tl-item { display: flex; gap: 10px; }
+  .vc .tl-rail { flex: none; width: 20px; display: flex; flex-direction: column; align-items: center; }
+  .vc .tl-rail .nd { width: 8px; height: 8px; border-radius: 50%; background: var(--rail); margin-top: 6px; flex: none; }
+  .vc .tl-item.git .tl-rail .nd { background: var(--live); width: 10px; height: 10px; border-radius: 3px; }
+  .vc .tl-rail .ln { width: 2px; flex: 1; background: var(--rail); margin: 2px 0; }
+  .vc .tl-item:last-child .tl-rail .ln { background: linear-gradient(var(--rail), transparent); }
+  .vc .tl-body { flex: 1; min-width: 0; padding-bottom: 16px; }
+  .vc .tl-who { font: 700 10.5px system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin-bottom: 3px; }
+  .vc .tl-item.user .tl-who { color: var(--accent); }
+  .vc .tl-tx { font-size: 14px; line-height: 1.5; }
+  .vc .tl-item.git .tl-tx { font: 12px ui-monospace, monospace; color: var(--live); }
+  .vc details.tool { border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  .vc details.tool summary {
+    cursor: pointer; padding: 7px 10px; font: 500 12px ui-monospace, monospace; color: var(--dim);
+    list-style: none; display: flex; gap: 8px; align-items: center;
+  }
+  .vc details.tool summary::before { content: "▸"; font-size: 10px; }
+  .vc details[open].tool summary::before { content: "▾"; }
+  .vc details.tool .body { border-top: 1px solid var(--line); padding: 8px 10px; font: 11.5px ui-monospace, monospace; color: var(--dim); overflow-x: auto; white-space: pre; }
+  .vc .notice {
+    border: 1px solid var(--parked); border-left-width: 4px; border-radius: 8px;
+    background: var(--card); padding: 9px 12px; font-size: 12.5px;
+  }
+  .vc .notice .hd2 { color: var(--parked); font-weight: 700; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 3px; }
+  .vc .composer { position: sticky; bottom: 0; padding: 10px 12px 14px; background: var(--bg); border-top: 1px solid var(--line); }
+  .vc .composer .resume { font-size: 11px; color: var(--parked); margin-bottom: 6px; }
+  .vc .composer .rowi { display: flex; gap: 8px; }
+  .vc .composer input {
+    flex: 1; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    border-radius: 8px; padding: 10px 12px; font: 14px system-ui, sans-serif;
+  }
+  .vc .composer button.send { border: 0; background: var(--accent); color: var(--accent-ink); border-radius: 8px; padding: 0 16px; font-weight: 700; cursor: pointer; }
+  .vc .actions { display: flex; gap: 8px; padding: 0 12px 8px; }
+  .vc .actions button {
+    flex: 1; background: var(--card); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 8px; padding: 8px; font: 600 12px system-ui, sans-serif; cursor: pointer;
+  }
+  .vc .actions button:hover { border-color: var(--accent); }
+
+  /* C: new chat sheet */
+  .vc .sheet { flex: 1; padding: 16px 16px 130px; display: flex; flex-direction: column; gap: 16px; }
+  .vc .sheet h2 { margin: 0; font-size: 18px; }
+  .vc .f label { display: block; font: 700 10.5px system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin-bottom: 6px; }
+  .vc .f input, .vc .f select {
+    width: 100%; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+    border-radius: 8px; padding: 11px 12px; font: 14px system-ui, sans-serif;
+  }
+  .vc .brpreview {
+    font: 12px ui-monospace, monospace; background: var(--card); border: 1px dashed var(--line);
+    border-radius: 8px; padding: 9px 12px; color: var(--accent); overflow-x: auto; white-space: nowrap;
+  }
+  .vc .optout { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; }
+  .vc .optout .note { color: var(--dim); font-size: 11.5px; margin-top: 2px; }
+  .vc .go { border: 0; background: var(--accent); color: var(--accent-ink); border-radius: 10px; padding: 13px; font: 700 14px system-ui, sans-serif; cursor: pointer; }
+
+  /* C: machines */
+  .vc .mgrid { padding: 8px 12px 130px; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .vc .mtile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .vc .mtile.wide { grid-column: 1 / -1; }
+  .vc .mtile .big { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .vc .mtile .sub { font-size: 11.5px; color: var(--dim); margin-top: 2px; }
+  .vc .mtile code { font-family: ui-monospace, monospace; font-size: 12px; }
+  .vc .slot { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 12.5px; }
+  .vc .slot:first-of-type { border-top: 0; margin-top: 6px; }
+  .vc .slot .who { font-weight: 600; }
+  .vc .slot .up { color: var(--dim); font: 11px ui-monospace, monospace; }
+</style>
+
+<div class="phone" id="app"></div>
+
+<div class="switcher" aria-label="Prototype variant switcher">
+  <button id="sw-prev" aria-label="Previous variant">←</button>
+  <span class="lbl" id="sw-lbl"></span>
+  <button id="sw-next" aria-label="Next variant">→</button>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ */
+/* fake data — vocabulary from CONTEXT.md / ADRs                       */
+/* ------------------------------------------------------------------ */
+const CHATS = [
+  { id: "c1", name: "Resume ladder polish", repo: "CorVous/CorCode",
+    branch: "chat/2026-08-04-resume-ladder", state: "live",
+    up: "14m", lastPush: "2m ago", lastCommit: "a41f2c9 Wire reconnect ladder into prompt path",
+    snippet: "Pushed a41f2c9 — ladder falls back to session/load cleanly now", t: "10:41" },
+  { id: "c2", name: "Zenni share re-org helper", repo: "CorVous/zenni-tools",
+    branch: "chat/2026-08-05-share-reorg", state: "live",
+    up: "3m", lastPush: "1m ago", lastCommit: "9c0d112 Add dry-run mode to mover",
+    snippet: "Running the mover against the staging tree in dry-run…", t: "10:52" },
+  { id: "c3", name: "TrueNAS docs sweep", repo: "CorVous/CorCode",
+    branch: "chat/2026-08-03-truenas-docs", state: "parked",
+    up: null, lastPush: "yesterday", lastCommit: "77aa310 Fold apps-vs-compose findings into ADR draft",
+    snippet: "Parked — workspace kept, container torn down", t: "Mon" },
+  { id: "c4", name: "Warm-pool eviction bug", repo: "CorVous/CorCode",
+    branch: "chat/2026-08-02-pool-eviction", state: "parked",
+    up: null, lastPush: "2d ago", lastCommit: "5e19f04 Repro: park skips newest-idle check",
+    snippet: "Parked — workspace kept, container torn down", t: "Sun" },
+  { id: "c5", name: "Auth cookie spike", repo: "CorVous/CorCode",
+    branch: "chat/2026-07-30-auth-spike", state: "archived",
+    up: null, lastPush: "Jul 31", lastCommit: "chkpt: chat/2026-07-30-auth-spike-chkpt-20260731T0912",
+    snippet: "Archived — dirty state minted a checkpoint branch", t: "Jul 31" },
+];
+
+const EVENTS = {
+  c1: [
+    { k: "user",  ts: "10:12", tx: "Make the reconnect ladder fall back to session/load when resumeSession fails, and keep replay display-silent." },
+    { k: "agent", ts: "10:13", tx: "Reading the prompt path first — the ladder should fire lazily on the first prompt, not on open." },
+    { k: "tool",  ts: "10:14", tx: "Read src/core/session.rs", detail: "fn prompt() — 88 lines" },
+    { k: "tool",  ts: "10:18", tx: "Edit src/core/reconnect.rs", detail: "+42 −7  resumeSession → session/load → session/new" },
+    { k: "agent", ts: "10:22", tx: "Done. resumeSession failure now drops to session/load with replay suppressed from the events log; if load also fails we mint a fresh session and inject the reset notice before your next turn." },
+    { k: "git",   ts: "10:39", tx: "committed a41f2c9 — Wire reconnect ladder into prompt path" },
+    { k: "git",   ts: "10:41", tx: "pushed chat/2026-08-04-resume-ladder → origin" },
+    { k: "user",  ts: "10:41", tx: "Pushed a41f2c9 — ladder falls back to session/load cleanly now. Nice." },
+  ],
+  c3: [
+    { k: "user",  ts: "Mon 14:02", tx: "Sweep the TrueNAS docs for anything about Custom App upgrade survival." },
+    { k: "tool",  ts: "Mon 14:05", tx: "WebFetch apps.truenas.com/custom-apps", detail: "3 pages" },
+    { k: "agent", ts: "Mon 14:20", tx: "Custom Apps built from Compose survive upgrades; host-path mounts are the supported durable-data route. Folded into the ADR draft." },
+    { k: "git",   ts: "Mon 14:31", tx: "committed 77aa310 — Fold apps-vs-compose findings into ADR draft" },
+    { k: "git",   ts: "Mon 14:32", tx: "pushed chat/2026-08-03-truenas-docs → origin" },
+  ],
+  c5: [
+    { k: "notice", ts: "Jul 31", tx: "Workspace was reset on archive revival: fresh clone at last_pushed_commit f31be02. Uncommitted work from the old workspace is gone; a checkpoint branch chat/2026-07-30-auth-spike-chkpt-20260731T0912 holds what the close gate rescued." },
+    { k: "user",  ts: "Jul 30", tx: "Spike a signed-cookie login: single account, argon2, HMAC session cookie." },
+    { k: "agent", ts: "Jul 30", tx: "Spiked in src/web/auth.rs — cookie carries an HMAC over user+expiry, verified per request. Rough but demonstrates the shape." },
+    { k: "git",   ts: "Jul 30", tx: "committed f31be02 — Spike signed-cookie auth" },
+    { k: "git",   ts: "Jul 30", tx: "pushed chat/2026-07-30-auth-spike → origin" },
+  ],
+};
+
+const MACHINES = {
+  image: "workspace:2026-08-01", pool: [
+    { chat: "Resume ladder polish", up: "14m", idle: "45s" },
+    { chat: "Zenni share re-org helper", up: "3m", idle: "9s" },
+  ],
+  parked: 2, archived: 1, sweep: "04:00 — 0 orphans", host: "truenas.tail1234.ts.net",
+};
+
+/* ------------------------------------------------------------------ */
+/* routing: #/<variant>/<screen>[/<id>]                                */
+/* ------------------------------------------------------------------ */
+const VARIANTS = [
+  { key: "a", name: "A — Inbox" },
+  { key: "b", name: "B — Console" },
+  { key: "c", name: "C — Workbench" },
+];
+const app = document.getElementById("app");
+
+function route() {
+  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  const v = VARIANTS.some(x => x.key === parts[0]) ? parts[0] : "a";
+  return { v, screen: parts[1] || "list", id: parts[2] || null };
+}
+function go(v, screen, id) {
+  location.hash = "#/" + [v, screen, id].filter(Boolean).join("/");
+}
+function esc(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+const stateWord = { live: "live", parked: "parked", archived: "archived" };
+
+/* ------------------------------------------------------------------ */
+/* VARIANT A — Inbox                                                   */
+/* ------------------------------------------------------------------ */
+function aTabs(cur) {
+  return `<nav class="tabs">
+    <button class="${cur === "list" ? "on" : ""}" onclick="go('a','list')"><span class="ic">💬</span>Chats</button>
+    <button class="${cur === "mach" ? "on" : ""}" onclick="go('a','mach')"><span class="ic">📦</span>Machines</button>
+  </nav>`;
+}
+function renderA({ screen, id }) {
+  if (screen === "chat" && id) return renderAChat(id);
+  if (screen === "new") return renderANew();
+  if (screen === "mach") return `<div class="va">
+    <header class="top"><h1>Machines</h1></header>
+    <div class="mach">
+      <div class="mcard"><div class="k">Warm pool — 2 slots</div>
+        ${MACHINES.pool.map(p => `<div class="v">${esc(p.chat)} <span style="color:var(--dim)">· up ${p.up}, idle ${p.idle}</span></div>`).join("")}
+      </div>
+      <div class="mcard"><div class="k">Parked chats</div><div class="v">${MACHINES.parked} — workspaces kept on NAS, no container</div></div>
+      <div class="mcard"><div class="k">Workspace image</div><div class="v"><code>${MACHINES.image}</code> (pinned, built on-box)</div></div>
+      <div class="mcard"><div class="k">Orphan sweep</div><div class="v">${MACHINES.sweep}</div></div>
+      <div class="mcard"><div class="k">Host</div><div class="v"><code>${MACHINES.host}</code></div></div>
+    </div>
+    ${aTabs("mach")}
+  </div>`;
+
+  const open = CHATS.filter(c => c.state !== "archived");
+  const arch = CHATS.filter(c => c.state === "archived");
+  const row = c => `<button class="row" onclick="go('a','chat','${c.id}')">
+      <span class="avatar ${c.repo.includes("zenni") ? "alt" : ""}">${esc(c.repo.split("/")[1][0].toUpperCase())}<span class="dot ${c.state}"></span></span>
+      <span class="mid"><span class="name">${esc(c.name)}</span><span class="snippet">${esc(c.snippet)}</span></span>
+      <span class="meta">${c.t}<span class="state ${c.state}">${stateWord[c.state]}</span></span>
+    </button>`;
+  return `<div class="va">
+    <header class="top"><h1>CorCode</h1><span class="sub">2 live · 2 parked</span>
+      <button class="iconbtn" onclick="go('a','new')" aria-label="New chat">+</button></header>
+    <div class="rows">
+      ${open.map(row).join("")}
+      <div class="section-label">Archived</div>
+      ${arch.map(row).join("")}
+    </div>
+    ${aTabs("list")}
+  </div>`;
+}
+function renderAChat(id) {
+  const c = CHATS.find(x => x.id === id) || CHATS[0];
+  const evs = EVENTS[c.id] || EVENTS.c1;
+  const body = evs.map(e => {
+    if (e.k === "user") return `<div class="bubble me">${esc(e.tx)}</div>`;
+    if (e.k === "agent") return `<div class="bubble agent">${esc(e.tx)}</div>`;
+    if (e.k === "tool") return `<div class="chip">⚙ ${esc(e.tx)}</div>`;
+    if (e.k === "git") return `<div class="sysline">✓ <code>${esc(e.tx)}</code></div>`;
+    if (e.k === "notice") return `<div class="notice"><b>Reset notice</b> — ${esc(e.tx)}</div>`;
+  }).join("");
+  const parked = c.state === "parked";
+  const archived = c.state === "archived";
+  return `<div class="va">
+    <header class="chat-head">
+      <button class="back" onclick="go('a','list')" aria-label="Back">‹</button>
+      <span class="t"><span class="n">${esc(c.name)}</span><br><span class="b">${esc(c.repo)} · ${esc(c.branch)}</span></span>
+      <span class="st ${c.state}">${stateWord[c.state]}</span>
+    </header>
+    <div class="msgs">${body}</div>
+    ${parked ? `<div class="parkhint">Parked — sending will resume the container</div>` : ""}
+    ${archived ? `<div class="parkhint">Archived — sending revives with a fresh workspace</div>` : ""}
+    <div class="inputbar">
+      <input placeholder="${archived ? "Message (revives chat)…" : "Message…"}" aria-label="Prompt">
+      <button>Send</button>
+    </div>
+  </div>`;
+}
+function renderANew() {
+  return `<div class="va">
+    <header class="chat-head">
+      <button class="back" onclick="go('a','list')" aria-label="Back">‹</button>
+      <span class="t"><span class="n">New chat</span></span>
+    </header>
+    <div class="wiz">
+      <div class="steps"><span class="on"></span><span class="on"></span><span></span></div>
+      <div class="field"><label>Repository</label>
+        <select><option>CorVous/CorCode</option><option>CorVous/zenni-tools</option></select></div>
+      <div class="field"><label>Base branch</label>
+        <select><option>main</option><option>develop</option></select></div>
+      <div class="field"><label>What's this chat about?</label>
+        <input id="a-slug" placeholder="e.g. resume ladder polish" oninput="aSlug(this.value)">
+        <div class="hint">Branch: <code id="a-br">chat/2026-08-05-…</code></div></div>
+      <label class="togglerow"><input type="checkbox"> Work directly on the base branch instead</label>
+      <button class="cta">Start chat — clones fresh container</button>
+    </div>
+    ${aTabs("list")}
+  </div>`;
+}
+function aSlug(v) {
+  const s = v.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "…";
+  const el = document.getElementById("a-br");
+  if (el) el.textContent = "chat/2026-08-05-" + s;
+}
+
+/* ------------------------------------------------------------------ */
+/* VARIANT B — Console                                                 */
+/* ------------------------------------------------------------------ */
+function bStrip(expanded) {
+  return `<div class="strip" onclick="go('b', ${expanded ? "'list'" : "'machines'"})" title="Tap to ${expanded ? "collapse" : "expand"}">
+      <span class="item">pool <b class="ok">2/2</b></span>
+      <span class="item">parked <b class="warn">${MACHINES.parked}</b></span>
+      <span class="item">img <b>${MACHINES.image.split(":")[1]}</b></span>
+      <span class="item">sweep <b class="ok">ok</b></span>
+    </div>
+    ${expanded ? `<div class="strippanel"><table>
+      <tr><td>pool</td><td>${MACHINES.pool.map(p => `${esc(p.chat)} — up ${p.up}, idle ${p.idle}`).join("<br>")}</td></tr>
+      <tr><td>parked</td><td>${MACHINES.parked} chats — workspace kept, container torn down</td></tr>
+      <tr><td>image</td><td>${MACHINES.image} (pinned, on-box build)</td></tr>
+      <tr><td>sweep</td><td>${MACHINES.sweep}</td></tr>
+      <tr><td>host</td><td>${MACHINES.host}</td></tr>
+    </table></div>` : ""}`;
+}
+function renderB({ screen, id }) {
+  if (screen === "chat" && id) return renderBChat(id);
+  const newOpen = screen === "new";
+  const grp = (label, list) => list.length ? `<div class="grp">■ ${label} <span class="cnt">${list.length}</span></div>` +
+    list.map(c => `<button class="crow" onclick="go('b','chat','${c.id}')">
+      <span class="l1"><span class="st ${c.state}">${c.state === "live" ? "●" : c.state === "parked" ? "◐" : "○"}</span>
+        <span class="nm">${esc(c.name)}</span><span class="tm">${c.t}</span></span>
+      <span class="l2">${esc(c.branch)} · push ${c.lastPush}</span>
+    </button>`).join("") : "";
+  return `<div class="vb">
+    ${bStrip(screen === "machines")}
+    <div class="list">
+      ${newOpen ? `<div class="newform">
+          <div class="fr"><label>repo</label><select><option>CorVous/CorCode</option><option>CorVous/zenni-tools</option></select></div>
+          <div class="fr"><label>base</label><select><option>main</option><option>develop</option></select></div>
+          <div class="fr"><label>slug</label><input id="b-slug" placeholder="resume-ladder" oninput="bSlug(this.value)"></div>
+          <div class="fr"><label>branch</label><input id="b-br" value="chat/2026-08-05-" ></div>
+          <div class="fr"><label></label><label style="width:auto"><input type="checkbox"> direct on base</label></div>
+          <button class="go">spawn ▸</button>
+          <div class="note">fresh clone → container from ${MACHINES.image} → agent behind ACP</div>
+        </div>` :
+        `<button class="newbar" onclick="go('b','new')">+ new chat</button>`}
+      ${grp("LIVE", CHATS.filter(c => c.state === "live"))}
+      ${grp("PARKED", CHATS.filter(c => c.state === "parked"))}
+      ${grp("ARCHIVED", CHATS.filter(c => c.state === "archived"))}
+    </div>
+  </div>`;
+}
+function bSlug(v) {
+  const el = document.getElementById("b-br");
+  if (el) el.value = "chat/2026-08-05-" + v.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-");
+}
+function renderBChat(id) {
+  const c = CHATS.find(x => x.id === id) || CHATS[0];
+  const evs = EVENTS[c.id] || EVENTS.c1;
+  const pf = { user: "❯", agent: "·", tool: "⚙", git: "✓" };
+  const rows = evs.map(e => e.k === "notice"
+    ? `<div class="ev notice"><span class="hd">reset notice</span> ${esc(e.tx)}</div>`
+    : `<div class="ev ${e.k}"><span class="ts">${e.ts}</span><span class="pf">${pf[e.k]}</span><span class="tx">${esc(e.tx)}${e.detail ? `  <span style="opacity:.7">(${esc(e.detail)})</span>` : ""}</span></div>`
+  ).join("");
+  const needsResume = c.state !== "live";
+  return `<div class="vb">
+    <div class="loghead">
+      <button class="back" onclick="go('b','list')">‹ back</button>
+      <span class="nm">${esc(c.name)}</span>
+      <span class="st ${c.state}">${c.state}</span>
+    </div>
+    <div class="logmeta"><span>${esc(c.repo)}</span><span>${esc(c.branch)}</span><span>push ${c.lastPush}</span></div>
+    <div class="log">${rows}</div>
+    <div class="cmdline">
+      ${needsResume ? `<span class="hint">${c.state === "archived" ? "archived — prompt revives: fresh clone at last pushed commit" : "parked — prompt re-spins container, then resumeSession → session/load"}</span>` : ""}
+      <span class="pr">❯</span><input placeholder="prompt" aria-label="Prompt">
+    </div>
+  </div>`;
+}
+
+/* ------------------------------------------------------------------ */
+/* VARIANT C — Workbench                                               */
+/* ------------------------------------------------------------------ */
+function cHead(cur) {
+  return `<header class="hd"><h1>CorCode</h1>
+    <button class="navlink ${cur === "list" ? "on" : ""}" onclick="go('c','list')">Chats</button>
+    <button class="navlink ${cur === "mach" ? "on" : ""}" onclick="go('c','mach')">Machines</button>
+  </header>`;
+}
+function renderC({ screen, id }) {
+  if (screen === "chat" && id) return renderCChat(id);
+  if (screen === "new") return renderCNew();
+  if (screen === "mach") return `<div class="vc">
+    ${cHead("mach")}
+    <div class="mgrid">
+      <div class="mtile"><span class="cap">Pool</span><div class="big">2 / 2</div><div class="sub">warm slots in use</div></div>
+      <div class="mtile"><span class="cap">Parked</span><div class="big">${MACHINES.parked}</div><div class="sub">workspace kept, no container</div></div>
+      <div class="mtile wide"><span class="cap">Containers</span>
+        ${MACHINES.pool.map(p => `<div class="slot"><span class="who">${esc(p.chat)}</span><span class="up">up ${p.up} · idle ${p.idle}</span></div>`).join("")}
+        <div class="sub" style="margin-top:8px">Oldest idle parks when a third chat needs a slot.</div></div>
+      <div class="mtile wide"><span class="cap">Workspace image</span><div class="sub" style="margin-top:6px"><code>${MACHINES.image}</code> — pinned; built on-box; new tag activates via config</div></div>
+      <div class="mtile wide"><span class="cap">Orphan sweep</span><div class="sub" style="margin-top:6px">${MACHINES.sweep} · host <code>${MACHINES.host}</code></div></div>
+    </div>
+  </div>`;
+
+  const card = c => `<button class="ccard" onclick="go('c','chat','${c.id}')">
+      <span class="r1"><span class="nm">${esc(c.name)}</span><span class="pill ${c.state}">${stateWord[c.state]}</span></span>
+      <span class="gitline"><span>⎇</span><span class="br">${esc(c.branch)}</span><span>· push ${c.lastPush}</span></span>
+      <span class="last"><b>${esc(c.lastCommit.split(" ")[0])}</b> ${esc(c.lastCommit.split(" ").slice(1).join(" "))}</span>
+    </button>`;
+  return `<div class="vc">
+    ${cHead("list")}
+    <div class="cards">
+      <span class="cap">Open — 2 live · 2 parked</span>
+      ${CHATS.filter(c => c.state !== "archived").map(card).join("")}
+      <span class="cap" style="margin-top:8px">Archived</span>
+      ${CHATS.filter(c => c.state === "archived").map(card).join("")}
+    </div>
+    <button class="fab" onclick="go('c','new')" aria-label="New chat">+</button>
+  </div>`;
+}
+function renderCChat(id) {
+  const c = CHATS.find(x => x.id === id) || CHATS[0];
+  const evs = EVENTS[c.id] || EVENTS.c1;
+  const item = e => {
+    if (e.k === "notice") return `<div class="tl-item"><div class="tl-rail"><span class="nd" style="background:var(--parked)"></span><span class="ln"></span></div>
+      <div class="tl-body"><div class="notice"><div class="hd2">Reset notice</div>${esc(e.tx)}</div></div></div>`;
+    if (e.k === "tool") return `<div class="tl-item tool"><div class="tl-rail"><span class="nd"></span><span class="ln"></span></div>
+      <div class="tl-body"><details class="tool"><summary>${esc(e.tx)}</summary><div class="body">${esc(e.detail || "")}</div></details></div></div>`;
+    if (e.k === "git") return `<div class="tl-item git"><div class="tl-rail"><span class="nd"></span><span class="ln"></span></div>
+      <div class="tl-body"><div class="tl-tx">${esc(e.tx)}</div></div></div>`;
+    return `<div class="tl-item ${e.k}"><div class="tl-rail"><span class="nd"></span><span class="ln"></span></div>
+      <div class="tl-body"><div class="tl-who">${e.k === "user" ? "You" : "Agent"} · ${e.ts}</div><div class="tl-tx">${esc(e.tx)}</div></div></div>`;
+  };
+  const archived = c.state === "archived", parked = c.state === "parked";
+  return `<div class="vc">
+    <div class="cv-head">
+      <div class="r"><button class="back" onclick="go('c','list')" aria-label="Back">‹</button>
+        <span class="nm">${esc(c.name)}</span><span class="pill ${c.state}">${stateWord[c.state]}</span></div>
+      <div class="gitbar">
+        <span>⎇ <span class="b">${esc(c.branch)}</span></span>
+        <span class="ok">✓ pushed ${c.lastPush}</span>
+        <span>${c.state === "live" ? `container up ${c.up}` : c.state === "parked" ? `<span class="warn">no container — resumes on prompt</span>` : `<span class="warn">workspace deleted — revives on prompt</span>`}</span>
+      </div>
+    </div>
+    <div class="tl">${evs.map(item).join("")}</div>
+    <div class="actions">
+      <button>Park now</button><button>Archive — push-gated</button>
+    </div>
+    <div class="composer">
+      ${parked ? `<div class="resume">Prompt will re-spin the container and run the reconnect ladder.</div>` : ""}
+      ${archived ? `<div class="resume">Prompt revives: fresh clone at last pushed commit + reset notice to the agent.</div>` : ""}
+      <div class="rowi"><input placeholder="Prompt the agent…" aria-label="Prompt"><button class="send">Send</button></div>
+    </div>
+  </div>`;
+}
+function renderCNew() {
+  return `<div class="vc">
+    <div class="cv-head"><div class="r"><button class="back" onclick="go('c','list')" aria-label="Back">‹</button>
+      <span class="nm">New chat</span></div></div>
+    <div class="sheet">
+      <div class="f"><label>Repository</label><select><option>CorVous/CorCode</option><option>CorVous/zenni-tools</option></select></div>
+      <div class="f"><label>Base branch</label><select><option>main</option><option>develop</option></select></div>
+      <div class="f"><label>Title</label><input id="c-slug" placeholder="Resume ladder polish" oninput="cSlug(this.value)"></div>
+      <div class="f"><label>Chat branch</label><div class="brpreview" id="c-br">chat/2026-08-05-…</div></div>
+      <label class="optout"><input type="checkbox">
+        <span>Work directly on the base branch<div class="note">Skips the chat branch; commits land straight on main.</div></span></label>
+      <button class="go">Create — fresh clone, container from ${MACHINES.image}</button>
+    </div>
+  </div>`;
+}
+function cSlug(v) {
+  const s = v.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "…";
+  const el = document.getElementById("c-br");
+  if (el) el.textContent = "chat/2026-08-05-" + s;
+}
+
+/* ------------------------------------------------------------------ */
+/* switcher + boot                                                     */
+/* ------------------------------------------------------------------ */
+const RENDER = { a: renderA, b: renderB, c: renderC };
+function paint() {
+  const r = route();
+  app.innerHTML = RENDER[r.v](r);
+  document.getElementById("sw-lbl").textContent = VARIANTS.find(x => x.key === r.v).name;
+}
+function cycle(dir) {
+  const r = route();
+  const i = VARIANTS.findIndex(x => x.key === r.v);
+  const next = VARIANTS[(i + dir + VARIANTS.length) % VARIANTS.length].key;
+  go(next, r.screen, r.id);
+}
+document.getElementById("sw-prev").onclick = () => cycle(-1);
+document.getElementById("sw-next").onclick = () => cycle(1);
+document.addEventListener("keydown", e => {
+  const t = e.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  if (e.key === "ArrowLeft") cycle(-1);
+  if (e.key === "ArrowRight") cycle(1);
+});
+window.addEventListener("hashchange", paint);
+paint();
+</script>
