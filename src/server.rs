@@ -109,7 +109,10 @@ async fn submit_login(
     Form(credentials): Form<Credentials>,
 ) -> Response {
     let now = SystemTime::now();
-    match gate.sign_in(&credentials.username, &credentials.password, now) {
+    match gate
+        .sign_in(&credentials.username, &credentials.password, now)
+        .await
+    {
         SignIn::Granted => (
             StatusCode::SEE_OTHER,
             [
@@ -168,7 +171,10 @@ fn cookie_header(session: &str) -> HeaderValue {
     HeaderValue::from_str(&cookie).expect("a session cookie is a valid header value")
 }
 
-/// Whether the browser's stated origin, if any, is this same site.
+/// Whether the browser's stated origin, if any, is this same site. Only the
+/// authority is compared: the app binds the tailnet address directly and is
+/// reached over plain HTTP (ADR-0003), so a scheme mismatch would be the
+/// proxy deployment this app does not have.
 fn origin_matches_host(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return true;

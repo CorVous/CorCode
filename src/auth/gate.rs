@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use argon2::{Argon2, PasswordHash, PasswordVerifier as _};
+use tokio::task::spawn_blocking;
 
 use super::keystore::KeyStore;
 use super::rate_limit::LoginLimiter;
@@ -43,14 +44,20 @@ impl Gate {
         })
     }
 
-    /// Weigh submitted credentials, counting the attempt against the
-    /// login backoff.
-    pub fn sign_in(&self, username: &str, password: &str, now: SystemTime) -> SignIn {
-        let mut logins = self.logins.lock().expect(POISONED);
-        if logins.is_locked(now) {
+    /// Weigh submitted credentials, counting the attempt against the login
+    /// backoff. The argon2 work runs on a blocking thread, off the request
+    /// worker and outside the backoff lock.
+    pub async fn sign_in(&self, username: &str, password: &str, now: SystemTime) -> SignIn {
+        if self.logins.lock().expect(POISONED).is_locked(now) {
             return SignIn::RateLimited;
         }
-        let password_matches = verify_password(&self.password_hash, password);
+        let hash = self.password_hash.clone();
+        let attempt = password.to_owned();
+        let password_matches = spawn_blocking(move || verify_password(&hash, &attempt))
+            .await
+            .expect("verifying a password cannot panic");
+
+        let mut logins = self.logins.lock().expect(POISONED);
         if password_matches && username == self.username {
             logins.record_success();
             SignIn::Granted
@@ -78,7 +85,8 @@ impl Gate {
     }
 }
 
-/// Nothing held across the login lock can panic, so it cannot be poisoned.
+/// The login lock is only ever held across counter arithmetic, which
+/// cannot panic, so it cannot be poisoned.
 const POISONED: &str = "the login lock is never poisoned";
 
 /// Whether `password` is the one behind `hash`, in constant time.
