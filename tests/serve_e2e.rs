@@ -27,6 +27,7 @@ async fn serve_binds_the_configured_address() {
             "CORCODE_WORKSPACE_IMAGE",
             "ghcr.io/corvous/corcode-workspace:2026-08-05",
         )
+        .env("CORCODE_REPOS", "CorVous/CorCode")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

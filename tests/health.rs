@@ -25,6 +25,9 @@ async fn health_endpoint_answers_on_ephemeral_port() {
         container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
         container_cpus: DEFAULT_CONTAINER_CPUS,
         registry: None,
+        repos: vec!["CorVous/CorCode".to_owned()],
+        github_token: None,
+        anthropic_api_key: None,
     };
     let router =
         cor_code::server::router(&config, MemoryPlane::default()).expect("router should build");

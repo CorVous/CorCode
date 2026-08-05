@@ -38,11 +38,19 @@ Serving (the default action) reads its configuration from the environment:
 | `CORCODE_USERNAME`          | yes      | -              |
 | `CORCODE_PASSWORD_HASH`     | yes      | -              |
 | `CORCODE_WORKSPACE_IMAGE`   | yes      | -              |
+| `CORCODE_REPOS`             | yes      | -              |
 | `CORCODE_BIND_ADDR`         | no       | `0.0.0.0:8080` |
 | `CORCODE_CONTAINER_MEMORY_MB` | no     | `4096`         |
 | `CORCODE_CONTAINER_CPUS`    | no       | `2`            |
 | `CORCODE_REGISTRY_USER`     | no       | -              |
 | `CORCODE_REGISTRY_TOKEN`    | no       | -              |
+| `CORCODE_GITHUB_TOKEN`      | no       | -              |
+| `CORCODE_ANTHROPIC_API_KEY` | no       | -              |
+
+`CORCODE_REPOS` is the comma-separated `owner/name` list the new-chat form
+offers, first entry the default. `CORCODE_GITHUB_TOKEN` clones private
+repositories; `CORCODE_ANTHROPIC_API_KEY` reaches the agent as
+`ANTHROPIC_API_KEY`.
 
 ## Development
 

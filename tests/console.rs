@@ -339,6 +339,9 @@ fn test_config(data_dir: std::path::PathBuf) -> Config {
         container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
         container_cpus: DEFAULT_CONTAINER_CPUS,
         registry: None,
+        repos: vec!["CorVous/CorCode".to_owned()],
+        github_token: None,
+        anthropic_api_key: None,
     }
 }
 
