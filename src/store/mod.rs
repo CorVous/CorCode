@@ -58,16 +58,20 @@ impl ChatStore {
         self.root.join(WORKSPACES_DIR).join(chat_id)
     }
 
-    /// Lay down both trees for a new chat and persist its manifest.
+    /// Lay down both trees for a new chat, publishing the chat dir whole.
     pub fn create_chat(&self, new_chat: NewChat) -> Result<Manifest, StoreError> {
         let manifest = Manifest::open(new_chat);
         let chat_id = &manifest.chat_id;
-        for dir in [self.claude_dir(chat_id), self.workspace_dir(chat_id)] {
-            fs::create_dir_all(&dir).map_err(StoreError::writing(&dir))?;
-        }
-        let events = self.events_path(chat_id);
+        let workspace = self.workspace_dir(chat_id);
+        fs::create_dir_all(&workspace).map_err(StoreError::writing(&workspace))?;
+        let staged = self.staging_dir(chat_id);
+        let claude = staged.join(CLAUDE_DIR);
+        fs::create_dir_all(&claude).map_err(StoreError::writing(&claude))?;
+        let events = staged.join(EVENTS_FILE);
         File::create_new(&events).map_err(StoreError::writing(&events))?;
-        self.write_manifest(&manifest)?;
+        write_manifest_in(&staged, &manifest)?;
+        let chat_dir = self.chat_dir(chat_id);
+        fs::rename(&staged, &chat_dir).map_err(StoreError::writing(&chat_dir))?;
         Ok(manifest)
     }
 
@@ -77,6 +81,9 @@ impl ChatStore {
         let mut manifests = Vec::new();
         for entry in fs::read_dir(&chats).map_err(StoreError::reading(&chats))? {
             let entry = entry.map_err(StoreError::reading(&chats))?;
+            if is_hidden(&entry.file_name()) {
+                continue;
+            }
             manifests.push(read_manifest_at(&entry.path().join(MANIFEST_FILE))?);
         }
         manifests.sort_by(|left, right| {
@@ -94,15 +101,7 @@ impl ChatStore {
 
     /// Replace a chat's manifest in one atomic step.
     pub fn write_manifest(&self, manifest: &Manifest) -> Result<(), StoreError> {
-        let temp = self
-            .chat_dir(&manifest.chat_id)
-            .join(format!("{MANIFEST_FILE}.{}.tmp", Ulid::generate()));
-        let json = serde_json::to_string_pretty(manifest).expect("manifest should serialize");
-        let mut file = File::create(&temp).map_err(StoreError::writing(&temp))?;
-        writeln!(file, "{json}").map_err(StoreError::writing(&temp))?;
-        file.sync_all().map_err(StoreError::writing(&temp))?;
-        let path = self.manifest_path(&manifest.chat_id);
-        fs::rename(&temp, &path).map_err(StoreError::writing(&path))
+        write_manifest_in(&self.chat_dir(&manifest.chat_id), manifest)
     }
 
     /// Append one ACP payload to the chat's display record, flushed on return.
@@ -148,6 +147,23 @@ impl ChatStore {
     fn events_path(&self, chat_id: &str) -> PathBuf {
         self.chat_dir(chat_id).join(EVENTS_FILE)
     }
+}
+
+/// Publish a manifest into `chat_dir`, replacing any older one wholesale.
+fn write_manifest_in(chat_dir: &Path, manifest: &Manifest) -> Result<(), StoreError> {
+    let temp = chat_dir.join(format!("{MANIFEST_FILE}.{}.tmp", Ulid::generate()));
+    let json = serde_json::to_string_pretty(manifest).expect("manifest should serialize");
+    let mut file = File::create(&temp).map_err(StoreError::writing(&temp))?;
+    writeln!(file, "{json}").map_err(StoreError::writing(&temp))?;
+    file.sync_all().map_err(StoreError::writing(&temp))?;
+    let path = chat_dir.join(MANIFEST_FILE);
+    fs::rename(&temp, &path).map_err(StoreError::writing(&path))
+}
+
+/// Dot-prefixed entries under `chats/` are the store's own scratch space,
+/// never chats.
+fn is_hidden(entry_name: &OsStr) -> bool {
+    entry_name.to_string_lossy().starts_with('.')
 }
 
 /// Read one manifest, refusing anything this build does not understand
@@ -288,7 +304,9 @@ mod tests {
         let intruder = store.chat_dir("not-a-chat");
         fs::create_dir_all(&intruder).expect("intruder dir should be creatable");
 
-        let error = store.scan().expect_err("a manifest-less chat dir should fail");
+        let error = store
+            .scan()
+            .expect_err("a manifest-less chat dir should fail");
 
         assert!(
             format!("{error}").contains(&intruder.join(MANIFEST_FILE).display().to_string()),
