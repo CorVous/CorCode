@@ -384,6 +384,11 @@ mod tests {
         let host_config = host_config();
 
         assert_eq!(host_config.memory, Some(512 * 1024 * 1024));
+        assert_eq!(
+            host_config.memory_swap,
+            Some(512 * 1024 * 1024),
+            "swap left open would double the ceiling"
+        );
         assert_eq!(host_config.nano_cpus, Some(3_000_000_000));
         assert_eq!(host_config.network_mode, Some("corcode-agents".to_owned()));
     }
@@ -538,18 +543,36 @@ mod tests {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt as _;
 
+        let unspellable = Path::new(OsStr::from_bytes(b"/mnt/tank/\xff"));
+
+        assert_blamed(unspellable);
+    }
+
+    #[test]
+    fn a_relative_host_path_is_no_mount() {
+        assert_blamed(Path::new("workspaces/01K1TESTCHATID0000000000"));
+    }
+
+    #[test]
+    fn a_host_path_bearing_a_colon_is_no_mount() {
+        assert_blamed(Path::new("/mnt/tank:backup/corcode/workspaces"));
+    }
+
+    /// A mount docker would misread is a mount the plane refuses to ask for.
+    fn assert_blamed(workspace_dir: &Path) {
         let error = create_body(
             &settings(),
             CHAT_ID,
-            Path::new(OsStr::from_bytes(b"/mnt/tank/\xff")),
+            workspace_dir,
             Path::new("/mnt/tank/corcode/chats/01K1TESTCHATID0000000000/claude"),
             &BTreeMap::new(),
         )
-        .expect_err("an unspellable path should fail");
+        .expect_err("an unmountable path should fail");
 
         assert!(
-            matches!(error, PlaneError::UnmountablePath { .. }),
-            "error should blame the path, got: {error}"
+            matches!(&error, PlaneError::UnmountablePath { path } if path == workspace_dir),
+            "error should blame {}, got: {error}",
+            workspace_dir.display()
         );
     }
 }
