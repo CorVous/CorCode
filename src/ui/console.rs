@@ -9,10 +9,10 @@ use crate::store::{Manifest, RuntimeStatus};
 
 use super::{CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, last_push, page, status_word, text};
 
-/// Warm-pool size until B10 reads it off the plane (ADR-0002).
+/// Warm-pool size, held here until the plane reports its own (ADR-0002).
 const POOL_SLOTS: usize = 2;
 
-/// Orphan-sweep result until B8 runs one (ADR-0008).
+/// Orphan-sweep result, held here until a sweep actually runs (ADR-0008).
 const SWEEP: &str = "ok";
 
 /// The groups the chat list is stacked in, top to bottom (ADR-0002).
@@ -78,7 +78,9 @@ fn status_line(chats: &[Chat], workspace_image: &str) -> String {
     )
 }
 
-/// The new chat that B6 will actually cut; here it only shows its shape.
+/// The new chat this form would cut; inert until there is somewhere to post
+/// it. The preview slugifies as you type so it reads as the branch name it
+/// would become.
 fn new_chat_form(chats: &[Chat]) -> String {
     let today = Utc::now().format("%Y-%m-%d");
     format!(
@@ -87,7 +89,8 @@ fn new_chat_form(chats: &[Chat]) -> String {
          <p><label>Base branch <select name=\"base_branch\">{}</select></label></p>\
          <p><label>Slug <input name=\"slug\" \
          oninput=\"document.getElementById('branch').textContent=\
-         'chat/{today}-'+this.value\"></label></p>\
+         'chat/{today}-'+this.value.toLowerCase().replace(/[^a-z0-9]+/g,'-')\
+         .replace(/^-|-$/g,'')\"></label></p>\
          <p>Branch: <output id=\"branch\">chat/{today}-</output></p>\
          <p><label><input type=\"checkbox\" name=\"direct_on_base\"> \
          Work directly on the base branch</label></p>\
@@ -144,7 +147,7 @@ fn count(chats: &[Chat], status: RuntimeStatus) -> usize {
     in_group(chats, status).count()
 }
 
-/// Who holds a warm-pool slot right now; B10 adds the idle times.
+/// Who holds a warm-pool slot right now.
 fn pool(chats: &[Chat]) -> String {
     let holders: Vec<String> = in_group(chats, RuntimeStatus::Live)
         .map(|(manifest, _)| text(&manifest.title).to_string())
