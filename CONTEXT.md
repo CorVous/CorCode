@@ -32,6 +32,15 @@ Code. Decisions live in `docs/adr/`; this file holds the vocabulary.
 - **Agent memory** — the adapter's internal JSONL under the chat dir's
   `claude/` mount (`CLAUDE_CONFIG_DIR`). Read only by the agent via
   `session/load`; the core never parses it (ADR-0006).
+- **Reconnect ladder** — the ordered attempts to restore agent memory when a
+  prompt hits a chat with no live ACP connection:
+  `resumeSession` → `session/load` → `session/new` + reset notice. Replay
+  during `session/load` is display-silent — it never feeds the events log
+  (ADR-0007).
+- **Reset notice** — the automated context line the core injects before the
+  agent's first turn when its workspace or memory doesn't carry over:
+  archive revival, branch-tip fallback, or a `session/new` memory reset
+  (ADR-0002, ADR-0007).
 - **Push gate** — the rule that no teardown destroys work git doesn't have:
   push failure blocks close/archive/checkpoint paths (ADR-0002, ADR-0005).
 - **Checkpoint branch** — `<branch>-chkpt-<stamp>`, minted by the
