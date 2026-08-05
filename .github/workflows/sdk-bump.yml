@@ -14,33 +14,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Move the pins to the newest releases
+      - name: Move the pin to the newest release
         id: pins
         working-directory: docker/workspace
         run: |
           set -euo pipefail
-          paths=(
-            'dependencies.@zed-industries/claude-agent-acp'
-            'overrides.@anthropic-ai/claude-agent-sdk'
-          )
+          path='overrides.@anthropic-ai/claude-agent-sdk'
+          package="${path#*.}"
+          pinned="$(npm pkg get "$path" | tr -d '"')"
+          case "$pinned" in
+            ''|*[!0-9.]*)
+              echo "no exact version pinned at $path: $pinned" >&2
+              exit 1
+              ;;
+          esac
+          latest="$(npm view "$package" version)"
           changed=false
           summary=''
-          for path in "${paths[@]}"; do
-            package="${path#*.}"
-            pinned="$(npm pkg get "$path" | tr -d '"')"
-            case "$pinned" in
-              ''|*[!0-9.]*)
-                echo "no exact version pinned at $path: $pinned" >&2
-                exit 1
-                ;;
-            esac
-            latest="$(npm view "$package" version)"
-            if [ "$pinned" != "$latest" ]; then
-              npm pkg set "$path=$latest"
-              summary+="- \`$package\`: $pinned -> $latest"$'\n'
-              changed=true
-            fi
-          done
+          if [ "$pinned" != "$latest" ]; then
+            npm pkg set "$path=$latest"
+            summary="- \`$package\`: $pinned -> $latest"$'\n'
+            changed=true
+          fi
           {
             echo "changed=$changed"
             echo 'summary<<PINS'
@@ -57,12 +52,12 @@ jobs:
         if: steps.pins.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
         with:
-          branch: bump/claude-agent-pins
+          branch: bump/claude-agent-sdk
           delete-branch: true
-          title: 'Bump the pinned Claude agent versions'
-          commit-message: 'Bump the pinned Claude agent versions'
+          title: 'Bump the pinned Claude Agent SDK'
+          commit-message: 'Bump the pinned Claude Agent SDK'
           body: |
-            Newer releases are on npm:
+            A newer SDK is on npm:
 
             ${{ steps.pins.outputs.summary }}
             Merging rebuilds the workspace image and pushes a fresh date tag
