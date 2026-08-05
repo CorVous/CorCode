@@ -1,5 +1,5 @@
 [package]
-name = "rust-template"
+name = "cor-code"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -7,18 +7,18 @@ authors = ["Cassidy Prather <pratherea@gmail.com>"]
 description = "Cassidy's opinionated Rust template"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/CassidyPrather/rust-template"
+repository = "https://github.com/CorVous/CorCode"
 keywords = ["cli", "template"]
 categories = ["command-line-utilities"]
 publish = false
-default-run = "rust-template"
+default-run = "cor-code"
 
 [lib]
-name = "rust_template"
+name = "cor_code"
 path = "src/lib.rs"
 
 [[bin]]
-name = "rust-template"
+name = "cor-code"
 path = "src/main.rs"
 
 [[bin]]

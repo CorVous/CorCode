@@ -8,11 +8,11 @@
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=rust-template",
-                    "--package=rust-template"
+                    "--bin=cor-code",
+                    "--package=cor-code"
                 ],
                 "filter": {
-                    "name": "rust-template",
+                    "name": "cor-code",
                     "kind": "bin"
                 }
             },
@@ -29,11 +29,11 @@
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=rust-template",
-                    "--package=rust-template"
+                    "--bin=cor-code",
+                    "--package=cor-code"
                 ],
                 "filter": {
-                    "name": "rust-template",
+                    "name": "cor-code",
                     "kind": "bin"
                 }
             },
@@ -55,10 +55,10 @@
                     "test",
                     "--no-run",
                     "--lib",
-                    "--package=rust-template"
+                    "--package=cor-code"
                 ],
                 "filter": {
-                    "name": "rust_template",
+                    "name": "cor_code",
                     "kind": "lib"
                 }
             },

@@ -1,16 +1,16 @@
 ---
-name: rust-template
+name: cor-code
 description: Cassidy's opinionated Rust template
 ---
 
-# rust-template
+# cor-code
 
 <!-- generated-usage:start -->
 
 ```text
 Cassidy's opinionated Rust template
 
-Usage: rust-template [OPTIONS] [COMMAND]
+Usage: cor-code [OPTIONS] [COMMAND]
 
 Commands:
   version  Display package version
@@ -28,12 +28,12 @@ Options:
           Print version
 ```
 
-## rust-template version
+## cor-code version
 
 ```text
 Display package version
 
-Usage: rust-template version [OPTIONS]
+Usage: cor-code version [OPTIONS]
 
 Options:
   -v, --verbose...
@@ -43,12 +43,12 @@ Options:
           Print help
 ```
 
-## rust-template example
+## cor-code example
 
 ```text
 Example subcommand (replace with your own)
 
-Usage: rust-template example [OPTIONS] <NAME>
+Usage: cor-code example [OPTIONS] <NAME>
 
 Arguments:
   <NAME>

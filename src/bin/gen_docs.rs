@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use clap::CommandFactory;
 
-use rust_template::cli::Cli;
+use cor_code::cli::Cli;
 
 const MARKER_START: &str = "<!-- generated-usage:start -->";
 const MARKER_END: &str = "<!-- generated-usage:end -->";

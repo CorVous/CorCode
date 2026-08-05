@@ -5,7 +5,7 @@ use std::hint::black_box;
 use clap::Parser as _;
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use rust_template::cli::{Cli, log_level};
+use cor_code::cli::{Cli, log_level};
 
 fn bench_arg_parsing(c: &mut Criterion) {
     c.bench_function("parse_example_subcommand", |b| {
