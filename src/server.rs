@@ -57,19 +57,21 @@ async fn home() -> Html<String> {
 }
 
 /// Turn away requests without a valid session, sliding the window forward
-/// on the ones that carry an ageing cookie.
+/// on the ones that carry an ageing cookie. The refreshed cookie is minted
+/// under the key in force before the handler runs, so a handler that
+/// rotates the key still logs this device out.
 async fn require_session(State(gate): State<Arc<Gate>>, request: Request, next: Next) -> Response {
     let now = SystemTime::now();
     let Some(session) = session_cookie(request.headers()).and_then(|c| gate.recognise(c, now))
     else {
         return Redirect::to(LOGIN_PATH).into_response();
     };
-    let stale = session.needs_refresh(now);
+    let refreshed = session
+        .needs_refresh(now)
+        .then(|| cookie_header(&gate.issue_cookie(now)));
     let mut response = next.run(request).await;
-    if stale {
-        response
-            .headers_mut()
-            .insert(header::SET_COOKIE, cookie_header(&gate.issue_cookie(now)));
+    if let Some(cookie) = refreshed {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
     }
     response
 }
