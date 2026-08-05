@@ -36,11 +36,14 @@ RUN curl -fsSL -o /tmp/rustup-init \
       "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
  && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - \
  && chmod +x /tmp/rustup-init \
- && /tmp/rustup-init -y --no-modify-path --profile minimal \
-      --default-toolchain "${RUST_VERSION}" \
+ && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain stable \
  && rustup component add rustfmt clippy \
  && rm -f /tmp/rustup-init \
- && chmod -R a+w "${RUSTUP_HOME}" "${CARGO_HOME}"
+ && installed="$(rustc --version | cut -d' ' -f2)" \
+ && if [ "$installed" != "${RUST_VERSION}" ]; then \
+      echo "stable Rust has moved: expected ${RUST_VERSION}, got ${installed}" >&2; \
+      exit 1; \
+    fi
 
 WORKDIR /opt/corcode-agent
 COPY package.json package-lock.json ./
