@@ -284,12 +284,23 @@ fn routes_nowhere(network: Option<&NetworkInspect>) -> bool {
 /// Ask for the chats' containers that are running: an exited one is a chat
 /// whose agent is gone, and gone chats are parked (ADR-0002).
 fn live_container_query() -> ListContainersOptions {
-    todo!("ask for the running chat containers")
+    let filters = HashMap::from([("label".to_owned(), vec![CHAT_ID_LABEL.to_owned()])]);
+    ListContainersOptionsBuilder::new()
+        .all(false)
+        .filters(&filters)
+        .build()
 }
 
 /// The chat each container belongs to, skipping whatever else the daemon runs.
-fn chat_ids_of(_containers: Vec<ContainerSummary>) -> HashSet<String> {
-    todo!("read the chats off the containers")
+fn chat_ids_of(containers: Vec<ContainerSummary>) -> HashSet<String> {
+    containers
+        .into_iter()
+        .filter_map(|container| {
+            container
+                .labels
+                .and_then(|mut labels| labels.remove(CHAT_ID_LABEL))
+        })
+        .collect()
 }
 
 fn bind(host_dir: &Path, container_path: &str) -> Result<String, PlaneError> {
