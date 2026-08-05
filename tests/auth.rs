@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 
 use cor_code::auth::keystore::KeyStore;
 use cor_code::auth::rate_limit::FREE_ATTEMPTS;
-use cor_code::auth::session::{self, LIFETIME, REFRESH_AFTER};
+use cor_code::auth::session::{self, LIFETIME, REFRESH_AFTER, SigningKey};
 use cor_code::config::Config;
 use cor_code::server::{self, SESSION_COOKIE};
 
@@ -134,18 +134,31 @@ async fn a_tampered_cookie_is_sent_to_the_login_form() {
 }
 
 #[tokio::test]
-async fn an_aging_cookie_is_re_issued_and_a_young_one_is_not() {
+async fn an_aging_cookie_is_re_issued_with_a_later_expiry() {
     let app = TestApp::start().await;
     let aging = app.cookie_issued_at(SystemTime::now() - REFRESH_AFTER - Duration::from_secs(60));
-    let young = app.cookie_issued_at(SystemTime::now());
 
     let refreshed = app.get_home(&aging).await;
-    let unchanged = app.get_home(&young).await;
 
     assert_eq!(refreshed.status(), StatusCode::OK);
-    assert!(refreshed.headers().get("set-cookie").is_some());
-    assert_eq!(unchanged.status(), StatusCode::OK);
-    assert!(unchanged.headers().get("set-cookie").is_none());
+    let reissued = session_cookie(&set_cookie(&refreshed));
+    assert!(
+        app.expiry_of(&reissued) > app.expiry_of(&aging),
+        "the refreshed cookie should outlive the one it replaces"
+    );
+    assert_eq!(app.get_home(&reissued).await.status(), StatusCode::OK);
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_young_cookie_is_left_as_it_is() {
+    let app = TestApp::start().await;
+    let young = app.cookie_issued_at(SystemTime::now());
+
+    let response = app.get_home(&young).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get("set-cookie").is_none());
     app.stop().await;
 }
 
@@ -287,10 +300,24 @@ impl TestApp {
     }
 
     fn cookie_issued_at(&self, when: SystemTime) -> String {
-        let key = KeyStore::open(self.data_dir.path())
+        format!("{SESSION_COOKIE}={}", session::issue(&self.key(), when))
+    }
+
+    fn expiry_of(&self, cookie: &str) -> SystemTime {
+        let value = cookie
+            .split_once('=')
+            .expect("a cookie has a value")
+            .1
+            .to_owned();
+        session::verify(&self.key(), &value, SystemTime::now())
+            .expect("the cookie should still be valid")
+            .expires_at()
+    }
+
+    fn key(&self) -> SigningKey {
+        KeyStore::open(self.data_dir.path())
             .expect("the running server left a key file")
-            .current();
-        format!("{SESSION_COOKIE}={}", session::issue(&key, when))
+            .current()
     }
 
     async fn attempt_login(&self, username: &str, password: &str) -> reqwest::Response {

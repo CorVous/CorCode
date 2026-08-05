@@ -67,6 +67,12 @@ pub fn verify(key: &SigningKey, cookie: &str, now: SystemTime) -> Option<Session
 }
 
 impl Session {
+    /// When this session stops being valid.
+    #[must_use]
+    pub const fn expires_at(&self) -> SystemTime {
+        self.expires_at
+    }
+
     /// Whether this session has aged past [`REFRESH_AFTER`] and should be
     /// re-issued to slide its window forward.
     #[must_use]
@@ -105,10 +111,12 @@ mod tests {
     }
 
     #[test]
-    fn a_freshly_issued_cookie_verifies() {
+    fn a_freshly_issued_cookie_verifies_and_lasts_a_full_lifetime() {
         let cookie = issue(&key(1), at(1_000));
 
-        assert!(verify(&key(1), &cookie, at(1_000)).is_some());
+        let session = verify(&key(1), &cookie, at(1_000)).expect("fresh cookie should verify");
+
+        assert_eq!(session.expires_at(), at(1_000) + LIFETIME);
     }
 
     #[test]
