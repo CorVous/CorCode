@@ -49,8 +49,6 @@ jobs:
         run: |
           set -euo pipefail
           date_tag="$(date --utc +%Y-%m-%d)"
-          for tag in "$date_tag" latest; do
-            docker tag "$IMAGE:candidate" "$IMAGE:$tag"
-            docker push "$IMAGE:$tag"
-          done
+          docker tag "$IMAGE:candidate" "$IMAGE:$date_tag"
+          docker push "$IMAGE:$date_tag"
           echo "Pushed $IMAGE:$date_tag" >> "$GITHUB_STEP_SUMMARY"
