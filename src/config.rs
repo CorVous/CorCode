@@ -1,5 +1,64 @@
 //! Deployment configuration, read from the environment.
 
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use anyhow::{Context as _, Result, bail};
+
+/// Address served when `CORCODE_BIND_ADDR` is unset.
+pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
+
+/// Everything the core needs from its deployment environment.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Root of the NAS dataset holding chats and workspaces (ADR-0006).
+    pub data_dir: PathBuf,
+    /// Address the HTTP server binds.
+    pub bind_addr: SocketAddr,
+    /// The single account's name (ADR-0003).
+    pub username: String,
+    /// The single account's argon2 password hash (ADR-0003).
+    pub password_hash: String,
+    /// Active workspace image tag, pulled lazily at spawn (ADR-0004, ADR-0009).
+    pub workspace_image: String,
+}
+
+impl Config {
+    /// Load the configuration from the process environment.
+    pub fn from_env() -> Result<Self> {
+        Self::from_vars(std::env::vars())
+    }
+
+    /// Load the configuration from an arbitrary set of variables.
+    pub fn from_vars<I>(vars: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        let vars: HashMap<String, String> = vars.into_iter().collect();
+        let bind_addr = vars
+            .get("CORCODE_BIND_ADDR")
+            .map_or(DEFAULT_BIND_ADDR, String::as_str);
+        Ok(Self {
+            data_dir: PathBuf::from(required(&vars, "CORCODE_DATA_DIR")?),
+            bind_addr: bind_addr
+                .parse()
+                .with_context(|| format!("CORCODE_BIND_ADDR is not an address: {bind_addr}"))?,
+            username: required(&vars, "CORCODE_USERNAME")?.to_owned(),
+            password_hash: required(&vars, "CORCODE_PASSWORD_HASH")?.to_owned(),
+            workspace_image: required(&vars, "CORCODE_WORKSPACE_IMAGE")?.to_owned(),
+        })
+    }
+}
+
+/// Look up a variable that has no safe default.
+fn required<'a>(vars: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
+    match vars.get(key) {
+        Some(value) if !value.is_empty() => Ok(value),
+        _ => bail!("{key} must be set"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
