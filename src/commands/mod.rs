@@ -1,4 +1,5 @@
-//! Subcommand implementations, one module per subcommand.
+//! Command implementations: `serve` runs by default; other subcommands
+//! live in their own module.
 
-pub mod example;
+pub mod serve;
 pub mod version;

@@ -3,10 +3,10 @@
 use std::io::Write as _;
 use std::process::ExitCode;
 
-use clap::{ArgAction, CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use log::{LevelFilter, error};
 
-use crate::commands::{example, version};
+use crate::commands::{serve, version};
 
 pub const VERSION: &str = env!("GIT_DESCRIBE_VERSION");
 
@@ -17,7 +17,7 @@ pub struct Cli {
     #[arg(short, long, action = ArgAction::Count, global = true)]
     pub verbose: u8,
 
-    /// Subcommand to execute
+    /// Subcommand to execute; without one, the HTTP service is served
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -28,8 +28,6 @@ pub struct Cli {
 pub enum Command {
     /// Display package version
     Version,
-    /// Example subcommand (replace with your own)
-    Example(example::Args),
 }
 
 /// Map a `-v` count to a log level.
@@ -61,20 +59,11 @@ pub fn setup_logging(verbose: u8) {
 #[must_use]
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
-
-    // If no command specified, show help
-    let Some(command) = cli.command else {
-        // Ignore the write error: printing help only fails on a broken pipe,
-        // and there's nothing useful to do about it here.
-        let _ = Cli::command().print_help();
-        return ExitCode::SUCCESS;
-    };
-
     setup_logging(cli.verbose);
 
-    let result = match command {
-        Command::Version => version::run(),
-        Command::Example(args) => example::run(&args),
+    let result = match cli.command {
+        Some(Command::Version) => version::run(),
+        None => serve::run(),
     };
 
     match result {
@@ -88,6 +77,8 @@ pub fn run() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory as _;
+
     use super::*;
 
     #[test]
