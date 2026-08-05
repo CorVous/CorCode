@@ -1,6 +1,7 @@
 //! Runtime status: the manifest's state crossed with container liveness.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::hash::BuildHasher;
 
 use anyhow::Result;
@@ -10,7 +11,7 @@ use super::manifest::{ChatState, Manifest};
 /// Which chats currently own a running container. Answered by Docker in
 /// production, by a fake in tests.
 pub trait ContainerLiveness {
-    fn live_chat_ids(&self) -> Result<HashSet<String>>;
+    fn live_chat_ids(&self) -> impl Future<Output = Result<HashSet<String>>> + Send;
 }
 
 /// What the UI shows for a chat right now (ADR-0002 vocabulary).
@@ -46,7 +47,7 @@ mod tests {
     }
 
     impl ContainerLiveness for FakeLiveness {
-        fn live_chat_ids(&self) -> Result<HashSet<String>> {
+        async fn live_chat_ids(&self) -> Result<HashSet<String>> {
             Ok(self.live.clone())
         }
     }
@@ -68,35 +69,36 @@ mod tests {
         }
     }
 
-    fn liveness_of(chat_ids: &[&str]) -> HashSet<String> {
+    async fn liveness_of(chat_ids: &[&str]) -> HashSet<String> {
         let liveness = FakeLiveness {
             live: chat_ids.iter().map(|id| (*id).to_owned()).collect(),
         };
         liveness
             .live_chat_ids()
+            .await
             .expect("fake liveness should answer")
     }
 
-    #[test]
-    fn open_chat_with_a_container_is_live() {
+    #[tokio::test]
+    async fn open_chat_with_a_container_is_live() {
         let manifest = manifest(ChatState::Open);
-        let live = liveness_of(&[&manifest.chat_id]);
+        let live = liveness_of(&[&manifest.chat_id]).await;
 
         assert_eq!(runtime_status(&manifest, &live), RuntimeStatus::Live);
     }
 
-    #[test]
-    fn open_chat_without_a_container_is_parked() {
+    #[tokio::test]
+    async fn open_chat_without_a_container_is_parked() {
         let manifest = manifest(ChatState::Open);
-        let live = liveness_of(&["01K1SOMEOTHERCHAT0000000"]);
+        let live = liveness_of(&["01K1SOMEOTHERCHAT0000000"]).await;
 
         assert_eq!(runtime_status(&manifest, &live), RuntimeStatus::Parked);
     }
 
-    #[test]
-    fn archived_chat_stays_archived_whatever_docker_says() {
+    #[tokio::test]
+    async fn archived_chat_stays_archived_whatever_docker_says() {
         let manifest = manifest(ChatState::Archived);
-        let live = liveness_of(&[&manifest.chat_id]);
+        let live = liveness_of(&[&manifest.chat_id]).await;
 
         assert_eq!(runtime_status(&manifest, &live), RuntimeStatus::Archived);
     }

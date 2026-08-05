@@ -14,7 +14,7 @@ use tokio::task::JoinHandle;
 use cor_code::auth::keystore::KeyStore;
 use cor_code::auth::rate_limit::FREE_ATTEMPTS;
 use cor_code::auth::session::{self, LIFETIME, REFRESH_AFTER, SigningKey};
-use cor_code::config::Config;
+use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
 use cor_code::server::{self, SESSION_COOKIE};
 
 const USERNAME: &str = "cassidy";
@@ -354,6 +354,9 @@ fn test_config(data_dir: std::path::PathBuf) -> Config {
         username: USERNAME.to_owned(),
         password_hash: password_hash(PASSWORD),
         workspace_image: "ghcr.io/corvous/corcode-workspace:2026-08-05".to_owned(),
+        container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
+        container_cpus: DEFAULT_CONTAINER_CPUS,
+        registry: None,
     }
 }
 

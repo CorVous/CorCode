@@ -4,7 +4,7 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-use cor_code::config::Config;
+use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
 
 #[tokio::test]
 async fn health_endpoint_answers_on_ephemeral_port() {
@@ -21,6 +21,9 @@ async fn health_endpoint_answers_on_ephemeral_port() {
         username: "cassidy".to_owned(),
         password_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".to_owned(),
         workspace_image: "ghcr.io/corvous/corcode-workspace:2026-08-05".to_owned(),
+        container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
+        container_cpus: DEFAULT_CONTAINER_CPUS,
+        registry: None,
     };
     let router = cor_code::server::router(&config).expect("router should build");
     let (shutdown, shutdown_rx) = oneshot::channel();

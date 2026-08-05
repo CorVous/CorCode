@@ -34,9 +34,11 @@ anyhow = { version = "1.0.100", default-features = true }
 argon2 = "0.5.3"
 axum = "0.8.9"
 base64 = "0.23.1"
+bollard = "0.21.0"
 chrono = { version = "0.4.45", default-features = false, features = ["now", "serde", "std"] }
 clap = { version = "4.5.53", features = ["derive"] }
 env_logger = { version = "0.11.8", default-features = true }
+futures-util = { version = "0.3.33", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 hmac = "0.13.0"
 log = { version = "0.4.28", default-features = true }

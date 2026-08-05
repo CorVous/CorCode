@@ -39,6 +39,10 @@ Serving (the default action) reads its configuration from the environment:
 | `CORCODE_PASSWORD_HASH`     | yes      | -              |
 | `CORCODE_WORKSPACE_IMAGE`   | yes      | -              |
 | `CORCODE_BIND_ADDR`         | no       | `0.0.0.0:8080` |
+| `CORCODE_CONTAINER_MEMORY_MB` | no     | `4096`         |
+| `CORCODE_CONTAINER_CPUS`    | no       | `2`            |
+| `CORCODE_REGISTRY_USER`     | no       | -              |
+| `CORCODE_REGISTRY_TOKEN`    | no       | -              |
 
 ## Development
 
