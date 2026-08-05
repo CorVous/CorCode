@@ -158,15 +158,14 @@ fn origin_matches_host(headers: &HeaderMap) -> bool {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return true;
     };
-    let stated = origin
-        .to_str()
-        .ok()
-        .and_then(|origin| origin.split_once("://"))
-        .map(|(_, authority)| authority);
     let host = headers
         .get(header::HOST)
         .and_then(|host| host.to_str().ok());
-    stated.is_some() && stated == host
+    origin
+        .to_str()
+        .ok()
+        .and_then(|origin| origin.split_once("://"))
+        .is_some_and(|(_, authority)| Some(authority) == host)
 }
 
 /// The login screen, optionally reporting why the last attempt failed.
