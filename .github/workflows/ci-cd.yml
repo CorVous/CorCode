@@ -84,7 +84,7 @@ jobs:
         shell: bash
         run: |
           # Keep this in sync with the [[bin]] name in Cargo.toml
-          BIN="rust-template"
+          BIN="cor-code"
           TARGET="${{ matrix.target }}"
           mkdir -p dist
           if [[ "${{ runner.os }}" == "Windows" ]]; then
