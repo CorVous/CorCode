@@ -241,6 +241,7 @@ fn create_body(
     claude_dir: &Path,
     env: &BTreeMap<String, String>,
 ) -> Result<ContainerCreateBody, PlaneError> {
+    let memory = i64::from(settings.memory_mb) * BYTES_PER_MB;
     Ok(ContainerCreateBody {
         image: Some(settings.image.clone()),
         user: Some(AGENT_USER.to_owned()),
@@ -265,7 +266,8 @@ fn create_body(
                 SCRATCH_MOUNT.to_owned(),
                 SCRATCH_OPTIONS.to_owned(),
             )])),
-            memory: Some(i64::from(settings.memory_mb) * BYTES_PER_MB),
+            memory: Some(memory),
+            memory_swap: Some(memory),
             nano_cpus: Some(i64::from(settings.cpus) * NANOS_PER_CPU),
             network_mode: Some(NETWORK.to_owned()),
             ..HostConfig::default()
@@ -303,9 +305,12 @@ fn chat_ids_of(containers: Vec<ContainerSummary>) -> HashSet<String> {
         .collect()
 }
 
+/// A bind is three colon-separated fields, so a host path is only mountable
+/// while it is absolute and colon-free.
 fn bind(host_dir: &Path, container_path: &str) -> Result<String, PlaneError> {
     host_dir
         .to_str()
+        .filter(|host_dir| host_dir.starts_with('/') && !host_dir.contains(':'))
         .map(|host_dir| format!("{host_dir}:{container_path}:rw"))
         .ok_or_else(|| PlaneError::UnmountablePath {
             path: host_dir.to_owned(),
