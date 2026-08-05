@@ -13,4 +13,19 @@ pub enum PlaneError {
     AlreadyLive { chat_id: String },
     #[error("{} cannot be spelled as a mount", path.display())]
     UnmountablePath { path: PathBuf },
+    #[error("the container runtime failed to {action}")]
+    Runtime {
+        action: String,
+        source: bollard::errors::Error,
+    },
+}
+
+impl PlaneError {
+    /// Blame `action` for whatever the daemon says went wrong doing it.
+    pub(super) fn runtime(
+        action: impl Into<String>,
+    ) -> impl FnOnce(bollard::errors::Error) -> Self {
+        let action = action.into();
+        move |source| Self::Runtime { action, source }
+    }
 }

@@ -5,9 +5,16 @@ use std::fmt;
 use std::path::Path;
 
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, HostConfig};
+use bollard::auth::DockerCredentials;
+use bollard::errors::Error as DockerError;
+use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest};
+use bollard::query_parameters::{
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
+    ListNetworksOptionsBuilder, StopContainerOptionsBuilder,
+};
+use futures_util::StreamExt as _;
 
-use super::{ContainerPlane, ContainerRef, PlaneError};
+use super::{ContainerPlane, ContainerRef, PlaneError, container_name};
 use crate::store::ContainerLiveness;
 
 /// Agent containers talk to nothing but each other (ADR-0001).
@@ -28,6 +35,9 @@ const SCRATCH_OPTIONS: &str = "rw,nosuid,nodev,noexec,size=256m";
 const AGENT_USER: &str = "1000:1000";
 const BYTES_PER_MB: i64 = 1024 * 1024;
 const NANOS_PER_CPU: i64 = 1_000_000_000;
+const STOP_GRACE_SECONDS: i32 = 10;
+const NOT_FOUND: u16 = 404;
+const NAME_TAKEN: u16 = 409;
 
 /// A registry login for the lazy pull (ADR-0009).
 #[derive(Clone)]
@@ -55,7 +65,6 @@ pub struct PlaneSettings {
 }
 
 /// Spawns hardened siblings on the daemon holding the local socket.
-#[derive(Debug)]
 pub struct DockerPlane {
     docker: Docker,
     settings: PlaneSettings,
@@ -63,28 +72,162 @@ pub struct DockerPlane {
 
 impl DockerPlane {
     /// Reach the daemon over the local socket.
-    pub fn connect(_settings: PlaneSettings) -> Result<Self, PlaneError> {
-        todo!("connect to the local daemon")
+    pub fn connect(settings: PlaneSettings) -> Result<Self, PlaneError> {
+        let docker = Docker::connect_with_local_defaults()
+            .map_err(PlaneError::runtime("reach the local docker daemon"))?;
+        Ok(Self { docker, settings })
+    }
+
+    /// The agents' own network, cut off from the core and the wider host
+    /// (ADR-0001).
+    async fn ensure_network(&self) -> Result<(), PlaneError> {
+        let filters = HashMap::from([("name".to_owned(), vec![NETWORK.to_owned()])]);
+        let options = ListNetworksOptionsBuilder::new().filters(&filters).build();
+        let existing =
+            self.docker
+                .list_networks(Some(options))
+                .await
+                .map_err(PlaneError::runtime(format!(
+                    "look for the {NETWORK} network"
+                )))?;
+        if existing
+            .iter()
+            .any(|network| network.name.as_deref() == Some(NETWORK))
+        {
+            return Ok(());
+        }
+        self.docker
+            .create_network(NetworkCreateRequest {
+                name: NETWORK.to_owned(),
+                driver: Some("bridge".to_owned()),
+                internal: Some(true),
+                ..NetworkCreateRequest::default()
+            })
+            .await
+            .map_err(PlaneError::runtime(format!("create the {NETWORK} network")))?;
+        Ok(())
+    }
+
+    /// Pull the configured tag the first time a spawn misses it locally
+    /// (ADR-0009).
+    async fn ensure_image(&self) -> Result<(), PlaneError> {
+        let image = &self.settings.image;
+        match self.docker.inspect_image(image).await {
+            Ok(_) => Ok(()),
+            Err(DockerError::DockerResponseServerError {
+                status_code: NOT_FOUND,
+                ..
+            }) => self.pull_image().await,
+            Err(source) => Err(PlaneError::runtime(format!("look for image {image}"))(
+                source,
+            )),
+        }
+    }
+
+    async fn pull_image(&self) -> Result<(), PlaneError> {
+        let image = &self.settings.image;
+        let options = CreateImageOptionsBuilder::new().from_image(image).build();
+        let credentials = self
+            .settings
+            .registry
+            .as_ref()
+            .map(|registry| DockerCredentials {
+                username: Some(registry.user.clone()),
+                password: Some(registry.token.clone()),
+                ..DockerCredentials::default()
+            });
+        let mut pull = self.docker.create_image(Some(options), None, credentials);
+        while let Some(progress) = pull.next().await {
+            progress.map_err(PlaneError::runtime(format!("pull image {image}")))?;
+        }
+        Ok(())
     }
 }
 
 impl ContainerPlane for DockerPlane {
     async fn spawn(
         &self,
-        _chat_id: &str,
-        _workspace_dir: &Path,
-        _claude_dir: &Path,
-        _env: &BTreeMap<String, String>,
+        chat_id: &str,
+        workspace_dir: &Path,
+        claude_dir: &Path,
+        env: &BTreeMap<String, String>,
     ) -> Result<ContainerRef, PlaneError> {
-        todo!("pull if absent, then create and start the container")
+        self.ensure_network().await?;
+        self.ensure_image().await?;
+        let options = CreateContainerOptionsBuilder::new()
+            .name(&container_name(chat_id))
+            .build();
+        let body = create_body(&self.settings, chat_id, workspace_dir, claude_dir, env)?;
+        let created = self
+            .docker
+            .create_container(Some(options), body)
+            .await
+            .map_err(spawn_failure(chat_id))?;
+        self.docker
+            .start_container(&created.id, None)
+            .await
+            .map_err(PlaneError::runtime(format!(
+                "start the container of chat {chat_id}"
+            )))?;
+        Ok(ContainerRef::new(chat_id, created.id))
     }
 
-    async fn teardown(&self, _chat_id: &str) -> Result<(), PlaneError> {
-        todo!("stop and remove the container")
+    async fn teardown(&self, chat_id: &str) -> Result<(), PlaneError> {
+        let name = container_name(chat_id);
+        let stop = StopContainerOptionsBuilder::new()
+            .t(STOP_GRACE_SECONDS)
+            .build();
+        self.docker
+            .stop_container(&name, Some(stop))
+            .await
+            .map_err(teardown_failure(chat_id))?;
+        self.docker
+            .remove_container(&name, None)
+            .await
+            .map_err(teardown_failure(chat_id))
     }
 
     async fn list_live(&self) -> Result<HashSet<String>, PlaneError> {
-        todo!("list the labelled containers")
+        let filters = HashMap::from([("label".to_owned(), vec![CHAT_ID_LABEL.to_owned()])]);
+        let options = ListContainersOptionsBuilder::new()
+            .filters(&filters)
+            .build();
+        let running = self
+            .docker
+            .list_containers(Some(options))
+            .await
+            .map_err(PlaneError::runtime("list the workspace containers"))?;
+        Ok(running
+            .into_iter()
+            .filter_map(|container| {
+                container
+                    .labels
+                    .and_then(|mut labels| labels.remove(CHAT_ID_LABEL))
+            })
+            .collect())
+    }
+}
+
+/// A name clash means the chat already holds its one container.
+fn spawn_failure(chat_id: &str) -> impl FnOnce(DockerError) -> PlaneError + use<> {
+    let chat_id = chat_id.to_owned();
+    move |source| match source {
+        DockerError::DockerResponseServerError {
+            status_code: NAME_TAKEN,
+            ..
+        } => PlaneError::AlreadyLive { chat_id },
+        source => PlaneError::runtime(format!("spawn a container for chat {chat_id}"))(source),
+    }
+}
+
+fn teardown_failure(chat_id: &str) -> impl FnOnce(DockerError) -> PlaneError + use<> {
+    let chat_id = chat_id.to_owned();
+    move |source| match source {
+        DockerError::DockerResponseServerError {
+            status_code: NOT_FOUND,
+            ..
+        } => PlaneError::NotLive { chat_id },
+        source => PlaneError::runtime(format!("tear down the container of chat {chat_id}"))(source),
     }
 }
 
@@ -96,13 +239,52 @@ impl ContainerLiveness for DockerPlane {
 
 /// The hardening contract of ADR-0001, spelled out for one chat.
 fn create_body(
-    _settings: &PlaneSettings,
-    _chat_id: &str,
-    _workspace_dir: &Path,
-    _claude_dir: &Path,
-    _env: &BTreeMap<String, String>,
+    settings: &PlaneSettings,
+    chat_id: &str,
+    workspace_dir: &Path,
+    claude_dir: &Path,
+    env: &BTreeMap<String, String>,
 ) -> Result<ContainerCreateBody, PlaneError> {
-    todo!("build the hardened container body")
+    Ok(ContainerCreateBody {
+        image: Some(settings.image.clone()),
+        user: Some(AGENT_USER.to_owned()),
+        env: Some(
+            env.iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect(),
+        ),
+        labels: Some(HashMap::from([(
+            CHAT_ID_LABEL.to_owned(),
+            chat_id.to_owned(),
+        )])),
+        host_config: Some(HostConfig {
+            binds: Some(vec![
+                bind(workspace_dir, WORKSPACE_MOUNT)?,
+                bind(claude_dir, CLAUDE_MOUNT)?,
+            ]),
+            cap_drop: Some(vec!["ALL".to_owned()]),
+            security_opt: Some(vec!["no-new-privileges:true".to_owned()]),
+            readonly_rootfs: Some(true),
+            tmpfs: Some(HashMap::from([(
+                SCRATCH_MOUNT.to_owned(),
+                SCRATCH_OPTIONS.to_owned(),
+            )])),
+            memory: Some(i64::from(settings.memory_mb) * BYTES_PER_MB),
+            nano_cpus: Some(i64::from(settings.cpus) * NANOS_PER_CPU),
+            network_mode: Some(NETWORK.to_owned()),
+            ..HostConfig::default()
+        }),
+        ..ContainerCreateBody::default()
+    })
+}
+
+fn bind(host_dir: &Path, container_path: &str) -> Result<String, PlaneError> {
+    host_dir
+        .to_str()
+        .map(|host_dir| format!("{host_dir}:{container_path}:rw"))
+        .ok_or_else(|| PlaneError::UnmountablePath {
+            path: host_dir.to_owned(),
+        })
 }
 
 #[cfg(test)]
