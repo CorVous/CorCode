@@ -7,8 +7,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::plane::RegistryCredentials;
-
 /// Address served when `CORCODE_BIND_ADDR` is unset.
 pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 /// Memory ceiling of a workspace container when `CORCODE_CONTAINER_MEMORY_MB`
@@ -17,6 +15,23 @@ pub const DEFAULT_CONTAINER_MEMORY_MB: u32 = 4096;
 /// CPU ceiling of a workspace container when `CORCODE_CONTAINER_CPUS` is
 /// unset.
 pub const DEFAULT_CONTAINER_CPUS: u32 = 2;
+
+/// A registry login for the lazy image pull (ADR-0009).
+#[derive(Clone)]
+pub struct RegistryCredentials {
+    pub user: String,
+    pub token: String,
+}
+
+impl fmt::Debug for RegistryCredentials {
+    /// Redacts `token`: it is a registry password in all but name.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegistryCredentials")
+            .field("user", &self.user)
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
 
 /// Everything the core needs from its deployment environment.
 #[derive(Clone)]

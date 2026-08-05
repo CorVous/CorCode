@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 
-pub use docker::{DockerPlane, PlaneSettings, RegistryCredentials};
+pub use docker::{DockerPlane, PlaneSettings};
 pub use error::PlaneError;
 pub use memory::MemoryPlane;
 

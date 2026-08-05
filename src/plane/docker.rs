@@ -1,7 +1,6 @@
 //! Workspace containers on the local Docker daemon, hardened per ADR-0001.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt;
 use std::path::Path;
 
 use bollard::Docker;
@@ -15,6 +14,7 @@ use bollard::query_parameters::{
 use futures_util::StreamExt as _;
 
 use super::{ContainerPlane, ContainerRef, PlaneError, container_name};
+use crate::config::RegistryCredentials;
 use crate::store::ContainerLiveness;
 
 /// Agent containers talk to nothing but each other (ADR-0001).
@@ -38,22 +38,6 @@ const NANOS_PER_CPU: i64 = 1_000_000_000;
 const STOP_GRACE_SECONDS: i32 = 10;
 const NOT_FOUND: u16 = 404;
 const NAME_TAKEN: u16 = 409;
-
-/// A registry login for the lazy pull (ADR-0009).
-#[derive(Clone)]
-pub struct RegistryCredentials {
-    pub user: String,
-    pub token: String,
-}
-
-impl fmt::Debug for RegistryCredentials {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RegistryCredentials")
-            .field("user", &self.user)
-            .field("token", &"<redacted>")
-            .finish()
-    }
-}
 
 /// What every spawn is the same about: the image and the box it runs in.
 #[derive(Debug, Clone)]
