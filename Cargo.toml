@@ -32,6 +32,7 @@ harness = false
 [dependencies]
 anyhow = { version = "1.0.100", default-features = true }
 axum = "0.8.9"
+bollard = "0.21.0"
 chrono = { version = "0.4.45", default-features = false, features = ["now", "serde", "std"] }
 clap = { version = "4.5.53", features = ["derive"] }
 env_logger = { version = "0.11.8", default-features = true }

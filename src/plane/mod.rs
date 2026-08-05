@@ -1,6 +1,7 @@
 //! Workspace containers, spawned as hardened siblings behind a swappable
 //! trait (ADR-0001).
 
+mod docker;
 mod error;
 mod memory;
 
@@ -8,6 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 
+pub use docker::{DockerPlane, PlaneSettings, RegistryCredentials};
 pub use error::PlaneError;
 pub use memory::MemoryPlane;
 
