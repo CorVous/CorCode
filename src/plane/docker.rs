@@ -6,7 +6,7 @@ use std::path::Path;
 use bollard::Docker;
 use bollard::auth::DockerCredentials;
 use bollard::errors::Error as DockerError;
-use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest};
+use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest, NetworkInspect};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     ListNetworksOptionsBuilder, StopContainerOptionsBuilder,
@@ -262,6 +262,13 @@ fn create_body(
     })
 }
 
+/// A network the agents may be put on: it is there, and it routes nowhere
+/// (ADR-0001). Anything else — a leftover bridge, a compose-declared network —
+/// would hand every agent a way out.
+fn routes_nowhere(_network: Option<&NetworkInspect>) -> bool {
+    todo!("judge the network")
+}
+
 fn bind(host_dir: &Path, container_path: &str) -> Result<String, PlaneError> {
     host_dir
         .to_str()
@@ -363,6 +370,36 @@ mod tests {
             body.env,
             Some(vec!["ANTHROPIC_API_KEY=sk-secret".to_owned()])
         );
+    }
+
+    fn network(internal: Option<bool>) -> NetworkInspect {
+        NetworkInspect {
+            name: Some(NETWORK.to_owned()),
+            internal,
+            ..NetworkInspect::default()
+        }
+    }
+
+    #[test]
+    fn an_internal_network_is_the_only_one_agents_may_join() {
+        assert!(routes_nowhere(Some(&network(Some(true)))));
+    }
+
+    #[test]
+    fn a_routable_network_of_the_same_name_is_refused() {
+        assert!(
+            !routes_nowhere(Some(&network(Some(false)))),
+            "a routable network would give every agent a way out"
+        );
+        assert!(
+            !routes_nowhere(Some(&network(None))),
+            "a network that will not say is no better"
+        );
+    }
+
+    #[test]
+    fn a_missing_network_is_refused() {
+        assert!(!routes_nowhere(None));
     }
 
     fn server_said(status_code: u16) -> DockerError {
