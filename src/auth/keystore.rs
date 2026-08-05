@@ -1,10 +1,12 @@
 //! The signing key on disk: generated at first boot, persisted on the data
 //! dataset, and rotated to log every device out (ADR-0003).
 
+use std::fs::{self, File};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 
 use super::session::SigningKey;
 
@@ -20,20 +22,65 @@ pub struct KeyStore {
 impl KeyStore {
     /// Load the key stored under `data_dir`, generating and persisting one
     /// if this is the first boot.
-    pub fn open(_data_dir: &Path) -> Result<Self> {
-        todo!()
+    pub fn open(data_dir: &Path) -> Result<Self> {
+        let path = data_dir.join(KEY_FILE);
+        let key = match fs::read(&path) {
+            Ok(bytes) => adopt(&bytes, &path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let key = SigningKey::random()?;
+                persist(&key, &path)?;
+                key
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        Ok(Self {
+            path,
+            current: RwLock::new(key),
+        })
     }
 
     /// The key currently in force.
     #[must_use]
     pub fn current(&self) -> SigningKey {
-        todo!()
+        self.current.read().expect(POISONED).clone()
     }
 
     /// Replace the key with fresh material, invalidating every cookie.
     pub fn rotate(&self) -> Result<()> {
-        todo!()
+        let key = SigningKey::random()?;
+        persist(&key, &self.path)?;
+        *self.current.write().expect(POISONED) = key;
+        Ok(())
     }
+}
+
+/// Nothing held across the key lock can panic, so it cannot be poisoned.
+const POISONED: &str = "the signing key lock is never poisoned";
+
+/// Interpret stored bytes as key material.
+fn adopt(bytes: &[u8], path: &Path) -> Result<SigningKey> {
+    let bytes: [u8; 32] = bytes.try_into().with_context(|| {
+        format!(
+            "{} holds {} bytes, not a 32-byte signing key",
+            path.display(),
+            bytes.len()
+        )
+    })?;
+    Ok(SigningKey::from_bytes(bytes))
+}
+
+/// Write key material where only its owner can read it back.
+fn persist(key: &SigningKey, path: &Path) -> Result<()> {
+    let mut options = File::options();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(key.as_bytes()))
+        .with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[cfg(test)]
