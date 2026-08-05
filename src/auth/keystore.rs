@@ -13,6 +13,10 @@ use super::session::SigningKey;
 /// File under the data directory holding the raw key material.
 pub const KEY_FILE: &str = "signing_key";
 
+/// Sibling file a new key lands in before it is moved into place, so a
+/// crash mid-write cannot leave an unbootable half key.
+const PENDING_KEY_FILE: &str = "signing_key.tmp";
+
 /// The live signing key, backed by a file under the data directory.
 pub struct KeyStore {
     path: PathBuf,
@@ -71,15 +75,33 @@ fn adopt(bytes: &[u8], path: &Path) -> Result<SigningKey> {
     Ok(SigningKey::from_bytes(bytes))
 }
 
-/// Write key material where only its owner can read it back.
+/// Put key material in place in one step: a crash leaves either the old
+/// key or the new one, never a half-written file.
 fn persist(key: &SigningKey, path: &Path) -> Result<()> {
+    let pending = path.with_file_name(PENDING_KEY_FILE);
+    write_owner_only(key, &pending)?;
+    fs::rename(&pending, path).with_context(|| {
+        format!(
+            "failed to move {} onto {}",
+            pending.display(),
+            path.display()
+        )
+    })
+}
+
+/// Write key material where only its owner can read it back, and make sure
+/// it has reached the disk.
+fn write_owner_only(key: &SigningKey, path: &Path) -> Result<()> {
     let mut options = File::options();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options
         .open(path)
-        .and_then(|mut file| file.write_all(key.as_bytes()))
+        .and_then(|mut file| {
+            file.write_all(key.as_bytes())
+                .and_then(|()| file.sync_all())
+        })
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
@@ -137,6 +159,35 @@ mod tests {
             format!("{error:#}").contains(KEY_FILE),
             "error should name the key file, got: {error:#}"
         );
+    }
+
+    #[test]
+    fn rotation_leaves_no_half_written_key_behind() {
+        let dir = tempdir().expect("temp dir should be creatable");
+        let store = KeyStore::open(dir.path()).expect("first open should generate a key");
+
+        store.rotate().expect("rotation should persist a new key");
+
+        assert!(!dir.path().join(PENDING_KEY_FILE).exists());
+        let reopened = KeyStore::open(dir.path()).expect("the rotated key should load");
+        assert_eq!(reopened.current().as_bytes(), store.current().as_bytes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rotated_key_file_stays_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempdir().expect("temp dir should be creatable");
+        let store = KeyStore::open(dir.path()).expect("first open should generate a key");
+
+        store.rotate().expect("rotation should persist a new key");
+
+        let mode = fs::metadata(dir.path().join(KEY_FILE))
+            .expect("key file should exist")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[cfg(unix)]
