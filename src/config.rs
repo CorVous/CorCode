@@ -7,8 +7,16 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::plane::RegistryCredentials;
+
 /// Address served when `CORCODE_BIND_ADDR` is unset.
 pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
+/// Memory ceiling of a workspace container when `CORCODE_CONTAINER_MEMORY_MB`
+/// is unset.
+pub const DEFAULT_CONTAINER_MEMORY_MB: u32 = 4096;
+/// CPU ceiling of a workspace container when `CORCODE_CONTAINER_CPUS` is
+/// unset.
+pub const DEFAULT_CONTAINER_CPUS: u32 = 2;
 
 /// Everything the core needs from its deployment environment.
 #[derive(Clone)]
@@ -23,6 +31,12 @@ pub struct Config {
     pub password_hash: String,
     /// Active workspace image tag, pulled lazily at spawn (ADR-0004, ADR-0009).
     pub workspace_image: String,
+    /// Memory ceiling of one workspace container (ADR-0001).
+    pub container_memory_mb: u32,
+    /// CPU ceiling of one workspace container (ADR-0001).
+    pub container_cpus: u32,
+    /// Login for the registry holding the workspace image (ADR-0009).
+    pub registry: Option<RegistryCredentials>,
 }
 
 impl Config {
@@ -48,6 +62,9 @@ impl Config {
             username: required(&vars, "CORCODE_USERNAME")?.to_owned(),
             password_hash: required(&vars, "CORCODE_PASSWORD_HASH")?.to_owned(),
             workspace_image: required(&vars, "CORCODE_WORKSPACE_IMAGE")?.to_owned(),
+            container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
+            container_cpus: DEFAULT_CONTAINER_CPUS,
+            registry: None,
         })
     }
 }
@@ -129,6 +146,79 @@ mod tests {
             config.bind_addr,
             DEFAULT_BIND_ADDR.parse::<SocketAddr>().expect("valid addr")
         );
+    }
+
+    #[test]
+    fn container_limits_default_when_unset() {
+        let config = Config::from_vars(required_vars()).expect("defaulted environment should load");
+
+        assert_eq!(config.container_memory_mb, DEFAULT_CONTAINER_MEMORY_MB);
+        assert_eq!(config.container_cpus, DEFAULT_CONTAINER_CPUS);
+        assert!(config.registry.is_none());
+    }
+
+    #[test]
+    fn container_limits_come_from_the_environment() {
+        let mut vars = required_vars();
+        vars.push(("CORCODE_CONTAINER_MEMORY_MB".to_owned(), "8192".to_owned()));
+        vars.push(("CORCODE_CONTAINER_CPUS".to_owned(), "6".to_owned()));
+
+        let config = Config::from_vars(vars).expect("tuned environment should load");
+
+        assert_eq!(config.container_memory_mb, 8192);
+        assert_eq!(config.container_cpus, 6);
+    }
+
+    #[test]
+    fn an_unparseable_container_limit_names_the_variable() {
+        let mut vars = required_vars();
+        vars.push(("CORCODE_CONTAINER_CPUS".to_owned(), "half".to_owned()));
+
+        let error = Config::from_vars(vars).expect_err("a non-numeric limit should fail");
+
+        assert!(
+            format!("{error:#}").contains("CORCODE_CONTAINER_CPUS"),
+            "error should name the offending variable, got: {error:#}"
+        );
+    }
+
+    #[test]
+    fn registry_credentials_load_as_a_pair() {
+        let mut vars = required_vars();
+        vars.push(("CORCODE_REGISTRY_USER".to_owned(), "CorVous".to_owned()));
+        vars.push(("CORCODE_REGISTRY_TOKEN".to_owned(), "ghp-secret".to_owned()));
+
+        let config = Config::from_vars(vars).expect("credentialled environment should load");
+
+        let registry = config.registry.expect("credentials should be read");
+        assert_eq!(registry.user, "CorVous");
+        assert_eq!(registry.token, "ghp-secret");
+    }
+
+    #[test]
+    fn half_a_registry_credential_fails_loudly() {
+        let mut vars = required_vars();
+        vars.push(("CORCODE_REGISTRY_USER".to_owned(), "CorVous".to_owned()));
+
+        let error = Config::from_vars(vars).expect_err("a lone registry user should fail");
+
+        assert!(
+            format!("{error:#}").contains("CORCODE_REGISTRY_TOKEN"),
+            "error should name the missing variable, got: {error:#}"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_the_registry_token() {
+        let mut vars = required_vars();
+        vars.push(("CORCODE_REGISTRY_USER".to_owned(), "CorVous".to_owned()));
+        vars.push(("CORCODE_REGISTRY_TOKEN".to_owned(), "ghp-secret".to_owned()));
+        let config = Config::from_vars(vars).expect("credentialled environment should load");
+
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains("ghp-secret"), "token leaked: {debug}");
+        assert!(debug.contains("CorVous"));
     }
 
     #[test]
