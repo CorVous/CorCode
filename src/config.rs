@@ -160,10 +160,80 @@ mod tests {
                 "CORCODE_WORKSPACE_IMAGE",
                 "ghcr.io/corvous/corcode-workspace:2026-08-05",
             ),
+            ("CORCODE_REPOS", "CorVous/CorCode"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect()
+    }
+
+    fn with(vars: &[(&str, &str)]) -> Result<Config> {
+        let mut all = required_vars();
+        all.retain(|(key, _)| !vars.iter().any(|(named, _)| named == key));
+        all.extend(
+            vars.iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+        );
+        Config::from_vars(all)
+    }
+
+    #[test]
+    fn the_offerable_repositories_load_in_the_order_they_were_given() {
+        let config = with(&[("CORCODE_REPOS", "CorVous/CorCode, CorVous/zenni-tools")])
+            .expect("a repository list should load");
+
+        assert_eq!(config.repos, ["CorVous/CorCode", "CorVous/zenni-tools"]);
+    }
+
+    #[test]
+    fn a_repository_that_is_not_owner_slash_name_fails_loudly() {
+        for spelling in ["CorCode", "CorVous/CorCode/extra", "CorVous/", "/CorCode"] {
+            let error = with(&[("CORCODE_REPOS", spelling)])
+                .expect_err("an unusable repository should fail");
+
+            assert!(
+                format!("{error:#}").contains(spelling),
+                "error should quote the offending repository, got: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_repository_list_fails_loudly() {
+        let error = required_vars()
+            .into_iter()
+            .filter(|(key, _)| key != "CORCODE_REPOS")
+            .collect::<Vec<_>>();
+        let error = Config::from_vars(error).expect_err("no repositories should fail");
+
+        assert!(
+            format!("{error:#}").contains("CORCODE_REPOS"),
+            "error should name the missing variable, got: {error:#}"
+        );
+    }
+
+    #[test]
+    fn the_tokens_are_optional() {
+        let config = Config::from_vars(required_vars()).expect("a tokenless environment should load");
+
+        assert_eq!(config.github_token, None);
+        assert_eq!(config.anthropic_api_key, None);
+    }
+
+    #[test]
+    fn debug_redacts_every_token_it_carries() {
+        let config = with(&[
+            ("CORCODE_GITHUB_TOKEN", "ghs-clone-secret"),
+            ("CORCODE_ANTHROPIC_API_KEY", "sk-ant-secret"),
+        ])
+        .expect("a credentialled environment should load");
+
+        let debug = format!("{config:?}");
+
+        assert_eq!(config.github_token.as_deref(), Some("ghs-clone-secret"));
+        assert_eq!(config.anthropic_api_key.as_deref(), Some("sk-ant-secret"));
+        assert!(!debug.contains("ghs-clone-secret"), "token leaked: {debug}");
+        assert!(!debug.contains("sk-ant-secret"), "key leaked: {debug}");
     }
 
     #[test]
