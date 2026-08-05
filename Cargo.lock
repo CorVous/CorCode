@@ -1238,6 +1238,8 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
+ "serde",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",

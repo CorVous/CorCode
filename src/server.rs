@@ -1,6 +1,7 @@
 //! HTTP server: routes, serving, and graceful shutdown.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use axum::Router;
@@ -9,9 +10,26 @@ use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::auth::keystore::KeyStore;
+use crate::config::Config;
+
+/// Name of the cookie carrying the session (ADR-0003).
+pub const SESSION_COOKIE: &str = "corcode_session";
+
+/// Everything the handlers share.
+#[derive(Clone)]
+struct AppState {
+    keys: Arc<KeyStore>,
+}
+
 /// Build the application's routes.
-pub fn router() -> Router {
-    Router::new().route("/health", get(health))
+pub fn router(config: &Config) -> Result<Router> {
+    let state = AppState {
+        keys: Arc::new(KeyStore::open(&config.data_dir)?),
+    };
+    Ok(Router::new()
+        .route("/health", get(health))
+        .with_state(state))
 }
 
 /// Unauthenticated liveness probe (ADR-0003).
@@ -19,13 +37,13 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Serve the application on `listener` until `shutdown` resolves,
-/// then wait for in-flight requests to finish.
-pub async fn serve<S>(listener: TcpListener, shutdown: S) -> Result<()>
+/// Serve `router` on `listener` until `shutdown` resolves, then wait for
+/// in-flight requests to finish.
+pub async fn serve<S>(listener: TcpListener, router: Router, shutdown: S) -> Result<()>
 where
     S: Future<Output = ()> + Send + 'static,
 {
-    axum::serve(listener, router())
+    axum::serve(listener, router)
         .with_graceful_shutdown(shutdown)
         .await
         .context("HTTP server failed")
