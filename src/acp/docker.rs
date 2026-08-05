@@ -136,4 +136,37 @@ mod tests {
         assert_eq!(take_line(&mut unread).as_deref(), Some("{\"id\":2}"));
         assert!(unread.is_empty());
     }
+
+    #[tokio::test]
+    async fn a_message_cut_through_a_character_arrives_whole() {
+        let message = r#"{"jsonrpc":"2.0","id":1,"result":{"sessionId":"café"}}"#;
+        let framed = format!("{message}\n").into_bytes();
+        let cut = message
+            .find('é')
+            .expect("the message spells a multi-byte character")
+            + 1;
+        let mut channel = channel_reading(&[&framed[..cut], &framed[cut..]]);
+
+        let arrived = channel.receive().await.expect("the message should arrive");
+
+        assert_eq!(arrived, message);
+    }
+
+    /// A channel over a stream that hands out exactly these chunks, as the
+    /// daemon hands out whatever happened to be in the pipe.
+    fn channel_reading(chunks: &[&[u8]]) -> ExecChannel {
+        let chunks: Vec<_> = chunks
+            .iter()
+            .map(|chunk| {
+                Ok(LogOutput::StdOut {
+                    message: chunk.to_vec().into(),
+                })
+            })
+            .collect();
+        ExecChannel {
+            output: Box::pin(futures_util::stream::iter(chunks)),
+            input: Box::pin(tokio::io::sink()),
+            unread: String::new(),
+        }
+    }
 }
