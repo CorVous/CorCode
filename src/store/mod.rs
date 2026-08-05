@@ -273,16 +273,38 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).expect("manifest should be readable"))
                 .expect("manifest should be json");
         fields["schema"] = json!(2);
+        fields["mood"] = json!("a field this build has never heard of");
         fs::write(&path, fields.to_string()).expect("manifest should be rewritable");
 
         let error = store
             .read_manifest(&manifest.chat_id)
             .expect_err("unknown schema should fail");
 
+        assert!(
+            matches!(&error, StoreError::ManifestSchema { path: named, schema: 2 } if named == &path),
+            "version skew should read as version skew, got: {error}"
+        );
+    }
+
+    #[test]
+    fn scan_rejects_a_manifest_that_claims_another_chats_id() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("original"))
+            .expect("chat should be created");
+        let copy = store.chat_dir("01KZCOPYOFANOTHERCHATSDIR");
+        fs::create_dir_all(&copy).expect("copied chat dir should be creatable");
+        let copied_manifest = copy.join(MANIFEST_FILE);
+        fs::copy(store.manifest_path(&manifest.chat_id), &copied_manifest)
+            .expect("manifest should be copyable");
+
+        let error = store.scan().expect_err("a copied chat dir should fail");
+
         let message = format!("{error}");
         assert!(
-            message.contains(&path.display().to_string()) && message.contains("schema 2"),
-            "error should name the file and the schema, got: {message}"
+            message.contains(&copied_manifest.display().to_string())
+                && message.contains(&manifest.chat_id),
+            "error should name the file and the id it claims, got: {message}"
         );
     }
 
