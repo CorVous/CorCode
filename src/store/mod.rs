@@ -7,7 +7,7 @@ mod manifest;
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -62,7 +62,12 @@ impl ChatStore {
     /// created: a missing root means the dataset is not mounted, and papering
     /// over that would strand every chat (ADR-0007 rule 5).
     pub fn prepare(&self) -> Result<(), StoreError> {
-        Ok(())
+        let chats = self.root.join(CHATS_DIR);
+        match fs::create_dir(&chats) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(StoreError::writing(&chats)(error)),
+        }
     }
 
     /// Lay down both trees for a new chat, publishing the chat dir whole.
@@ -249,7 +254,12 @@ mod tests {
         store.prepare().expect("preparing twice should be harmless");
 
         assert!(root.path().join(CHATS_DIR).is_dir());
-        assert!(store.scan().expect("an empty dataset should scan").is_empty());
+        assert!(
+            store
+                .scan()
+                .expect("an empty dataset should scan")
+                .is_empty()
+        );
     }
 
     #[test]

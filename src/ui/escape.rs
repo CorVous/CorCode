@@ -33,7 +33,10 @@ mod tests {
 
     #[test]
     fn plain_text_passes_through_unchanged() {
-        assert_eq!(text("chat/2026-08-05-slug").to_string(), "chat/2026-08-05-slug");
+        assert_eq!(
+            text("chat/2026-08-05-slug").to_string(),
+            "chat/2026-08-05-slug"
+        );
     }
 
     #[test]

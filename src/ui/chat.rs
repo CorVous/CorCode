@@ -1,12 +1,76 @@
 //! The chat view: `events.jsonl` rendered as an event log (ADR-0006).
 
+use serde_json::Value;
+
 use crate::store::{Event, Manifest, RuntimeStatus};
+
+use super::{last_push, page, status_word, text};
+
+/// What an event calls itself when it carries no ACP discriminator.
+const UNTYPED: &str = "event";
 
 /// One chat, top to bottom: what it is, everything that has happened to it,
 /// and the prompt box waiting at the end.
 #[must_use]
-pub fn chat_page(_manifest: &Manifest, _status: RuntimeStatus, _events: &[Event]) -> String {
-    String::new()
+pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -> String {
+    let log: String = events.iter().map(|event| line(&event.event)).collect();
+    page(
+        &manifest.title,
+        &format!(
+            "<p><a href=\"/\">← chats</a></p>\
+             <p><small>{} · {} · push {} · {}</small></p>\
+             {log}{}\
+             <form><p><input name=\"prompt\" aria-label=\"Prompt\" placeholder=\"prompt\"> \
+             <button type=\"submit\" disabled>Send</button></p></form>",
+            text(&manifest.repo),
+            text(&manifest.branch),
+            text(last_push(manifest)),
+            status_word(status),
+            first_prompt_hint(status),
+        ),
+    )
+}
+
+/// What a first prompt would do to a chat with no live container (ADR-0007).
+const fn first_prompt_hint(status: RuntimeStatus) -> &'static str {
+    match status {
+        RuntimeStatus::Live => "",
+        RuntimeStatus::Parked => {
+            "<p><small>A prompt re-spins the container over the kept workspace.</small></p>"
+        }
+        RuntimeStatus::Archived => {
+            "<p><small>A prompt revives the chat: a fresh clone at the last pushed \
+             commit.</small></p>"
+        }
+    }
+}
+
+/// One line of the log. The store has already refused anything unreadable, so
+/// a shape this build does not know is a newer ACP, not damage: it names
+/// itself rather than disappearing.
+fn line(event: &Value) -> String {
+    match (kind(event), field(event, "text")) {
+        ("user_message_chunk", Some(said)) => format!("<p><b>you:</b> {}</p>", text(said)),
+        ("agent_message_chunk" | "agent_thought_chunk", Some(said)) => {
+            format!("<p>{}</p>", text(said))
+        }
+        (kind @ ("tool_call" | "tool_call_update"), _) => {
+            format!(
+                "<p><small>{}</small></p>",
+                text(field(event, "title").unwrap_or(kind))
+            )
+        }
+        (kind, _) => format!("<p><small>{}</small></p>", text(kind)),
+    }
+}
+
+/// The discriminator ACP puts on a session update.
+fn kind(event: &Value) -> &str {
+    field(event, "sessionUpdate").unwrap_or(UNTYPED)
+}
+
+fn field<'a>(event: &'a Value, name: &str) -> Option<&'a str> {
+    event.get(name).and_then(Value::as_str)
 }
 
 #[cfg(test)]
@@ -95,11 +159,7 @@ mod tests {
 
     #[test]
     fn a_parked_chat_says_a_prompt_would_re_spin_its_container() {
-        let rendered = chat_page(
-            &manifest(RuntimeStatus::Parked),
-            RuntimeStatus::Parked,
-            &[],
-        );
+        let rendered = chat_page(&manifest(RuntimeStatus::Parked), RuntimeStatus::Parked, &[]);
 
         assert!(
             rendered.contains("re-spins"),

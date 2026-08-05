@@ -24,14 +24,15 @@ pub const LOGOUT_PATH: &str = "/logout-all";
 /// The exact htmx build compiled into the binary.
 pub const HTMX: &str = include_str!("../../assets/htmx-2.0.10.min.js");
 
-/// The whole stylesheet (ADR-0008): `color-scheme` so default link and
-/// control colours follow the system, 16px controls so iOS Safari does not
-/// zoom on focus, padding, and a wrap guard for long branch names.
-pub const CSS: &str = "";
-
-/// ADR-0008 budgets styling at "on the order of a dozen lines". Past this the
-/// UI is being restyled, which is a new decision rather than an increment.
-const MAX_DECLARATIONS: usize = 16;
+/// The whole stylesheet (ADR-0008).
+///
+/// `color-scheme` so default link and control colours follow the system, 16px
+/// controls so iOS Safari does not zoom on focus, padding, and a wrap guard
+/// for long branch names.
+pub const CSS: &str = "\
+:root{color-scheme:light dark;}\
+body{padding:1rem;overflow-wrap:break-word;}\
+input,select,button{font-size:16px;}";
 
 /// A chat paired with the runtime status it has right now (ADR-0002).
 pub type Chat = (Manifest, RuntimeStatus);
@@ -66,6 +67,10 @@ fn last_push(manifest: &Manifest) -> &str {
 mod tests {
     use super::*;
 
+    /// ADR-0008 budgets styling at "on the order of a dozen lines". Past this
+    /// the UI is being restyled, which is a new decision, not an increment.
+    const MAX_DECLARATIONS: usize = 16;
+
     #[test]
     fn the_stylesheet_stays_inside_the_adr_budget() {
         let declarations = CSS.matches(';').count();
@@ -79,15 +84,20 @@ mod tests {
     #[test]
     fn the_stylesheet_spends_its_budget_on_the_adr_items() {
         for item in ["color-scheme", "16px", "padding", "overflow"] {
-            assert!(CSS.contains(item), "the stylesheet is missing {item}: {CSS}");
+            assert!(
+                CSS.contains(item),
+                "the stylesheet is missing {item}: {CSS}"
+            );
         }
     }
 
     #[test]
     fn every_page_asks_for_the_mobile_viewport() {
-        assert!(page("CorCode", "").contains(
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        ));
+        assert!(
+            page("CorCode", "").contains(
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            )
+        );
     }
 
     #[test]

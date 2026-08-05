@@ -1,20 +1,166 @@
 //! The one screen: status line, new-chat form, grouped chat list (ADR-0008).
 
-use crate::store::RuntimeStatus;
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 
-use super::Chat;
+use chrono::Utc;
+
+use crate::store::{Manifest, RuntimeStatus};
+
+use super::{CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, last_push, page, status_word, text};
+
+/// Warm-pool size until B10 reads it off the plane (ADR-0002).
+const POOL_SLOTS: usize = 2;
+
+/// Orphan-sweep result until B8 runs one (ADR-0008).
+const SWEEP: &str = "ok";
+
+/// The groups the chat list is stacked in, top to bottom (ADR-0002).
+const GROUPS: [RuntimeStatus; 3] = [
+    RuntimeStatus::Live,
+    RuntimeStatus::Parked,
+    RuntimeStatus::Archived,
+];
 
 /// The whole console: status line, the collapsed new-chat form, and the
 /// grouped chat list.
 #[must_use]
-pub fn console_page(_chats: &[Chat], _workspace_image: &str) -> String {
-    String::new()
+pub fn console_page(chats: &[Chat], workspace_image: &str) -> String {
+    page(
+        "CorCode",
+        &format!(
+            "{}{}{}\
+             <form method=\"post\" action=\"{LOGOUT_PATH}\">\
+             <p><button type=\"submit\">Log out everywhere</button></p></form>\
+             <script src=\"{HTMX_PATH}\" defer></script>",
+            status_line(chats, workspace_image),
+            new_chat_form(chats),
+            chat_list(chats),
+        ),
+    )
 }
 
 /// The chat list on its own, so htmx can swap it in without the page.
 #[must_use]
-pub fn chat_list(_chats: &[Chat]) -> String {
-    String::new()
+pub fn chat_list(chats: &[Chat]) -> String {
+    let mut list = format!(
+        "<section id=\"chats\">\
+         <p><button hx-get=\"{CHATS_PATH}\" hx-target=\"#chats\" hx-swap=\"outerHTML\">\
+         Refresh</button></p>"
+    );
+    for status in GROUPS {
+        write!(
+            list,
+            "<h2>{}</h2>{}",
+            status_word(status),
+            group(chats, status)
+        )
+        .expect("writing to a string cannot fail");
+    }
+    list.push_str("</section>");
+    list
+}
+
+/// The container picture in one line, expanding in place (ADR-0008).
+fn status_line(chats: &[Chat], workspace_image: &str) -> String {
+    let live = count(chats, RuntimeStatus::Live);
+    let parked = count(chats, RuntimeStatus::Parked);
+    format!(
+        "<details>\
+         <summary>pool {live}/{POOL_SLOTS} · parked {parked} · img {} · sweep {SWEEP}</summary>\
+         <dl><dt>Pool</dt><dd>{}</dd>\
+         <dt>Parked</dt><dd>{parked} chats — workspace kept, container torn down</dd>\
+         <dt>Image</dt><dd>{}</dd>\
+         <dt>Sweep</dt><dd>{SWEEP}</dd></dl></details>",
+        text(image_tag(workspace_image)),
+        titles(chats, RuntimeStatus::Live),
+        text(workspace_image),
+    )
+}
+
+/// The new chat that B6 will actually cut; here it only shows its shape.
+fn new_chat_form(chats: &[Chat]) -> String {
+    let today = Utc::now().format("%Y-%m-%d");
+    format!(
+        "<details><summary>New chat</summary><form>\
+         <p><label>Repository <select name=\"repo\">{}</select></label></p>\
+         <p><label>Base branch <select name=\"base_branch\">{}</select></label></p>\
+         <p><label>Slug <input name=\"slug\" \
+         oninput=\"document.getElementById('branch').textContent=\
+         'chat/{today}-'+this.value\"></label></p>\
+         <p>Branch: <output id=\"branch\">chat/{today}-</output></p>\
+         <p><label><input type=\"checkbox\" name=\"direct_on_base\"> \
+         Work directly on the base branch</label></p>\
+         <p><button type=\"submit\" disabled>Create</button></p></form></details>",
+        options(chats, |manifest| &manifest.repo),
+        options(chats, |manifest| &manifest.base_branch),
+    )
+}
+
+/// One `<option>` per distinct value already in use, so the selects offer
+/// what this dataset knows about and nothing invented.
+fn options(chats: &[Chat], field: fn(&Manifest) -> &String) -> String {
+    chats
+        .iter()
+        .map(|(manifest, _)| field(manifest).as_str())
+        .collect::<BTreeSet<&str>>()
+        .into_iter()
+        .fold(String::new(), |mut markup, value| {
+            write!(markup, "<option>{}</option>", text(value))
+                .expect("writing to a string cannot fail");
+            markup
+        })
+}
+
+fn group(chats: &[Chat], status: RuntimeStatus) -> String {
+    let rows: String = chats
+        .iter()
+        .filter(|(_, chat_status)| *chat_status == status)
+        .map(row)
+        .collect();
+    if rows.is_empty() {
+        "<p>None.</p>".to_owned()
+    } else {
+        format!("<ul>{rows}</ul>")
+    }
+}
+
+fn row((manifest, _): &Chat) -> String {
+    format!(
+        "<li><a href=\"{CHATS_PATH}/{}\">{}</a><br>\
+         <small>{} · push {}</small></li>",
+        text(&manifest.chat_id),
+        text(&manifest.title),
+        text(&manifest.branch),
+        text(last_push(manifest)),
+    )
+}
+
+fn count(chats: &[Chat], status: RuntimeStatus) -> usize {
+    chats
+        .iter()
+        .filter(|(_, chat_status)| *chat_status == status)
+        .count()
+}
+
+fn titles(chats: &[Chat], status: RuntimeStatus) -> String {
+    let titles: Vec<String> = chats
+        .iter()
+        .filter(|(_, chat_status)| *chat_status == status)
+        .map(|(manifest, _)| text(&manifest.title).to_string())
+        .collect();
+    if titles.is_empty() {
+        "no containers running".to_owned()
+    } else {
+        titles.join("<br>")
+    }
+}
+
+/// The dated half of a pinned image reference (ADR-0004).
+fn image_tag(workspace_image: &str) -> &str {
+    workspace_image
+        .rsplit_once(':')
+        .map_or(workspace_image, |(_, tag)| tag)
 }
 
 #[cfg(test)]

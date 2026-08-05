@@ -27,5 +27,10 @@ async fn serve(config: &Config) -> Result<()> {
         config.bind_addr,
         config.data_dir.display()
     );
-    server::serve(listener, server::router(config, MemoryPlane::default())?, server::shutdown_signal()).await
+    server::serve(
+        listener,
+        server::router(config, MemoryPlane::default())?,
+        server::shutdown_signal(),
+    )
+    .await
 }

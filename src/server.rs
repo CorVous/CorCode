@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
 use axum::Router;
-use axum::extract::{Form, Request, State};
+use axum::extract::{Form, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -20,7 +20,8 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::auth::gate::{Gate, SignIn};
 use crate::auth::session;
 use crate::config::Config;
-use crate::store::ContainerLiveness;
+use crate::store::{ChatStore, ContainerLiveness, Event, runtime_status};
+use crate::ui::{self, page};
 
 /// Name of the cookie carrying the session (ADR-0003).
 pub const SESSION_COOKIE: &str = "corcode_session";
@@ -34,19 +35,79 @@ const HEALTH_PATH: &str = "/health";
 /// Build the application's routes. Every route is gated except the handful
 /// [`is_public`] names, so a route added here is protected by default
 /// (ADR-0003).
-pub fn router<L>(config: &Config, _liveness: L) -> Result<Router>
+pub fn router<L>(config: &Config, liveness: L) -> Result<Router>
 where
     L: ContainerLiveness + Send + Sync + 'static,
 {
     let gate = Arc::new(Gate::new(config)?);
+    let store = ChatStore::new(&config.data_dir);
+    store.prepare()?;
+    let chats = Arc::new(Chats {
+        store,
+        liveness,
+        workspace_image: config.workspace_image.clone(),
+    });
     Ok(Router::new()
-        .route("/", get(home))
-        .route("/logout-all", post(logout_all))
+        .merge(console_routes(chats))
+        .merge(session_routes(Arc::clone(&gate)))
+        .layer(from_fn_with_state(gate, require_session))
+        .layer(from_fn(same_origin)))
+}
+
+/// The read-only console over the dataset (ADR-0008).
+fn console_routes<L>(chats: Arc<Chats<L>>) -> Router
+where
+    L: ContainerLiveness + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/", get(console))
+        .route(ui::CHATS_PATH, get(chat_list))
+        .route(&format!("{}/{{chat_id}}", ui::CHATS_PATH), get(chat_view))
+        .route(ui::HTMX_PATH, get(htmx))
+        .with_state(chats)
+}
+
+/// Signing in, signing out, and saying the process is alive (ADR-0003).
+fn session_routes(gate: Arc<Gate>) -> Router {
+    Router::new()
+        .route(ui::LOGOUT_PATH, post(logout_all))
         .route(HEALTH_PATH, get(health))
         .route(LOGIN_PATH, get(login_form).post(submit_login))
-        .layer(from_fn_with_state(Arc::clone(&gate), require_session))
-        .layer(from_fn(same_origin))
-        .with_state(gate))
+        .with_state(gate)
+}
+
+/// What the console handlers read: the dataset, who is live, and the pinned
+/// image the status line names.
+struct Chats<L> {
+    store: ChatStore,
+    liveness: L,
+    workspace_image: String,
+}
+
+impl<L: ContainerLiveness + Sync> Chats<L> {
+    /// Every chat on disk paired with the status it has right now.
+    async fn survey(&self) -> Result<Vec<ui::Chat>> {
+        let live = self.liveness.live_chat_ids().await?;
+        Ok(self
+            .store
+            .scan()?
+            .into_iter()
+            .map(|manifest| {
+                let status = runtime_status(&manifest, &live);
+                (manifest, status)
+            })
+            .collect())
+    }
+
+    /// One chat and its whole event log. A pure read: opening a chat never
+    /// touches a container (ADR-0007).
+    async fn open(&self, chat_id: &str) -> Result<(ui::Chat, Vec<Event>)> {
+        let manifest = self.store.read_manifest(chat_id)?;
+        let events = self.store.read_events(chat_id)?;
+        let live = self.liveness.live_chat_ids().await?;
+        let status = runtime_status(&manifest, &live);
+        Ok(((manifest, status), events))
+    }
 }
 
 /// The only requests that reach a handler without a session: the liveness
@@ -64,13 +125,58 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Placeholder for the console the web UI increment will build.
-async fn home() -> Html<String> {
-    Html(page(
-        "CorCode",
-        "<form method=\"post\" action=\"/logout-all\">\
-         <button type=\"submit\">Log out everywhere</button></form>",
-    ))
+/// The one screen: status line, new-chat form, grouped chat list (ADR-0008).
+async fn console<L>(State(chats): State<Arc<Chats<L>>>) -> Response
+where
+    L: ContainerLiveness + Send + Sync + 'static,
+{
+    match chats.survey().await {
+        Ok(survey) => Html(ui::console_page(&survey, &chats.workspace_image)).into_response(),
+        Err(failure) => broken_invariant(&failure),
+    }
+}
+
+/// The chat list alone, for htmx to swap into the console.
+async fn chat_list<L>(State(chats): State<Arc<Chats<L>>>) -> Response
+where
+    L: ContainerLiveness + Send + Sync + 'static,
+{
+    match chats.survey().await {
+        Ok(survey) => Html(ui::chat_list(&survey)).into_response(),
+        Err(failure) => broken_invariant(&failure),
+    }
+}
+
+/// One chat's event log (ADR-0006).
+async fn chat_view<L>(State(chats): State<Arc<Chats<L>>>, Path(chat_id): Path<String>) -> Response
+where
+    L: ContainerLiveness + Send + Sync + 'static,
+{
+    match chats.open(&chat_id).await {
+        Ok(((manifest, status), events)) => {
+            Html(ui::chat_page(&manifest, status, &events)).into_response()
+        }
+        Err(failure) => broken_invariant(&failure),
+    }
+}
+
+/// The htmx bundle, served from the binary so no page reaches a CDN.
+async fn htmx() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/javascript; charset=utf-8"),
+        )],
+        ui::HTMX,
+    )
+        .into_response()
+}
+
+/// Show the operator what broke instead of repairing or hiding it
+/// (ADR-0007 rule 5).
+fn broken_invariant(failure: &anyhow::Error) -> Response {
+    error!("{failure:#}");
+    (StatusCode::INTERNAL_SERVER_ERROR, format!("{failure:#}\n")).into_response()
 }
 
 /// Turn away requests without a valid session, sliding the window forward
@@ -211,15 +317,6 @@ fn login_page(notice: Option<&str>) -> Html<String> {
              <p><button type=\"submit\">Sign in</button></p></form>"
         ),
     ))
-}
-
-/// A semantic HTML document on browser defaults (ADR-0008).
-fn page(title: &str, body: &str) -> String {
-    format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>{title}</title></head><body><h1>{title}</h1>{body}</body></html>"
-    )
 }
 
 /// Serve `router` on `listener` until `shutdown` resolves, then wait for

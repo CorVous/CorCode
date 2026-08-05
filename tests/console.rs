@@ -41,7 +41,9 @@ async fn the_chat_view_renders_the_event_log_from_disk() {
 
     let body = app.body(&format!("/chats/{chat_id}")).await;
 
-    let prompt = body.find("ship the ladder").expect("the prompt should render");
+    let prompt = body
+        .find("ship the ladder")
+        .expect("the prompt should render");
     let reply = body.find("on it").expect("the reply should render");
     assert!(prompt < reply, "the log is out of order: {body}");
     assert!(
@@ -54,7 +56,11 @@ async fn the_chat_view_renders_the_event_log_from_disk() {
 #[tokio::test]
 async fn a_corrupt_event_log_surfaces_as_an_error_rather_than_a_gap() {
     let (data_dir, chat_id) = fixture_chat();
-    let events = data_dir.path().join("chats").join(&chat_id).join("events.jsonl");
+    let events = data_dir
+        .path()
+        .join("chats")
+        .join(&chat_id)
+        .join("events.jsonl");
     fs::write(&events, "{\"ts\":\"2026-08-05T12:00").expect("corruption should be writable");
     let app = TestApp::start(data_dir).await;
 
@@ -185,8 +191,7 @@ impl TestApp {
             .expect("ephemeral port should bind");
         let address = listener.local_addr().expect("listener reports its address");
         let config = test_config(data_dir.path().to_path_buf());
-        let router =
-            server::router(&config, MemoryPlane::default()).expect("router should build");
+        let router = server::router(&config, MemoryPlane::default()).expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {
             shutdown_rx.await.ok();

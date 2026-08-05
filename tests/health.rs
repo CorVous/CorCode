@@ -26,7 +26,8 @@ async fn health_endpoint_answers_on_ephemeral_port() {
         container_cpus: DEFAULT_CONTAINER_CPUS,
         registry: None,
     };
-    let router = cor_code::server::router(&config, MemoryPlane::default()).expect("router should build");
+    let router =
+        cor_code::server::router(&config, MemoryPlane::default()).expect("router should build");
     let (shutdown, shutdown_rx) = oneshot::channel();
     let server = tokio::spawn(cor_code::server::serve(listener, router, async {
         shutdown_rx.await.ok();
