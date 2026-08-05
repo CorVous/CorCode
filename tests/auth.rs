@@ -17,6 +17,7 @@ use cor_code::auth::session::{self, LIFETIME, REFRESH_AFTER, SigningKey};
 use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
 use cor_code::plane::MemoryPlane;
 use cor_code::server::{self, SESSION_COOKIE};
+use cor_code::store::ChatStore;
 
 const USERNAME: &str = "cassidy";
 const PASSWORD: &str = "correct horse battery staple";
@@ -283,6 +284,9 @@ impl TestApp {
             .expect("ephemeral port should bind");
         let address = listener.local_addr().expect("listener reports its address");
         let config = test_config(data_dir.path().to_path_buf());
+        ChatStore::new(data_dir.path())
+            .prepare()
+            .expect("the dataset should prepare, as serving does");
         let router = server::router(&config, MemoryPlane::default()).expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {

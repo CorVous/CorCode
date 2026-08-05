@@ -16,6 +16,7 @@ use serde::Deserialize;
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
+use ulid::Ulid;
 
 use crate::auth::gate::{Gate, SignIn};
 use crate::auth::session;
@@ -40,10 +41,8 @@ where
     L: ContainerLiveness + Send + Sync + 'static,
 {
     let gate = Arc::new(Gate::new(config)?);
-    let store = ChatStore::new(&config.data_dir);
-    store.prepare()?;
     let chats = Arc::new(Chats {
-        store,
+        store: ChatStore::new(&config.data_dir),
         liveness,
         workspace_image: config.workspace_image.clone(),
     });
@@ -99,14 +98,20 @@ impl<L: ContainerLiveness + Sync> Chats<L> {
             .collect())
     }
 
-    /// One chat and its whole event log. A pure read: opening a chat never
-    /// touches a container (ADR-0007).
-    async fn open(&self, chat_id: &str) -> Result<(ui::Chat, Vec<Event>)> {
-        let manifest = self.store.read_manifest(chat_id)?;
-        let events = self.store.read_events(chat_id)?;
+    /// One chat and its whole event log, or nothing if the dataset holds no
+    /// such chat. A pure read: opening a chat never touches a container
+    /// (ADR-0007).
+    async fn open(&self, chat_id: &Ulid) -> Result<Option<(ui::Chat, Vec<Event>)>> {
+        let chat_id = chat_id.to_string();
+        let manifest = match self.store.read_manifest(&chat_id) {
+            Ok(manifest) => manifest,
+            Err(failure) if failure.is_missing() => return Ok(None),
+            Err(failure) => return Err(failure.into()),
+        };
+        let events = self.store.read_events(&chat_id)?;
         let live = self.liveness.live_chat_ids().await?;
         let status = runtime_status(&manifest, &live);
-        Ok(((manifest, status), events))
+        Ok(Some(((manifest, status), events)))
     }
 }
 
@@ -147,17 +152,29 @@ where
     }
 }
 
-/// One chat's event log (ADR-0006).
+/// One chat's event log (ADR-0006). A chat id is a ULID and nothing else, so
+/// the path segment is parsed before the store sees it: no request can name a
+/// file, inside `chats/` or out of it.
 async fn chat_view<L>(State(chats): State<Arc<Chats<L>>>, Path(chat_id): Path<String>) -> Response
 where
     L: ContainerLiveness + Send + Sync + 'static,
 {
+    let Ok(chat_id) = chat_id.parse::<Ulid>() else {
+        return no_such_chat();
+    };
     match chats.open(&chat_id).await {
-        Ok(((manifest, status), events)) => {
+        Ok(Some(((manifest, status), events))) => {
             Html(ui::chat_page(&manifest, status, &events)).into_response()
         }
+        Ok(None) => no_such_chat(),
         Err(failure) => broken_invariant(&failure),
     }
+}
+
+/// The one answer a chat id that is not a chat gets, saying nothing about
+/// what is or is not on disk.
+fn no_such_chat() -> Response {
+    (StatusCode::NOT_FOUND, "No such chat.\n").into_response()
 }
 
 /// The htmx bundle, served from the binary so no page reaches a CDN.

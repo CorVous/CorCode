@@ -7,6 +7,7 @@ use tokio::net::TcpListener;
 use crate::config::Config;
 use crate::plane::MemoryPlane;
 use crate::server;
+use crate::store::ChatStore;
 
 /// Execute the serve command.
 pub fn run() -> Result<()> {
@@ -19,6 +20,7 @@ pub fn run() -> Result<()> {
 }
 
 async fn serve(config: &Config) -> Result<()> {
+    ChatStore::new(&config.data_dir).prepare()?;
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;
@@ -29,6 +31,8 @@ async fn serve(config: &Config) -> Result<()> {
     );
     server::serve(
         listener,
+        // The liveness source is a stub: nothing is live because nothing can
+        // yet be spawned. The spawn increment swaps in the real plane.
         server::router(config, MemoryPlane::default())?,
         server::shutdown_signal(),
     )
