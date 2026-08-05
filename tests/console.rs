@@ -144,7 +144,11 @@ async fn a_chat_id_that_climbs_out_of_the_dataset_is_not_a_chat() {
     ] {
         let response = app.get(path).await;
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} was served");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} was served"
+        );
         assert_eq!(
             response.text().await.expect("body"),
             NO_SUCH_CHAT,
