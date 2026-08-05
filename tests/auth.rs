@@ -155,6 +155,31 @@ async fn rotating_the_key_invalidates_existing_cookies() {
 }
 
 #[tokio::test]
+async fn logging_out_everywhere_hands_back_no_live_cookie() {
+    let app = TestApp::start().await;
+    let aging = app.cookie_issued_at(SystemTime::now() - REFRESH_AFTER - Duration::from_secs(60));
+
+    let logout = client()
+        .post(app.url("/logout-all"))
+        .header("cookie", &aging)
+        .send()
+        .await
+        .expect("request");
+
+    assert_eq!(logout.status(), StatusCode::SEE_OTHER);
+    if let Some(handed_back) = logout.headers().get("set-cookie") {
+        let handed_back = session_cookie(handed_back.to_str().expect("cookie should be text"));
+        let home = app.get_home(&handed_back).await;
+        assert_eq!(
+            home.status(),
+            StatusCode::SEE_OTHER,
+            "logging out everywhere left a working cookie behind: {handed_back}"
+        );
+    }
+    app.stop().await;
+}
+
+#[tokio::test]
 async fn logging_out_everywhere_needs_a_session() {
     let app = TestApp::start().await;
 
