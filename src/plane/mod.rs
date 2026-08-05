@@ -15,6 +15,10 @@ pub use memory::MemoryPlane;
 
 const NAME_PREFIX: &str = "corcode-chat-";
 
+/// Where a chat's workspace is mounted, the same for every chat forever: the
+/// adapter's transcript path encodes it (ADR-0006).
+pub const WORKSPACE_MOUNT: &str = "/workspace";
+
 /// The one container a chat may own, named after it so that liveness needs no
 /// bookkeeping of its own.
 #[must_use]
