@@ -173,6 +173,17 @@ mod tests {
         (root, store)
     }
 
+    /// Identity of the file itself, not of its name: a rename publishes a
+    /// different inode, an in-place truncate reuses one.
+    #[cfg(unix)]
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt as _;
+
+        fs::metadata(path)
+            .expect("manifest should exist")
+            .ino()
+    }
+
     fn new_chat(title: &str) -> NewChat {
         NewChat {
             title: title.to_owned(),
@@ -279,6 +290,8 @@ mod tests {
         let mut manifest = store
             .create_chat(new_chat("renamed"))
             .expect("chat should be created");
+        #[cfg(unix)]
+        let published = inode(&store.manifest_path(&manifest.chat_id));
         manifest.title = "Renamed".to_owned();
         manifest.acp_session_id = Some("session-uuid".to_owned());
 
@@ -286,6 +299,12 @@ mod tests {
             .write_manifest(&manifest)
             .expect("manifest should be written");
 
+        #[cfg(unix)]
+        assert_ne!(
+            published,
+            inode(&store.manifest_path(&manifest.chat_id)),
+            "a rewrite reusing the file in place is not atomic"
+        );
         assert_eq!(
             store
                 .read_manifest(&manifest.chat_id)
