@@ -48,12 +48,8 @@ RUN npm ci --omit=dev --no-audit --no-fund \
  && npm cache clean --force \
  && ln -s /opt/corcode-agent/node_modules/.bin/claude-agent-acp /usr/local/bin/claude-agent-acp
 
-RUN pinned="$(node -p 'require("/opt/corcode-agent/package.json").overrides["@anthropic-ai/claude-agent-sdk"]')" \
- && installed="$(node -p 'require("/opt/corcode-agent/node_modules/@anthropic-ai/claude-agent-sdk/package.json").version')" \
- && if [ "$pinned" != "$installed" ]; then \
-      echo "npm override ignored: pinned ${pinned}, installed ${installed}" >&2; \
-      exit 1; \
-    fi
+COPY verify-sdk-pin.sh ./
+RUN bash verify-sdk-pin.sh
 
 COPY managed-settings.json /etc/claude-code/managed-settings.json
 COPY stop-hook.sh /usr/local/bin/corcode-stop-hook
