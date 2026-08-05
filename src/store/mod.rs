@@ -23,6 +23,7 @@ pub use liveness::{ContainerLiveness, RuntimeStatus, runtime_status};
 pub use manifest::{ChatState, MANIFEST_SCHEMA, Manifest, NewChat};
 
 const CHATS_DIR: &str = "chats";
+const INCOMING_DIR: &str = ".incoming";
 const WORKSPACES_DIR: &str = "workspaces";
 const CLAUDE_DIR: &str = "claude";
 const MANIFEST_FILE: &str = "manifest.json";
@@ -135,6 +136,11 @@ impl ChatStore {
             .collect()
     }
 
+    /// Where a chat is assembled before it is published under its own id.
+    fn staging_dir(&self, chat_id: &str) -> PathBuf {
+        self.root.join(CHATS_DIR).join(INCOMING_DIR).join(chat_id)
+    }
+
     fn manifest_path(&self, chat_id: &str) -> PathBuf {
         self.chat_dir(chat_id).join(MANIFEST_FILE)
     }
@@ -235,6 +241,58 @@ mod tests {
                 .read_manifest(&manifest.chat_id)
                 .expect("manifest should read back"),
             manifest
+        );
+    }
+
+    #[test]
+    fn create_chat_leaves_no_half_built_chat_behind() {
+        let (_root, store) = store();
+
+        let manifest = store
+            .create_chat(new_chat("staged"))
+            .expect("chat should be created");
+
+        let staging = store.staging_dir(&manifest.chat_id);
+        assert!(!staging.exists(), "staged chat should have been moved");
+        let residue: Vec<PathBuf> = fs::read_dir(
+            staging
+                .parent()
+                .expect("staging dir should sit under the staging area"),
+        )
+        .expect("staging area should be readable")
+        .map(|entry| entry.expect("entry should be readable").path())
+        .collect();
+        assert!(residue.is_empty(), "staging area holds: {residue:?}");
+    }
+
+    #[test]
+    fn scan_ignores_the_staging_area() {
+        let (_root, store) = store();
+        store
+            .create_chat(new_chat("published"))
+            .expect("chat should be created");
+        let crashed = store.staging_dir("01KZCRASHEDMIDCREATE00000");
+        fs::create_dir_all(&crashed).expect("staging leftovers should be creatable");
+
+        let chats = store.scan().expect("scan should ignore the staging area");
+
+        assert_eq!(chats.len(), 1);
+    }
+
+    #[test]
+    fn scan_still_fails_on_a_visible_directory_without_a_manifest() {
+        let (_root, store) = store();
+        store
+            .create_chat(new_chat("published"))
+            .expect("chat should be created");
+        let intruder = store.chat_dir("not-a-chat");
+        fs::create_dir_all(&intruder).expect("intruder dir should be creatable");
+
+        let error = store.scan().expect_err("a manifest-less chat dir should fail");
+
+        assert!(
+            format!("{error}").contains(&intruder.join(MANIFEST_FILE).display().to_string()),
+            "error should name the missing manifest, got: {error}"
         );
     }
 
