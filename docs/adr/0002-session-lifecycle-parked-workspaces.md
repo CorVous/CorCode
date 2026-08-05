@@ -1,7 +1,7 @@
 # ADR-0002: Session lifecycle — disposable containers, parked workspaces, archive deletes
 
 Date: 2026-08-05
-Status: Accepted
+Status: Accepted, amended by ADR-0005 (parking no longer forces a checkpoint)
 Wayfinder: [decision #5](https://github.com/CorVous/CorCode/issues/5)
 
 ## Context
@@ -31,9 +31,10 @@ Lifecycle rules:
    flushed → container destroyed → workspace dir deleted. Archived chats hold
    zero workspace disk and remain revivable from git + transcript alone.
 2. **Idle open sessions**: never auto-closed. The 2 most recently touched keep
-   live containers (cap-only LRU, no TTL). Older ones are **parked**: WIP
-   checkpoint committed + pushed, transcript flushed, container torn down,
-   workspace dir retained. Resume is remount-and-go.
+   live containers (cap-only LRU, no TTL). Older ones are **parked**:
+   transcript flushed, container torn down, workspace dir retained. Resume is
+   remount-and-go. _(Amended by ADR-0005: no forced WIP checkpoint — dir
+   retention alone carries progress.)_
 3. **Push failure blocks teardown** in every path — the container stays up and
    the UI flags it. Work is never destroyed unless git has it.
 4. **Orphan sweep**: the core reconciles dataset dirs against the session
@@ -49,8 +50,9 @@ Lifecycle rules:
 
 - Container count is bounded (2 lingering + active) regardless of how many
   chats stay open; NAS disk is bounded by open sessions only.
-- Parking depends on a host-triggerable WIP checkpoint — the commit/push
-  cadence design (issue #7) must provide one, not just agent good manners.
+- _(Superseded by ADR-0005)_ ~~Parking depends on a host-triggerable WIP
+  checkpoint~~ — the cadence design kept the host-run checkpoint only for
+  close/archive; parked unpushed work lives on the NAS dataset until resume.
 - Resume flow (issue #9) must implement the archive-revival reset notice and
   the parked/archived branch in its state machine.
 - Long-forgotten open chats hold workspace disk until closed — accepted;
