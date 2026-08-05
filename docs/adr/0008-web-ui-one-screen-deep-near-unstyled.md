@@ -38,9 +38,10 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
 3. **Near-zero CSS.** Semantic HTML on browser defaults; the styling
    budget is on the order of a dozen lines (viewport meta,
    `color-scheme: light dark` so default link and form-control colors
-   adapt to dark mode, padding, overflow guards). No CSS framework, no
-   theming, no custom fonts. A later restyle is additive because the
-   DOM stays semantic.
+   adapt to dark mode, 16px form-control font size so iOS Safari
+   doesn't auto-zoom on focus, padding, overflow guards). No CSS
+   framework, no theming, no custom fonts. A later restyle is additive
+   because the DOM stays semantic.
 4. **Reference artifact:** variant D on the `prototype/web-ui-screens`
    branch is the shape to imitate; variants A–C are rejected directions
    kept only as prototype history.
