@@ -381,6 +381,43 @@ mod tests {
         );
     }
 
+    fn server_said(status_code: u16) -> DockerError {
+        DockerError::DockerResponseServerError {
+            status_code,
+            message: "as the daemon put it".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_taken_name_means_the_chat_is_already_live() {
+        let error = spawn_failure(CHAT_ID)(server_said(409));
+
+        assert!(
+            matches!(error, PlaneError::AlreadyLive { ref chat_id } if chat_id == CHAT_ID),
+            "a name clash should name the live chat, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_missing_container_means_the_chat_is_not_live() {
+        let error = teardown_failure(CHAT_ID)(server_said(404));
+
+        assert!(
+            matches!(error, PlaneError::NotLive { ref chat_id } if chat_id == CHAT_ID),
+            "a missing container should name the dead chat, got: {error}"
+        );
+    }
+
+    #[test]
+    fn any_other_daemon_refusal_says_what_was_being_done() {
+        let error = teardown_failure(CHAT_ID)(server_said(500));
+
+        assert!(
+            format!("{error}").contains(&format!("tear down the container of chat {CHAT_ID}")),
+            "error should say what failed, got: {error}"
+        );
+    }
+
     #[test]
     fn a_path_docker_cannot_take_fails_loudly() {
         use std::ffi::OsStr;
