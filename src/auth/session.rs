@@ -3,7 +3,11 @@
 
 use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64;
+use hmac::{Hmac, KeyInit as _, Mac as _};
+use sha2::Sha256;
 
 /// How long a freshly issued session stays valid.
 pub const LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -25,7 +29,9 @@ pub struct Session {
 impl SigningKey {
     /// Draw a fresh key from the operating system's entropy source.
     pub fn random() -> Result<Self> {
-        todo!()
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).context("the operating system refused random bytes")?;
+        Ok(Self(bytes))
     }
 
     /// Adopt key material read from storage.
@@ -43,23 +49,47 @@ impl SigningKey {
 
 /// Mint a cookie value valid for [`LIFETIME`] from `now`.
 #[must_use]
-pub fn issue(_key: &SigningKey, _now: SystemTime) -> String {
-    todo!()
+pub fn issue(key: &SigningKey, now: SystemTime) -> String {
+    let payload = BASE64.encode(unix_seconds(now + LIFETIME).to_string());
+    let signature = BASE64.encode(mac(key, &payload).finalize().into_bytes());
+    format!("{payload}.{signature}")
 }
 
 /// Authenticate a cookie value, yielding the session it stands for.
 #[must_use]
-pub fn verify(_key: &SigningKey, _cookie: &str, _now: SystemTime) -> Option<Session> {
-    todo!()
+pub fn verify(key: &SigningKey, cookie: &str, now: SystemTime) -> Option<Session> {
+    let (payload, signature) = cookie.split_once('.')?;
+    let signature = BASE64.decode(signature).ok()?;
+    mac(key, payload).verify_slice(&signature).ok()?;
+    let expiry = String::from_utf8(BASE64.decode(payload).ok()?).ok()?;
+    let expires_at = SystemTime::UNIX_EPOCH + Duration::from_secs(expiry.parse().ok()?);
+    (expires_at > now).then_some(Session { expires_at })
 }
 
 impl Session {
     /// Whether this session has aged past [`REFRESH_AFTER`] and should be
     /// re-issued to slide its window forward.
     #[must_use]
-    pub fn needs_refresh(&self, _now: SystemTime) -> bool {
-        todo!()
+    pub fn needs_refresh(&self, now: SystemTime) -> bool {
+        self.expires_at
+            .duration_since(now)
+            .is_ok_and(|remaining| remaining + REFRESH_AFTER < LIFETIME)
     }
+}
+
+/// The HMAC-SHA256 state authenticating a cookie payload.
+fn mac(key: &SigningKey, payload: &str) -> Hmac<Sha256> {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts keys of any length");
+    mac.update(payload.as_bytes());
+    mac
+}
+
+/// Seconds since the Unix epoch; times before it cannot arise here.
+fn unix_seconds(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .expect("session times are never before the Unix epoch")
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -91,7 +121,9 @@ mod tests {
     #[test]
     fn a_tampered_payload_is_rejected() {
         let cookie = issue(&key(1), at(1_000));
-        let (payload, signature) = cookie.split_once('.').expect("cookie should have two parts");
+        let (payload, signature) = cookie
+            .split_once('.')
+            .expect("cookie should have two parts");
         let forged = format!("{payload}x.{signature}");
 
         assert!(verify(&key(1), &forged, at(1_000)).is_none());
