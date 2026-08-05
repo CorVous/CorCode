@@ -89,13 +89,12 @@ impl ChatStore {
 
     /// Replace a chat's manifest in one atomic step.
     pub fn write_manifest(&self, manifest: &Manifest) -> Result<(), StoreError> {
-        let chat_dir = self.chat_dir(&manifest.chat_id);
-        let temp = chat_dir.join(MANIFEST_TEMP_FILE);
+        let temp = self.chat_dir(&manifest.chat_id).join(MANIFEST_TEMP_FILE);
         let json = serde_json::to_string_pretty(manifest).expect("manifest should serialize");
         let mut file = File::create(&temp).map_err(StoreError::writing(&temp))?;
         writeln!(file, "{json}").map_err(StoreError::writing(&temp))?;
         file.sync_all().map_err(StoreError::writing(&temp))?;
-        let path = chat_dir.join(MANIFEST_FILE);
+        let path = self.manifest_path(&manifest.chat_id);
         fs::rename(&temp, &path).map_err(StoreError::writing(&path))
     }
 
@@ -143,10 +142,11 @@ impl ChatStore {
 /// (ADR-0007 rule 5: no auto-repair, no skipping).
 fn read_manifest_at(path: &Path) -> Result<Manifest, StoreError> {
     let json = fs::read_to_string(path).map_err(StoreError::reading(path))?;
-    let manifest: Manifest = serde_json::from_str(&json).map_err(|source| StoreError::Manifest {
-        path: path.to_owned(),
-        source,
-    })?;
+    let manifest: Manifest =
+        serde_json::from_str(&json).map_err(|source| StoreError::Manifest {
+            path: path.to_owned(),
+            source,
+        })?;
     if manifest.schema == MANIFEST_SCHEMA {
         Ok(manifest)
     } else {
@@ -194,7 +194,12 @@ mod tests {
         assert_eq!(manifest.schema, MANIFEST_SCHEMA);
         assert!(store.claude_dir(&manifest.chat_id).is_dir());
         assert!(store.workspace_dir(&manifest.chat_id).is_dir());
-        assert!(store.chat_dir(&manifest.chat_id).join(EVENTS_FILE).is_file());
+        assert!(
+            store
+                .chat_dir(&manifest.chat_id)
+                .join(EVENTS_FILE)
+                .is_file()
+        );
         assert_eq!(
             store
                 .read_manifest(&manifest.chat_id)
@@ -263,7 +268,7 @@ mod tests {
 
         let message = format!("{error}");
         assert!(
-            message.contains(&path.display().to_string()) && message.contains('2'),
+            message.contains(&path.display().to_string()) && message.contains("schema 2"),
             "error should name the file and the schema, got: {message}"
         );
     }
@@ -292,7 +297,10 @@ mod tests {
             .map(|entry| entry.expect("entry should be readable").path())
             .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     #[test]

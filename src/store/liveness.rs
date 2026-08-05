@@ -1,6 +1,7 @@
 //! Runtime status: the manifest's state crossed with container liveness.
 
 use std::collections::HashSet;
+use std::hash::BuildHasher;
 
 use anyhow::Result;
 
@@ -22,7 +23,10 @@ pub enum RuntimeStatus {
 
 /// Derive a chat's runtime status; `parked` exists only here, never on disk.
 #[must_use]
-pub fn runtime_status(manifest: &Manifest, live_chat_ids: &HashSet<String>) -> RuntimeStatus {
+pub fn runtime_status<S: BuildHasher>(
+    manifest: &Manifest,
+    live_chat_ids: &HashSet<String, S>,
+) -> RuntimeStatus {
     match manifest.state {
         ChatState::Archived => RuntimeStatus::Archived,
         ChatState::Open if live_chat_ids.contains(&manifest.chat_id) => RuntimeStatus::Live,
