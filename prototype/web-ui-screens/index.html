@@ -437,6 +437,12 @@
   .vc .slot:first-of-type { border-top: 0; margin-top: 6px; }
   .vc .slot .who { font-weight: 600; }
   .vc .slot .up { color: var(--dim); font: 11px ui-monospace, monospace; }
+
+  /* ============================================================
+     VARIANT D — "Unstyled" (browser defaults)
+     ============================================================ */
+  .vd { padding: 8px; }
+  .vd, .vd * { word-break: break-word; }
 </style>
 
 <div class="phone" id="app"></div>
@@ -516,6 +522,7 @@ const VARIANTS = [
   { key: "a", name: "A — Inbox" },
   { key: "b", name: "B — Console" },
   { key: "c", name: "C — Workbench" },
+  { key: "d", name: "D — Unstyled" },
 ];
 const app = document.getElementById("app");
 
@@ -800,9 +807,82 @@ function cSlug(v) {
 }
 
 /* ------------------------------------------------------------------ */
+/* VARIANT D — Unstyled                                                */
+/* ------------------------------------------------------------------ */
+function renderD({ screen, id }) {
+  if (screen === "chat" && id) return renderDChat(id);
+
+  const summary = `pool 2/2 · parked ${MACHINES.parked} · img ${MACHINES.image.split(":")[1]} · sweep ok`;
+  const live = CHATS.filter(c => c.state === "live");
+  const parked = CHATS.filter(c => c.state === "parked");
+  const archived = CHATS.filter(c => c.state === "archived");
+  const list = cs => `<ul>${cs.map(c => `<li><a href="#/d/chat/${c.id}">${esc(c.name)}</a><br><small>${esc(c.branch)} · push ${esc(c.lastPush)}</small></li>`).join("")}</ul>`;
+  return `<div class="vd">
+    <details ${screen === "machines" ? "open" : ""}>
+      <summary>${summary}</summary>
+      <dl>
+        <dt>Pool</dt>
+        <dd>${MACHINES.pool.map(p => `${esc(p.chat)} — up ${p.up}, idle ${p.idle}`).join("<br>")}</dd>
+        <dt>Parked</dt>
+        <dd>${MACHINES.parked} chats — workspace kept, container torn down</dd>
+        <dt>Image</dt>
+        <dd>${esc(MACHINES.image)}</dd>
+        <dt>Sweep</dt>
+        <dd>${esc(MACHINES.sweep)}</dd>
+        <dt>Host</dt>
+        <dd>${esc(MACHINES.host)}</dd>
+      </dl>
+    </details>
+    <details ${screen === "new" ? "open" : ""}>
+      <summary>New chat</summary>
+      <form onsubmit="return false">
+        <div><label>Repository <select><option>CorVous/CorCode</option><option>CorVous/zenni-tools</option></select></label></div>
+        <div><label>Base branch <select><option>main</option><option>develop</option></select></label></div>
+        <div><label>Slug <input id="d-slug" placeholder="resume-ladder" oninput="dSlug(this.value)"></label></div>
+        <p>Branch: <span id="d-br">chat/2026-08-05-…</span></p>
+        <label><input type="checkbox"> work directly on base branch</label>
+        <p><button>Create</button></p>
+      </form>
+    </details>
+    <h3>Live</h3>
+    ${list(live)}
+    <h3>Parked</h3>
+    ${list(parked)}
+    <h3>Archived</h3>
+    ${list(archived)}
+  </div>`;
+}
+function dSlug(v) {
+  const el = document.getElementById("d-br");
+  if (el) el.textContent = "chat/2026-08-05-" + v.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-");
+}
+function renderDChat(id) {
+  const c = CHATS.find(x => x.id === id) || CHATS[0];
+  const evs = EVENTS[c.id] || EVENTS.c1;
+  const body = evs.map(e => {
+    if (e.k === "user") return `<p><b>you:</b> ${esc(e.tx)}</p>`;
+    if (e.k === "agent") return `<p>${esc(e.tx)}</p>`;
+    if (e.k === "tool") return `<p><small>⚙ ${esc(e.tx)}${e.detail ? ` (${esc(e.detail)})` : ""}</small></p>`;
+    if (e.k === "git") return `<p><small>✓ ${esc(e.tx)}</small></p>`;
+    if (e.k === "notice") return `<blockquote><b>reset notice:</b> ${esc(e.tx)}</blockquote>`;
+  }).join("");
+  const parked = c.state === "parked";
+  const archived = c.state === "archived";
+  return `<div class="vd">
+    <p><a href="#/d/list">← chats</a></p>
+    <h3>${esc(c.name)}</h3>
+    <p><small>${esc(c.repo)} · ${esc(c.branch)} · push ${esc(c.lastPush)} · ${stateWord[c.state]}</small></p>
+    ${body}
+    ${parked ? `<p><small>prompt re-spins the container</small></p>` : ""}
+    ${archived ? `<p><small>prompt revives: fresh clone at last pushed commit</small></p>` : ""}
+    <form onsubmit="return false"><input placeholder="prompt" aria-label="Prompt"> <button>Send</button></form>
+  </div>`;
+}
+
+/* ------------------------------------------------------------------ */
 /* switcher + boot                                                     */
 /* ------------------------------------------------------------------ */
-const RENDER = { a: renderA, b: renderB, c: renderC };
+const RENDER = { a: renderA, b: renderB, c: renderC, d: renderD };
 function paint() {
   const r = route();
   app.innerHTML = RENDER[r.v](r);
