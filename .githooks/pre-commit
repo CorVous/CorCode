@@ -1,0 +1,15 @@
+#!/bin/sh
+# Runs the formatter and doc generator so nobody has to remember to.
+# Enable once per clone: git config core.hooksPath .githooks
+set -eu
+cd "$(git rev-parse --show-toplevel)"
+
+before=$(git diff | git hash-object --stdin)
+cargo fmt --all
+cargo run --quiet --bin gen-docs
+after=$(git diff | git hash-object --stdin)
+
+if [ "$before" != "$after" ]; then
+    echo "pre-commit: cargo fmt / gen-docs updated files; review and git add them" >&2
+    exit 1
+fi

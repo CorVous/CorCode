@@ -1,0 +1,69 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Rust: CLI - Version (INFO)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=rust-template",
+                    "--package=rust-template"
+                ],
+                "filter": {
+                    "name": "rust-template",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "-v",
+                "version"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Rust: CLI - Example Command (INFO)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=rust-template",
+                    "--package=rust-template"
+                ],
+                "filter": {
+                    "name": "rust-template",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "-v",
+                "example",
+                "World",
+                "--greeting",
+                "Hello"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Rust: Unit Tests",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--lib",
+                    "--package=rust-template"
+                ],
+                "filter": {
+                    "name": "rust_template",
+                    "kind": "lib"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

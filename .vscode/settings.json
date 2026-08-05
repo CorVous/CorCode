@@ -1,0 +1,17 @@
+{ // I find these handy. You may too!
+    "editor.rulers": [
+        100, // rustfmt's max_width
+    ],
+    "editor.wordWrapColumn": 100,
+    "editor.tabSize": 4,
+    "markdown.validate.enabled": true,
+    "markdown.updateLinksOnFileMove.enabled": "always",
+    "markdown.validate.fileLinks.enabled": "error",
+    "markdown.validate.fragmentLinks.enabled": "error",
+    "markdown.validate.duplicateLinkDefinitions.enabled": "error",
+    "markdown.validate.referenceLinks.enabled": "error",
+    "extensions.ignoreRecommendations": true,
+    "editor.formatOnSave": true,
+    // Surface clippy findings in the editor, not just in CI
+    "rust-analyzer.check.command": "clippy",
+}
