@@ -5,13 +5,17 @@ mod events;
 mod liveness;
 mod manifest;
 
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use ulid::Ulid;
+
+use manifest::SchemaTag;
 
 pub use error::StoreError;
 pub use events::Event;
@@ -144,19 +148,34 @@ impl ChatStore {
 /// (ADR-0007 rule 5: no auto-repair, no skipping).
 fn read_manifest_at(path: &Path) -> Result<Manifest, StoreError> {
     let json = fs::read_to_string(path).map_err(StoreError::reading(path))?;
-    let manifest: Manifest =
-        serde_json::from_str(&json).map_err(|source| StoreError::Manifest {
+    let tag: SchemaTag = parse_manifest_json(path, &json)?;
+    if tag.schema != MANIFEST_SCHEMA {
+        return Err(StoreError::ManifestSchema {
             path: path.to_owned(),
-            source,
-        })?;
-    if manifest.schema == MANIFEST_SCHEMA {
+            schema: tag.schema,
+        });
+    }
+    let manifest: Manifest = parse_manifest_json(path, &json)?;
+    if OsStr::new(manifest.chat_id.as_str()) == owning_dir_name(path) {
         Ok(manifest)
     } else {
-        Err(StoreError::ManifestSchema {
+        Err(StoreError::ChatIdMismatch {
             path: path.to_owned(),
-            schema: manifest.schema,
+            chat_id: manifest.chat_id,
         })
     }
+}
+
+fn parse_manifest_json<T: DeserializeOwned>(path: &Path, json: &str) -> Result<T, StoreError> {
+    serde_json::from_str(json).map_err(|source| StoreError::Manifest {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// Name of the chat dir a file sits in — the second witness to a chat's id.
+fn owning_dir_name(path: &Path) -> &OsStr {
+    path.parent().and_then(Path::file_name).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -181,9 +200,7 @@ mod tests {
     fn inode(path: &Path) -> u64 {
         use std::os::unix::fs::MetadataExt as _;
 
-        fs::metadata(path)
-            .expect("manifest should exist")
-            .ino()
+        fs::metadata(path).expect("manifest should exist").ino()
     }
 
     fn new_chat(title: &str) -> NewChat {

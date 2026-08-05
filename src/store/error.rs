@@ -22,6 +22,8 @@ pub enum StoreError {
     },
     #[error("{} has manifest schema {schema}, expected {MANIFEST_SCHEMA}", path.display())]
     ManifestSchema { path: PathBuf, schema: u32 },
+    #[error("{} claims chat id {chat_id}, which is not its directory", path.display())]
+    ChatIdMismatch { path: PathBuf, chat_id: String },
     #[error("{} line {line} is not a valid event", path.display())]
     Event {
         path: PathBuf,
