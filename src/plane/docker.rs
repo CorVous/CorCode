@@ -494,10 +494,7 @@ mod tests {
         let live = chat_ids_of(vec![
             ContainerSummary::default(),
             container_of(HashMap::new()),
-            container_of(HashMap::from([(
-                "chat-id".to_owned(),
-                CHAT_ID.to_owned(),
-            )])),
+            container_of(HashMap::from([("chat-id".to_owned(), CHAT_ID.to_owned())])),
         ]);
 
         assert!(
