@@ -10,6 +10,15 @@ fn cli() -> Command {
     let mut cmd = Command::cargo_bin(env!("CARGO_PKG_NAME")).expect("binary should build");
     // Keep tests hermetic: the environment's RUST_LOG must not leak in
     cmd.env_remove("RUST_LOG");
+    for key in [
+        "CORCODE_DATA_DIR",
+        "CORCODE_BIND_ADDR",
+        "CORCODE_USERNAME",
+        "CORCODE_PASSWORD_HASH",
+        "CORCODE_WORKSPACE_IMAGE",
+    ] {
+        cmd.env_remove(key);
+    }
     cmd
 }
 
@@ -78,11 +87,11 @@ fn cli_rust_log_overrides_verbosity() {
 }
 
 #[test]
-fn cli_no_subcommand_shows_help() {
+fn cli_no_subcommand_serving_without_config_fails() {
     cli()
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Usage:"));
+        .failure()
+        .stderr(predicate::str::contains("CORCODE_DATA_DIR"));
 }
 
 #[test]
@@ -101,22 +110,4 @@ fn version_subcommand_help() {
         .assert()
         .success()
         .stdout(predicate::str::contains("version"));
-}
-
-#[test]
-fn example_subcommand() {
-    cli()
-        .args(["example", "World"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Hello, World!"));
-}
-
-#[test]
-fn example_subcommand_with_greeting() {
-    cli()
-        .args(["example", "World", "--greeting", "Hi"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Hi, World!"));
 }
