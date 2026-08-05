@@ -6,6 +6,7 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, Output};
 
+use chrono::Utc;
 use thiserror::Error;
 
 use crate::config::REDACTED;
@@ -104,6 +105,44 @@ pub enum GitError {
     Refused { doing: String, complaint: String },
 }
 
+/// The dated branch a chat's work is cut onto (ADR-0005). An empty slug
+/// spells the prefix alone, which is what the console previews.
+#[must_use]
+pub fn chat_branch(slug: &str) -> String {
+    format!("chat/{}-{slug}", Utc::now().format("%Y-%m-%d"))
+}
+
+/// What typed text becomes on a branch name.
+///
+/// Lowercase ASCII alphanumerics with single hyphens between them and none at
+/// either end. The console's preview says the same thing in JavaScript; this
+/// is the one that binds.
+#[must_use]
+pub fn slugify(typed: &str) -> String {
+    let mut slug = String::with_capacity(typed.len());
+    for character in typed.chars() {
+        let lowered = character.to_ascii_lowercase();
+        if lowered.is_ascii_alphanumeric() {
+            slug.push(lowered);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_owned()
+}
+
+/// Whether git would take `branch` as a branch name — and whether a command
+/// line would take it as a name rather than as another option.
+#[must_use]
+pub fn names_a_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && !branch.starts_with('-')
+        && !branch.contains("..")
+        && branch
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_./".contains(&byte))
+}
+
 /// Clone `origin` at `base_branch` into `dest`, history and all: ADR-0005's
 /// commits and ADR-0002's checkpoints are cut from it.
 pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), GitError> {
@@ -158,6 +197,37 @@ mod tests {
     use super::*;
 
     const TOKEN: &str = "ghs-clone-secret";
+
+    #[test]
+    fn a_typed_title_becomes_a_slug_a_branch_can_carry() {
+        for (typed, slug) in [
+            ("Resume Ladder!", "resume-ladder"),
+            ("  spaced  out  ", "spaced-out"),
+            ("ALL/CAPS", "all-caps"),
+            ("émigré", "migr"),
+            ("!!!", ""),
+        ] {
+            assert_eq!(slugify(typed), slug, "{typed} slugified wrong");
+        }
+    }
+
+    #[test]
+    fn a_chat_branch_is_dated_and_prefixed() {
+        let today = Utc::now().format("%Y-%m-%d");
+
+        assert_eq!(chat_branch("a-slug"), format!("chat/{today}-a-slug"));
+        assert_eq!(chat_branch(""), format!("chat/{today}-"));
+    }
+
+    #[test]
+    fn a_branch_name_that_git_would_read_as_an_option_is_not_a_branch_name() {
+        for named in ["main", "release/2026-08", "a_branch.name"] {
+            assert!(names_a_branch(named), "{named} is a branch name");
+        }
+        for unnamed in ["", "--upload-pack=evil", "-x", "a..b", "a branch", "a;b"] {
+            assert!(!names_a_branch(unnamed), "{unnamed} is not a branch name");
+        }
+    }
 
     #[test]
     fn a_clone_url_names_the_repository_on_github() {

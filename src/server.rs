@@ -18,10 +18,13 @@ use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use ulid::Ulid;
 
+use crate::acp::AcpTransport;
 use crate::auth::gate::{Gate, SignIn};
 use crate::auth::session;
+use crate::chats::{Chats, WantedChat};
 use crate::config::Config;
-use crate::store::{ChatStore, ContainerLiveness, Event, runtime_status};
+use crate::plane::ContainerPlane;
+use crate::store::ContainerLiveness;
 use crate::ui::{self, page};
 
 /// Name of the cookie carrying the session (ADR-0003).
@@ -36,31 +39,28 @@ const HEALTH_PATH: &str = "/health";
 /// Build the application's routes. Every route is gated except the handful
 /// [`is_public`] names, so a route added here is protected by default
 /// (ADR-0003).
-pub fn router<L>(config: &Config, liveness: L) -> Result<Router>
+pub fn router<P, T>(config: &Config, chats: Chats<P, T>) -> Result<Router>
 where
-    L: ContainerLiveness + Send + Sync + 'static,
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
 {
     let gate = Arc::new(Gate::new(config)?);
-    let chats = Arc::new(Chats {
-        store: ChatStore::new(&config.data_dir),
-        liveness,
-        workspace_image: config.workspace_image.clone(),
-    });
     Ok(Router::new()
-        .merge(console_routes(chats))
+        .merge(console_routes(Arc::new(chats)))
         .merge(session_routes(Arc::clone(&gate)))
         .layer(from_fn_with_state(gate, require_session))
         .layer(from_fn(same_origin)))
 }
 
-/// The read-only console over the dataset (ADR-0008).
-fn console_routes<L>(chats: Arc<Chats<L>>) -> Router
+/// The console over the dataset and the one form it posts (ADR-0008).
+fn console_routes<P, T>(chats: Arc<Chats<P, T>>) -> Router
 where
-    L: ContainerLiveness + Send + Sync + 'static,
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
 {
     Router::new()
         .route("/", get(console))
-        .route(ui::CHATS_PATH, get(chat_list))
+        .route(ui::CHATS_PATH, get(chat_list).post(create_chat))
         .route(&format!("{}/{{chat_id}}", ui::CHATS_PATH), get(chat_view))
         .route(ui::HTMX_PATH, get(htmx))
         .with_state(chats)
@@ -73,46 +73,6 @@ fn session_routes(gate: Arc<Gate>) -> Router {
         .route(HEALTH_PATH, get(health))
         .route(LOGIN_PATH, get(login_form).post(submit_login))
         .with_state(gate)
-}
-
-/// What the console handlers read: the dataset, who is live, and the pinned
-/// image the status line names.
-struct Chats<L> {
-    store: ChatStore,
-    liveness: L,
-    workspace_image: String,
-}
-
-impl<L: ContainerLiveness + Sync> Chats<L> {
-    /// Every chat on disk paired with the status it has right now.
-    async fn survey(&self) -> Result<Vec<ui::Chat>> {
-        let live = self.liveness.live_chat_ids().await?;
-        Ok(self
-            .store
-            .scan()?
-            .into_iter()
-            .map(|manifest| {
-                let status = runtime_status(&manifest, &live);
-                (manifest, status)
-            })
-            .collect())
-    }
-
-    /// One chat and its whole event log, or nothing if the dataset holds no
-    /// such chat. A pure read: opening a chat never touches a container
-    /// (ADR-0007).
-    async fn open(&self, chat_id: &Ulid) -> Result<Option<(ui::Chat, Vec<Event>)>> {
-        let chat_id = chat_id.to_string();
-        let manifest = match self.store.read_manifest(&chat_id) {
-            Ok(manifest) => manifest,
-            Err(failure) if failure.is_missing() => return Ok(None),
-            Err(failure) => return Err(failure.into()),
-        };
-        let events = self.store.read_events(&chat_id)?;
-        let live = self.liveness.live_chat_ids().await?;
-        let status = runtime_status(&manifest, &live);
-        Ok(Some(((manifest, status), events)))
-    }
 }
 
 /// The only requests that reach a handler without a session: the liveness
@@ -131,20 +91,27 @@ async fn health() -> &'static str {
 }
 
 /// The one screen: status line, new-chat form, grouped chat list (ADR-0008).
-async fn console<L>(State(chats): State<Arc<Chats<L>>>) -> Response
+async fn console<P, T>(State(chats): State<Arc<Chats<P, T>>>) -> Response
 where
-    L: ContainerLiveness + Send + Sync + 'static,
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
 {
     match chats.survey().await {
-        Ok(survey) => Html(ui::console_page(&survey, &chats.workspace_image)).into_response(),
+        Ok(survey) => Html(ui::console_page(
+            &survey,
+            chats.workspace_image(),
+            chats.repos(),
+        ))
+        .into_response(),
         Err(failure) => broken_invariant(&failure),
     }
 }
 
 /// The chat list alone, for htmx to swap into the console.
-async fn chat_list<L>(State(chats): State<Arc<Chats<L>>>) -> Response
+async fn chat_list<P, T>(State(chats): State<Arc<Chats<P, T>>>) -> Response
 where
-    L: ContainerLiveness + Send + Sync + 'static,
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
 {
     match chats.survey().await {
         Ok(survey) => Html(ui::chat_list(&survey)).into_response(),
@@ -152,12 +119,64 @@ where
     }
 }
 
+/// Cut a new chat and send the browser to it (ADR-0005). A refusal says what
+/// was wrong with the request; a failure says only that there was one, and
+/// leaves the whole of it in the log.
+async fn create_chat<P, T>(
+    State(chats): State<Arc<Chats<P, T>>>,
+    Form(form): Form<NewChatForm>,
+) -> Response
+where
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
+{
+    match chats.create(form.into()).await {
+        Ok(chat_id) => Redirect::to(&format!("{}/{chat_id}", ui::CHATS_PATH)).into_response(),
+        Err(refusal) if refusal.is_refusal() => {
+            (StatusCode::BAD_REQUEST, format!("{refusal}\n")).into_response()
+        }
+        Err(failure) => {
+            error!("a chat could not be created: {failure:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The chat could not be created.\n",
+            )
+                .into_response()
+        }
+    }
+}
+
+/// What the new-chat form submits. An unticked checkbox sends nothing at all,
+/// which is how the opt-out reads as false.
+#[derive(Deserialize)]
+struct NewChatForm {
+    repo: String,
+    base_branch: String,
+    slug: String,
+    direct_on_base: Option<String>,
+}
+
+impl From<NewChatForm> for WantedChat {
+    fn from(form: NewChatForm) -> Self {
+        Self {
+            repo: form.repo,
+            base_branch: form.base_branch,
+            slug: form.slug,
+            direct_on_base: form.direct_on_base.is_some(),
+        }
+    }
+}
+
 /// One chat's event log (ADR-0006). A chat id is a ULID and nothing else, so
 /// the path segment is parsed before the store sees it: no request can name a
 /// file, inside `chats/` or out of it.
-async fn chat_view<L>(State(chats): State<Arc<Chats<L>>>, Path(chat_id): Path<String>) -> Response
+async fn chat_view<P, T>(
+    State(chats): State<Arc<Chats<P, T>>>,
+    Path(chat_id): Path<String>,
+) -> Response
 where
-    L: ContainerLiveness + Send + Sync + 'static,
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
 {
     let Ok(chat_id) = chat_id.parse::<Ulid>() else {
         return no_such_chat();

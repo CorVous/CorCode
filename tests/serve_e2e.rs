@@ -1,12 +1,21 @@
-//! End-to-end test: `Config` reaches a real bound socket.
+//! End-to-end test: `Config` reaches a real bound socket. Docker-gated —
+//! serving reaches the daemon it will spawn chats on before it binds, and
+//! refuses to start without it.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+const DOCKER_SOCKET: &str = "/var/run/docker.sock";
+
 #[tokio::test]
 async fn serve_binds_the_configured_address() {
+    if !daemon_is_reachable() {
+        eprintln!("SKIPPED serve_binds_the_configured_address: no docker daemon");
+        return;
+    }
     let data_dir = TempDir::new().expect("temp dir should be creatable");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral port should bind");
     let addr = listener
@@ -49,4 +58,8 @@ async fn serve_binds_the_configured_address() {
 
     child.kill().expect("child should be killable");
     child.wait().expect("child should exit after being killed");
+}
+
+fn daemon_is_reachable() -> bool {
+    Path::new(DOCKER_SOCKET).exists() || std::env::var_os("DOCKER_HOST").is_some()
 }

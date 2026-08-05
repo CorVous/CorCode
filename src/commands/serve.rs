@@ -4,8 +4,11 @@ use anyhow::{Context as _, Result};
 use log::info;
 use tokio::net::TcpListener;
 
+use crate::acp::DockerExec;
+use crate::chats::Chats;
 use crate::config::Config;
-use crate::plane::MemoryPlane;
+use crate::git::{GITHUB, Remotes};
+use crate::plane::{DockerPlane, PlaneSettings};
 use crate::server;
 use crate::store::ChatStore;
 
@@ -31,10 +34,25 @@ async fn serve(config: &Config) -> Result<()> {
     );
     server::serve(
         listener,
-        // The liveness source is a stub: nothing is live because nothing can
-        // yet be spawned. The spawn increment swaps in the real plane.
-        server::router(config, MemoryPlane::default())?,
+        server::router(config, chats(config)?)?,
         server::shutdown_signal(),
     )
     .await
+}
+
+/// The dataset as this deployment reaches it: real containers, real adapters,
+/// real repositories on GitHub.
+fn chats(config: &Config) -> Result<Chats<DockerPlane, DockerExec>> {
+    let plane = DockerPlane::connect(PlaneSettings {
+        image: config.workspace_image.clone(),
+        memory_mb: config.container_memory_mb,
+        cpus: config.container_cpus,
+        registry: config.registry.clone(),
+    })?;
+    Ok(Chats::new(
+        config,
+        plane,
+        DockerExec::connect()?,
+        Remotes::new(GITHUB, config.github_token.clone()),
+    ))
 }

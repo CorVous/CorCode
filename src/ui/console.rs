@@ -1,13 +1,14 @@
 //! The one screen: status line, new-chat form, grouped chat list (ADR-0008).
 
-use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use chrono::Utc;
-
-use crate::store::{Manifest, RuntimeStatus};
+use crate::git::chat_branch;
+use crate::store::RuntimeStatus;
 
 use super::{CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, last_push, page, status_word, text};
+
+/// The branch a chat is cut from when the operator says nothing else.
+const DEFAULT_BASE_BRANCH: &str = "main";
 
 /// Warm-pool size, held here until the plane reports its own (ADR-0002).
 const POOL_SLOTS: usize = 2;
@@ -22,10 +23,10 @@ const GROUPS: [RuntimeStatus; 3] = [
     RuntimeStatus::Archived,
 ];
 
-/// The whole console: status line, the collapsed new-chat form, and the
-/// grouped chat list.
+/// The whole console: status line, the collapsed new-chat form over the
+/// repositories this deployment offers, and the grouped chat list.
 #[must_use]
-pub fn console_page(chats: &[Chat], workspace_image: &str) -> String {
+pub fn console_page(chats: &[Chat], workspace_image: &str, repos: &[String]) -> String {
     page(
         "CorCode",
         &format!(
@@ -34,7 +35,7 @@ pub fn console_page(chats: &[Chat], workspace_image: &str) -> String {
              <p><button type=\"submit\">Log out everywhere</button></p></form>\
              <script src=\"{HTMX_PATH}\" defer></script>",
             status_line(chats, workspace_image),
-            new_chat_form(chats),
+            new_chat_form(repos),
             chat_list(chats),
         ),
     )
@@ -78,41 +79,37 @@ fn status_line(chats: &[Chat], workspace_image: &str) -> String {
     )
 }
 
-/// The new chat this form would cut; inert until there is somewhere to post
-/// it. The preview slugifies as you type so it reads as the branch name it
-/// would become.
-fn new_chat_form(chats: &[Chat]) -> String {
-    let today = Utc::now().format("%Y-%m-%d");
+/// The new chat this form cuts. The preview slugifies as you type so it reads
+/// as the branch name it would become; the server slugifies again, and that
+/// is the one that binds.
+fn new_chat_form(repos: &[String]) -> String {
+    let prefix = chat_branch("");
     format!(
-        "<details><summary>New chat</summary><form>\
+        "<details><summary>New chat</summary>\
+         <form method=\"post\" action=\"{CHATS_PATH}\">\
          <p><label>Repository <select name=\"repo\">{}</select></label></p>\
-         <p><label>Base branch <select name=\"base_branch\">{}</select></label></p>\
+         <p><label>Base branch <input name=\"base_branch\" value=\"{DEFAULT_BASE_BRANCH}\">\
+         </label><br><small>Typed, not listed: naming a repository's branches would cost \
+         a call to GitHub on every page.</small></p>\
          <p><label>Slug <input name=\"slug\" \
          oninput=\"document.getElementById('branch').textContent=\
-         'chat/{today}-'+this.value.toLowerCase().replace(/[^a-z0-9]+/g,'-')\
+         '{prefix}'+this.value.toLowerCase().replace(/[^a-z0-9]+/g,'-')\
          .replace(/^-|-$/g,'')\"></label></p>\
-         <p>Branch: <output id=\"branch\">chat/{today}-</output></p>\
+         <p>Branch: <output id=\"branch\">{prefix}</output></p>\
          <p><label><input type=\"checkbox\" name=\"direct_on_base\"> \
          Work directly on the base branch</label></p>\
-         <p><button type=\"submit\" disabled>Create</button></p></form></details>",
-        options(chats, |manifest| &manifest.repo),
-        options(chats, |manifest| &manifest.base_branch),
+         <p><button type=\"submit\">Create</button></p></form></details>",
+        offered(repos),
     )
 }
 
-/// One `<option>` per distinct value already in use, so the selects offer
-/// what this dataset knows about and nothing invented.
-fn options(chats: &[Chat], field: fn(&Manifest) -> &String) -> String {
-    chats
-        .iter()
-        .map(|(manifest, _)| field(manifest).as_str())
-        .collect::<BTreeSet<&str>>()
-        .into_iter()
-        .fold(String::new(), |mut markup, value| {
-            write!(markup, "<option>{}</option>", text(value))
-                .expect("writing to a string cannot fail");
-            markup
-        })
+/// One `<option>` per repository this deployment was configured with, in the
+/// order it was given them: the first is the default (ADR-0005).
+fn offered(repos: &[String]) -> String {
+    repos.iter().fold(String::new(), |mut markup, repo| {
+        write!(markup, "<option>{}</option>", text(repo)).expect("writing to a string cannot fail");
+        markup
+    })
 }
 
 /// The chats in one group, most recently active first as the store scanned
@@ -176,6 +173,14 @@ mod tests {
     use super::*;
 
     const IMAGE: &str = "ghcr.io/corvous/corcode-workspace:2026-08-05";
+
+    /// What a deployment offers, in the order it was given them.
+    fn repos() -> Vec<String> {
+        vec![
+            "CorVous/CorCode".to_owned(),
+            "CorVous/zenni-tools".to_owned(),
+        ]
+    }
 
     fn chat(title: &str, status: RuntimeStatus) -> Chat {
         let now = Utc::now();
@@ -267,7 +272,7 @@ mod tests {
 
     #[test]
     fn an_empty_dataset_still_renders_every_group() {
-        let rendered = console_page(&[], IMAGE);
+        let rendered = console_page(&[], IMAGE, &repos());
 
         for status in [
             RuntimeStatus::Live,
@@ -283,7 +288,7 @@ mod tests {
 
     #[test]
     fn the_status_line_reports_the_parked_count_and_the_pinned_image_tag() {
-        let rendered = console_page(&every_state(), IMAGE);
+        let rendered = console_page(&every_state(), IMAGE, &repos());
 
         assert!(
             rendered.contains("<summary>pool 1/2 · parked 1 · img 2026-08-05 · sweep ok</summary>"),
@@ -296,23 +301,23 @@ mod tests {
     }
 
     #[test]
-    fn the_new_chat_form_offers_the_repositories_already_in_use() {
-        let mut chats = every_state();
-        chats[0].0.repo = "CorVous/zenni-tools".to_owned();
+    fn the_new_chat_form_offers_the_repositories_this_deployment_was_given() {
+        let rendered = console_page(&every_state(), IMAGE, &repos());
 
-        let rendered = console_page(&chats, IMAGE);
-
-        assert!(rendered.contains("<option>CorVous/CorCode</option>"));
-        assert!(rendered.contains("<option>CorVous/zenni-tools</option>"));
         assert!(
-            rendered.contains("<option>main</option>"),
-            "the base branch select is empty: {rendered}"
+            rendered
+                .contains("<option>CorVous/CorCode</option><option>CorVous/zenni-tools</option>"),
+            "the repositories are not offered in the order given: {rendered}"
+        );
+        assert!(
+            rendered.contains("name=\"base_branch\" value=\"main\""),
+            "the base branch does not default to main: {rendered}"
         );
     }
 
     #[test]
     fn the_new_chat_form_previews_the_branch_it_would_cut() {
-        let rendered = console_page(&[], IMAGE);
+        let rendered = console_page(&[], IMAGE, &repos());
         let today = Utc::now().format("%Y-%m-%d");
 
         assert!(
@@ -323,7 +328,7 @@ mod tests {
 
     #[test]
     fn the_branch_preview_slugifies_what_you_type() {
-        let rendered = console_page(&[], IMAGE);
+        let rendered = console_page(&[], IMAGE, &repos());
 
         assert!(
             rendered.contains("toLowerCase()") && rendered.contains("[^a-z0-9]+"),
@@ -332,18 +337,22 @@ mod tests {
     }
 
     #[test]
-    fn nothing_on_the_console_can_be_submitted_yet() {
-        let rendered = console_page(&every_state(), IMAGE);
+    fn the_new_chat_form_posts_itself_to_the_chats_path() {
+        let rendered = console_page(&every_state(), IMAGE, &repos());
 
         assert!(
-            rendered.contains("<button type=\"submit\" disabled>Create</button>"),
-            "the new-chat form is not inert: {rendered}"
+            rendered.contains(&format!("<form method=\"post\" action=\"{CHATS_PATH}\">")),
+            "the new-chat form posts nowhere: {rendered}"
+        );
+        assert!(
+            rendered.contains("<button type=\"submit\">Create</button>"),
+            "the new-chat form cannot be submitted: {rendered}"
         );
     }
 
     #[test]
     fn the_chat_list_refreshes_itself_through_htmx() {
-        let rendered = console_page(&[], IMAGE);
+        let rendered = console_page(&[], IMAGE, &repos());
 
         assert!(
             rendered.contains(&format!("src=\"{}\"", super::super::HTMX_PATH)),
