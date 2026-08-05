@@ -1,9 +1,10 @@
 //! A plane that spawns nothing, for tests that care about the contract
 //! rather than about Docker.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use super::{ContainerPlane, ContainerRef, PlaneError};
 use crate::store::ContainerLiveness;
@@ -17,20 +18,37 @@ pub struct MemoryPlane {
 impl ContainerPlane for MemoryPlane {
     async fn spawn(
         &self,
-        _chat_id: &str,
+        chat_id: &str,
         _workspace_dir: &Path,
         _claude_dir: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<ContainerRef, PlaneError> {
-        todo!("record the spawn")
+        let container = ContainerRef::new(chat_id, format!("in-memory-{chat_id}"));
+        match self.live().entry(chat_id.to_owned()) {
+            Entry::Occupied(_) => Err(PlaneError::AlreadyLive {
+                chat_id: chat_id.to_owned(),
+            }),
+            Entry::Vacant(slot) => Ok(slot.insert(container).clone()),
+        }
     }
 
-    async fn teardown(&self, _chat_id: &str) -> Result<(), PlaneError> {
-        todo!("forget the spawn")
+    async fn teardown(&self, chat_id: &str) -> Result<(), PlaneError> {
+        self.live()
+            .remove(chat_id)
+            .map(|_| ())
+            .ok_or_else(|| PlaneError::NotLive {
+                chat_id: chat_id.to_owned(),
+            })
     }
 
     async fn list_live(&self) -> Result<HashSet<String>, PlaneError> {
-        todo!("answer from the recorded spawns")
+        Ok(self.live().keys().cloned().collect())
+    }
+}
+
+impl MemoryPlane {
+    fn live(&self) -> MutexGuard<'_, HashMap<String, ContainerRef>> {
+        self.live.lock().expect("no holder of the lock panics")
     }
 }
 
