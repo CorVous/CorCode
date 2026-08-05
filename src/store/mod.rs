@@ -7,7 +7,7 @@ mod manifest;
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -56,6 +56,18 @@ impl ChatStore {
     #[must_use]
     pub fn workspace_dir(&self, chat_id: &str) -> PathBuf {
         self.root.join(WORKSPACES_DIR).join(chat_id)
+    }
+
+    /// Make the dataset ready to hold chats. The root itself is never
+    /// created: a missing root means the dataset is not mounted, and papering
+    /// over that would strand every chat (ADR-0007 rule 5).
+    pub fn prepare(&self) -> Result<(), StoreError> {
+        let chats = self.root.join(CHATS_DIR);
+        match fs::create_dir(&chats) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(StoreError::writing(&chats)(error)),
+        }
     }
 
     /// Lay down both trees for a new chat, publishing the chat dir whole.
@@ -232,6 +244,39 @@ mod tests {
             branch: format!("chat/{title}"),
             base_branch: "main".to_owned(),
         }
+    }
+
+    #[test]
+    fn preparing_an_existing_dataset_lays_down_the_chats_dir_idempotently() {
+        let (root, store) = store();
+
+        store.prepare().expect("an existing root should prepare");
+        store.prepare().expect("preparing twice should be harmless");
+
+        assert!(root.path().join(CHATS_DIR).is_dir());
+        assert!(
+            store
+                .scan()
+                .expect("an empty dataset should scan")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn preparing_a_dataset_that_is_not_mounted_fails_loudly() {
+        let root = TempDir::new().expect("temp dir should be created");
+        let unmounted = root.path().join("unmounted");
+        let store = ChatStore::new(&unmounted);
+
+        let error = store
+            .prepare()
+            .expect_err("a missing dataset root should fail");
+
+        assert!(
+            format!("{error}").contains(&unmounted.join(CHATS_DIR).display().to_string()),
+            "error should name the dir it could not create, got: {error}"
+        );
+        assert!(!unmounted.exists(), "the dataset root was conjured up");
     }
 
     #[test]
@@ -446,8 +491,11 @@ mod tests {
             .create_chat(new_chat("events"))
             .expect("chat should be created");
         let payloads = [
-            json!({"sessionUpdate": "user_message_chunk", "text": "hello"}),
-            json!({"sessionUpdate": "agent_message_chunk", "text": "hi"}),
+            json!({"sessionId": "s", "prompt": [{"type": "text", "text": "hello"}]}),
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "hi"},
+            }),
         ];
         for payload in &payloads {
             store
@@ -471,7 +519,10 @@ mod tests {
             .create_chat(new_chat("torn"))
             .expect("chat should be created");
         store
-            .append_event(&manifest.chat_id, &json!({"sessionUpdate": "plan"}))
+            .append_event(
+                &manifest.chat_id,
+                &json!({"sessionUpdate": "plan", "entries": []}),
+            )
             .expect("event should append");
         let path = store.chat_dir(&manifest.chat_id).join(EVENTS_FILE);
         let torn = format!(

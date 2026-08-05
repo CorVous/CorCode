@@ -39,6 +39,13 @@ impl StoreError {
         move |source| Self::Read { path, source }
     }
 
+    /// Whether the failure is simply that nothing is there — the one store
+    /// failure a caller may answer for rather than surface.
+    #[must_use]
+    pub fn is_missing(&self) -> bool {
+        matches!(self, Self::Read { source, .. } if source.kind() == io::ErrorKind::NotFound)
+    }
+
     /// Blame `path` for whatever I/O error comes back from writing it.
     pub(super) fn writing(path: &Path) -> impl FnOnce(io::Error) -> Self + use<> {
         let path = path.to_owned();
