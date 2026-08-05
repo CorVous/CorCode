@@ -51,9 +51,7 @@ impl Config {
         I: IntoIterator<Item = (String, String)>,
     {
         let vars: HashMap<String, String> = vars.into_iter().collect();
-        let bind_addr = vars
-            .get("CORCODE_BIND_ADDR")
-            .map_or(DEFAULT_BIND_ADDR, String::as_str);
+        let bind_addr = optional(&vars, "CORCODE_BIND_ADDR").unwrap_or(DEFAULT_BIND_ADDR);
         Ok(Self {
             data_dir: PathBuf::from(required(&vars, "CORCODE_DATA_DIR")?),
             bind_addr: bind_addr
@@ -62,18 +60,53 @@ impl Config {
             username: required(&vars, "CORCODE_USERNAME")?.to_owned(),
             password_hash: required(&vars, "CORCODE_PASSWORD_HASH")?.to_owned(),
             workspace_image: required(&vars, "CORCODE_WORKSPACE_IMAGE")?.to_owned(),
-            container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
-            container_cpus: DEFAULT_CONTAINER_CPUS,
-            registry: None,
+            container_memory_mb: number(
+                &vars,
+                "CORCODE_CONTAINER_MEMORY_MB",
+                DEFAULT_CONTAINER_MEMORY_MB,
+            )?,
+            container_cpus: number(&vars, "CORCODE_CONTAINER_CPUS", DEFAULT_CONTAINER_CPUS)?,
+            registry: registry(&vars)?,
         })
     }
 }
 
+/// Look up a variable, treating "set to nothing" as unset.
+fn optional<'a>(vars: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    vars.get(key)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+}
+
 /// Look up a variable that has no safe default.
 fn required<'a>(vars: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
-    match vars.get(key) {
-        Some(value) if !value.is_empty() => Ok(value),
-        _ => bail!("{key} must be set"),
+    match optional(vars, key) {
+        Some(value) => Ok(value),
+        None => bail!("{key} must be set"),
+    }
+}
+
+/// Look up a variable that falls back to a sane number.
+fn number(vars: &HashMap<String, String>, key: &str, default: u32) -> Result<u32> {
+    optional(vars, key).map_or(Ok(default), |value| {
+        value
+            .parse()
+            .with_context(|| format!("{key} is not a whole number: {value}"))
+    })
+}
+
+/// The registry login is optional, but half of one is a misconfiguration.
+fn registry(vars: &HashMap<String, String>) -> Result<Option<RegistryCredentials>> {
+    match (
+        optional(vars, "CORCODE_REGISTRY_USER"),
+        optional(vars, "CORCODE_REGISTRY_TOKEN"),
+    ) {
+        (None, None) => Ok(None),
+        (Some(user), Some(token)) => Ok(Some(RegistryCredentials {
+            user: user.to_owned(),
+            token: token.to_owned(),
+        })),
+        _ => bail!("CORCODE_REGISTRY_USER and CORCODE_REGISTRY_TOKEN must be set together"),
     }
 }
 
@@ -86,6 +119,9 @@ impl fmt::Debug for Config {
             .field("username", &self.username)
             .field("password_hash", &"<redacted>")
             .field("workspace_image", &self.workspace_image)
+            .field("container_memory_mb", &self.container_memory_mb)
+            .field("container_cpus", &self.container_cpus)
+            .field("registry", &self.registry)
             .finish()
     }
 }
