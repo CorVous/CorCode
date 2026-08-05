@@ -28,6 +28,17 @@ Options:
 
 <!-- generated-usage:end -->
 
+## Configuration
+
+Serving (the default action) reads its configuration from the environment:
+
+| Variable                   | Required | Default        |
+| --------------------------- | -------- | -------------- |
+| `CORCODE_DATA_DIR`          | yes      | -              |
+| `CORCODE_USERNAME`          | yes      | -              |
+| `CORCODE_PASSWORD_HASH`     | yes      | -              |
+| `CORCODE_WORKSPACE_IMAGE`   | yes      | -              |
+| `CORCODE_BIND_ADDR`         | no       | `0.0.0.0:8080` |
 
 ## Development
 

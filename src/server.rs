@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result};
 use axum::Router;
 use axum::routing::get;
 use tokio::net::TcpListener;
+#[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
 /// Build the application's routes.
@@ -31,6 +32,7 @@ where
 }
 
 /// Resolve when the process is asked to stop: Ctrl-C or SIGTERM.
+#[cfg(unix)]
 pub async fn shutdown_signal() {
     let mut interrupt = signal(SignalKind::interrupt()).expect("SIGINT handler should install");
     let mut terminate = signal(SignalKind::terminate()).expect("SIGTERM handler should install");
@@ -38,4 +40,13 @@ pub async fn shutdown_signal() {
         _ = interrupt.recv() => {},
         _ = terminate.recv() => {},
     }
+}
+
+/// Resolve when the process is asked to stop: Ctrl-C (SIGTERM has no Unix
+/// signal handling to fall back to here).
+#[cfg(not(unix))]
+pub async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Ctrl-C handler should install");
 }

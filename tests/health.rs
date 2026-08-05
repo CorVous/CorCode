@@ -20,6 +20,8 @@ async fn health_endpoint_answers_on_ephemeral_port() {
         .await
         .expect("health request should reach the server");
     assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("response should have a body");
+    assert_eq!(body, "ok");
 
     shutdown.send(()).expect("server should still be listening");
     server

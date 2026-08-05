@@ -1,6 +1,7 @@
 //! Deployment configuration, read from the environment.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -10,7 +11,7 @@ use anyhow::{Context as _, Result, bail};
 pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 
 /// Everything the core needs from its deployment environment.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// Root of the NAS dataset holding chats and workspaces (ADR-0006).
     pub data_dir: PathBuf,
@@ -56,6 +57,19 @@ fn required<'a>(vars: &'a HashMap<String, String>, key: &str) -> Result<&'a str>
     match vars.get(key) {
         Some(value) if !value.is_empty() => Ok(value),
         _ => bail!("{key} must be set"),
+    }
+}
+
+impl fmt::Debug for Config {
+    /// Redacts `password_hash`: this often ends up in logs and error messages.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("data_dir", &self.data_dir)
+            .field("bind_addr", &self.bind_addr)
+            .field("username", &self.username)
+            .field("password_hash", &"<redacted>")
+            .field("workspace_image", &self.workspace_image)
+            .finish()
     }
 }
 
@@ -129,6 +143,16 @@ mod tests {
             format!("{error:#}").contains("CORCODE_DATA_DIR"),
             "error should name the missing variable, got: {error:#}"
         );
+    }
+
+    #[test]
+    fn debug_redacts_password_hash() {
+        let config = Config::from_vars(required_vars()).expect("complete environment should load");
+
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains(&config.password_hash));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]

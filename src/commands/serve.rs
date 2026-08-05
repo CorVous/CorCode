@@ -1,4 +1,4 @@
-//! Serve subcommand - run the HTTP service until shutdown.
+//! Default action: run the HTTP service until shutdown.
 
 use anyhow::{Context as _, Result};
 use log::info;
