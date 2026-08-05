@@ -39,6 +39,7 @@ env_logger = { version = "0.11.8", default-features = true }
 getrandom = "0.4.3"
 hmac = "0.13.0"
 log = { version = "0.4.28", default-features = true }
+serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net"] }
 
