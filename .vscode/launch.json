@@ -23,30 +23,6 @@
             "cwd": "${workspaceFolder}"
         },
         {
-            "name": "Rust: CLI - Example Command (INFO)",
-            "type": "lldb",
-            "request": "launch",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--bin=cor-code",
-                    "--package=cor-code"
-                ],
-                "filter": {
-                    "name": "cor-code",
-                    "kind": "bin"
-                }
-            },
-            "args": [
-                "-v",
-                "example",
-                "World",
-                "--greeting",
-                "Hello"
-            ],
-            "cwd": "${workspaceFolder}"
-        },
-        {
             "name": "Rust: Unit Tests",
             "type": "lldb",
             "request": "launch",
