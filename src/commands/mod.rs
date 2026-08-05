@@ -1,4 +1,4 @@
 //! Subcommand implementations, one module per subcommand.
 
-pub mod example;
+pub mod serve;
 pub mod version;

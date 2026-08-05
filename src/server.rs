@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result};
 use axum::Router;
 use axum::routing::get;
 use tokio::net::TcpListener;
+use tokio::signal::unix::{SignalKind, signal};
 
 /// Build the application's routes.
 pub fn router() -> Router {
@@ -27,4 +28,14 @@ where
         .with_graceful_shutdown(shutdown)
         .await
         .context("HTTP server failed")
+}
+
+/// Resolve when the process is asked to stop: Ctrl-C or SIGTERM.
+pub async fn shutdown_signal() {
+    let mut interrupt = signal(SignalKind::interrupt()).expect("SIGINT handler should install");
+    let mut terminate = signal(SignalKind::terminate()).expect("SIGTERM handler should install");
+    tokio::select! {
+        _ = interrupt.recv() => {},
+        _ = terminate.recv() => {},
+    }
 }

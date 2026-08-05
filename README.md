@@ -13,7 +13,6 @@ Usage: cor-code [OPTIONS] [COMMAND]
 
 Commands:
   version  Display package version
-  example  Example subcommand (replace with your own)
   help     Print this message or the help of the given subcommand(s)
 
 Options:

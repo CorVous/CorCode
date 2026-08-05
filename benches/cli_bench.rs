@@ -8,17 +8,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use cor_code::cli::{Cli, log_level};
 
 fn bench_arg_parsing(c: &mut Criterion) {
-    c.bench_function("parse_example_subcommand", |b| {
-        b.iter(|| {
-            Cli::try_parse_from(black_box([
-                "rust-template",
-                "-vv",
-                "example",
-                "World",
-                "--greeting",
-                "Hi",
-            ]))
-        });
+    c.bench_function("parse_version_subcommand", |b| {
+        b.iter(|| Cli::try_parse_from(black_box(["rust-template", "-vv", "version"])));
     });
 }
 
