@@ -519,7 +519,10 @@ mod tests {
             .create_chat(new_chat("torn"))
             .expect("chat should be created");
         store
-            .append_event(&manifest.chat_id, &json!({"sessionUpdate": "plan", "entries": []}))
+            .append_event(
+                &manifest.chat_id,
+                &json!({"sessionUpdate": "plan", "entries": []}),
+            )
             .expect("event should append");
         let path = store.chat_dir(&manifest.chat_id).join(EVENTS_FILE);
         let torn = format!(

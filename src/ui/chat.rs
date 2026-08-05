@@ -9,6 +9,9 @@ use super::{last_push, page, status_word, text};
 /// What an event calls itself when it carries no ACP discriminator.
 const UNTYPED: &str = "event";
 
+/// The `corcode` key on a line the core wrote itself rather than relayed.
+const RESET_NOTICE: &str = "reset_notice";
+
 /// One chat, top to bottom: what it is, everything that has happened to it,
 /// and the prompt box waiting at the end.
 #[must_use]
@@ -45,28 +48,57 @@ const fn first_prompt_hint(status: RuntimeStatus) -> &'static str {
     }
 }
 
-/// One line of the log. The store has already refused anything unreadable, so
-/// a shape this build does not know is a newer ACP, not damage: it names
-/// itself rather than disappearing.
+/// One line of the log, in the on-disk shapes ADR-0006 fixes.
 fn line(event: &Value) -> String {
-    match (kind(event), field(event, "text")) {
-        ("user_message_chunk", Some(said)) => format!("<p><b>you:</b> {}</p>", text(said)),
-        ("agent_message_chunk" | "agent_thought_chunk", Some(said)) => {
-            format!("<p>{}</p>", text(said))
-        }
-        (kind @ ("tool_call" | "tool_call_update"), _) => {
-            format!(
-                "<p><small>{}</small></p>",
-                text(field(event, "title").unwrap_or(kind))
-            )
-        }
-        (kind, _) => format!("<p><small>{}</small></p>", text(kind)),
+    match entry(event) {
+        Entry::Prompt(said) => format!("<p><b>you:</b> {}</p>", text(&said)),
+        Entry::AgentText(said) => format!("<p>{}</p>", text(&said)),
+        Entry::Notice(said) => format!("<blockquote>{}</blockquote>", text(said)),
+        Entry::Aside(said) => format!("<p><small>{}</small></p>", text(said)),
     }
 }
 
-/// The discriminator ACP puts on a session update.
-fn kind(event: &Value) -> &str {
-    field(event, "sessionUpdate").unwrap_or(UNTYPED)
+/// How a log line reads once its shape is known.
+enum Entry<'a> {
+    Prompt(String),
+    AgentText(String),
+    Notice(&'a str),
+    Aside(&'a str),
+}
+
+/// The store has already refused anything unreadable, so a shape this build
+/// does not know is a newer ACP, not damage: it names itself as an aside
+/// rather than disappearing.
+fn entry(event: &Value) -> Entry<'_> {
+    if let Some(said) = event.get("prompt").and_then(blocks_text) {
+        return Entry::Prompt(said);
+    }
+    if field(event, "corcode") == Some(RESET_NOTICE) {
+        return Entry::Notice(field(event, "text").unwrap_or(RESET_NOTICE));
+    }
+    let kind = field(event, "sessionUpdate").unwrap_or(UNTYPED);
+    match (kind, event.get("content").and_then(blocks_text)) {
+        ("user_message_chunk", Some(said)) => Entry::Prompt(said),
+        ("agent_message_chunk" | "agent_thought_chunk", Some(said)) => Entry::AgentText(said),
+        ("tool_call" | "tool_call_update", _) => {
+            Entry::Aside(field(event, "title").unwrap_or(kind))
+        }
+        _ => Entry::Aside(kind),
+    }
+}
+
+/// The words in one content block or a run of them; blocks that carry no text
+/// (resource links, images) contribute nothing to read.
+fn blocks_text(content: &Value) -> Option<String> {
+    let said = match content.as_array() {
+        Some(blocks) => blocks.iter().filter_map(block_text).collect(),
+        None => block_text(content)?.to_owned(),
+    };
+    (!said.is_empty()).then_some(said)
+}
+
+fn block_text(block: &Value) -> Option<&str> {
+    (field(block, "type") == Some("text")).then(|| field(block, "text"))?
 }
 
 fn field<'a>(event: &'a Value, name: &str) -> Option<&'a str> {

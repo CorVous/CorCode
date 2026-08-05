@@ -88,6 +88,53 @@ temp-file-and-rename on state transitions; `last_active_at` (ADR-0002's LRU
 parking order) updated once per completed turn, not per event. Per-line fsync
 against chat-turn event rates on a NAS dataset is a non-issue.
 
+## Amendment (2026-08-05): on-disk event shapes
+
+`events.jsonl` lines are `{"ts": ..., "event": <payload>}`. The payload is
+the ACP message verbatim, not a shape of our own. Writer and renderer bind to
+this list; anything else is a payload the renderer names but does not
+interpret.
+
+Outbound `session/prompt` params, one line per turn the user takes:
+
+```json
+{"sessionId": "<uuid>", "prompt": [{"type": "text", "text": "..."}]}
+```
+
+`prompt` is an array of content blocks; only `type: "text"` blocks carry
+words. There is no `sessionUpdate` key on an outbound prompt — that is what
+distinguishes it from everything else in the file.
+
+Inbound `session/update` notification params, one line per update:
+
+```json
+{"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "..."}}
+```
+
+The same shape carries `user_message_chunk` and `agent_thought_chunk`; the
+text lives in the content block, never at the top level. Tool calls carry
+their own fields instead:
+
+```json
+{"sessionUpdate": "tool_call", "toolCallId": "...", "title": "...",
+ "kind": "execute", "status": "pending"}
+```
+
+`tool_call_update` repeats `toolCallId` with whatever changed. Other
+`sessionUpdate` kinds (`plan`, `available_commands_update`, ...) are written
+through unchanged.
+
+Core-injected notices are the one payload that is not ACP. They carry a
+`corcode` key and no `sessionUpdate`, so no reader can mistake one for an
+agent message:
+
+```json
+{"corcode": "reset_notice", "text": "..."}
+```
+
+ADR-0008 renders these as block quotes: the record says out loud where the
+agent's memory was cut.
+
 ## Consequences
 
 - ADR-0002's "transcript flushed" step in park/close is a no-op — no buffered
