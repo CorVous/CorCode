@@ -27,19 +27,29 @@ pub const SESSION_COOKIE: &str = "corcode_session";
 /// Where visitors without a session are sent.
 const LOGIN_PATH: &str = "/login";
 
-/// Build the application's routes.
+/// Build the application's routes. Every route is gated except the handful
+/// [`is_public`] names, so a route added here is protected by default
+/// (ADR-0003).
 pub fn router(config: &Config) -> Result<Router> {
     let gate = Arc::new(Gate::new(config)?);
-    let gated = Router::new()
+    Ok(Router::new()
         .route("/", get(home))
         .route("/logout-all", post(logout_all))
-        .route_layer(from_fn_with_state(Arc::clone(&gate), require_session));
-    Ok(Router::new()
         .route("/health", get(health))
         .route(LOGIN_PATH, get(login_form).post(submit_login))
-        .merge(gated)
+        .layer(from_fn_with_state(Arc::clone(&gate), require_session))
         .layer(from_fn(same_origin))
         .with_state(gate))
+}
+
+/// The only requests that reach a handler without a session: the liveness
+/// probe and the login form itself (ADR-0003).
+fn is_public(method: &Method, path: &str) -> bool {
+    match path {
+        "/health" => method == Method::GET,
+        LOGIN_PATH => matches!(*method, Method::GET | Method::POST),
+        _ => false,
+    }
 }
 
 /// Unauthenticated liveness probe (ADR-0003).
@@ -61,6 +71,9 @@ async fn home() -> Html<String> {
 /// under the key in force before the handler runs, so a handler that
 /// rotates the key still logs this device out.
 async fn require_session(State(gate): State<Arc<Gate>>, request: Request, next: Next) -> Response {
+    if is_public(request.method(), request.uri().path()) {
+        return next.run(request).await;
+    }
     let now = SystemTime::now();
     let Some(session) = session_cookie(request.headers()).and_then(|c| gate.recognise(c, now))
     else {
