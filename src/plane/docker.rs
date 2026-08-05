@@ -6,10 +6,12 @@ use std::path::Path;
 use bollard::Docker;
 use bollard::auth::DockerCredentials;
 use bollard::errors::Error as DockerError;
-use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest, NetworkInspect};
+use bollard::models::{
+    ContainerCreateBody, ContainerSummary, HostConfig, NetworkCreateRequest, NetworkInspect,
+};
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    StopContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptions,
+    ListContainersOptionsBuilder, StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt as _;
 
@@ -193,23 +195,12 @@ impl ContainerPlane for DockerPlane {
     }
 
     async fn list_live(&self) -> Result<HashSet<String>, PlaneError> {
-        let filters = HashMap::from([("label".to_owned(), vec![CHAT_ID_LABEL.to_owned()])]);
-        let options = ListContainersOptionsBuilder::new()
-            .filters(&filters)
-            .build();
         let running = self
             .docker
-            .list_containers(Some(options))
+            .list_containers(Some(live_container_query()))
             .await
             .map_err(PlaneError::runtime("list the workspace containers"))?;
-        Ok(running
-            .into_iter()
-            .filter_map(|container| {
-                container
-                    .labels
-                    .and_then(|mut labels| labels.remove(CHAT_ID_LABEL))
-            })
-            .collect())
+        Ok(chat_ids_of(running))
     }
 }
 
@@ -288,6 +279,17 @@ fn create_body(
 /// would hand every agent a way out.
 fn routes_nowhere(network: Option<&NetworkInspect>) -> bool {
     network.is_some_and(|network| network.internal == Some(true))
+}
+
+/// Ask for the chats' containers that are running: an exited one is a chat
+/// whose agent is gone, and gone chats are parked (ADR-0002).
+fn live_container_query() -> ListContainersOptions {
+    todo!("ask for the running chat containers")
+}
+
+/// The chat each container belongs to, skipping whatever else the daemon runs.
+fn chat_ids_of(_containers: Vec<ContainerSummary>) -> HashSet<String> {
+    todo!("read the chats off the containers")
 }
 
 fn bind(host_dir: &Path, container_path: &str) -> Result<String, PlaneError> {
@@ -421,6 +423,66 @@ mod tests {
     #[test]
     fn a_missing_network_is_refused() {
         assert!(!routes_nowhere(None));
+    }
+
+    const OTHER_CHAT_ID: &str = "01K1OTHERCHATID000000000";
+
+    fn container_of(labels: HashMap<String, String>) -> ContainerSummary {
+        ContainerSummary {
+            labels: Some(labels),
+            ..ContainerSummary::default()
+        }
+    }
+
+    fn container_of_chat(chat_id: &str) -> ContainerSummary {
+        container_of(HashMap::from([(
+            "corcode.chat-id".to_owned(),
+            chat_id.to_owned(),
+        )]))
+    }
+
+    #[test]
+    fn liveness_asks_only_for_the_running_chat_containers() {
+        let query = live_container_query();
+
+        assert!(!query.all, "an exited container is not a live agent");
+        assert_eq!(
+            query.filters,
+            Some(HashMap::from([(
+                "label".to_owned(),
+                vec!["corcode.chat-id".to_owned()]
+            )]))
+        );
+    }
+
+    #[test]
+    fn every_listed_container_names_its_chat() {
+        let live = chat_ids_of(vec![
+            container_of_chat(CHAT_ID),
+            container_of_chat(OTHER_CHAT_ID),
+        ]);
+
+        assert_eq!(
+            live,
+            HashSet::from([CHAT_ID.to_owned(), OTHER_CHAT_ID.to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_container_belonging_to_no_chat_is_not_live() {
+        let live = chat_ids_of(vec![
+            ContainerSummary::default(),
+            container_of(HashMap::new()),
+            container_of(HashMap::from([(
+                "chat-id".to_owned(),
+                CHAT_ID.to_owned(),
+            )])),
+        ]);
+
+        assert!(
+            live.is_empty(),
+            "only the plane's own label names a chat, got: {live:?}"
+        );
     }
 
     fn server_said(status_code: u16) -> DockerError {
