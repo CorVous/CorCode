@@ -67,8 +67,8 @@ USER agent
 ENV HOME=/home/agent \
     CLAUDE_CONFIG_DIR=/home/agent/.claude
 
-RUN git config --global user.name 'CorVous' \
- && git config --global user.email '60035620+CorVous@users.noreply.github.com' \
+RUN git config --global user.name 'Cor' \
+ && git config --global user.email 'birb@cor.gg' \
  && git config --global --add safe.directory /workspace
 
 WORKDIR /workspace
