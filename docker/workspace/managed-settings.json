@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/corcode-stop-hook"
+          }
+        ]
+      }
+    ]
+  }
+}
