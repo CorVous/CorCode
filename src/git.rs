@@ -40,8 +40,8 @@ impl Remotes {
         }
     }
 
-    /// Where one `owner/name` repository is cloned from. A token rides only
-    /// on https, so no local or ssh URL can carry it out of the process.
+    /// Where one `owner/name` repository is cloned from. A token is put into
+    /// the URL only for https, so no local or ssh URL can carry one.
     #[must_use]
     pub fn origin(&self, repo: &str) -> Origin {
         let base = &self.base;
@@ -61,8 +61,11 @@ impl Remotes {
     }
 }
 
-/// One repository's clone URL, credentials and all. Nothing but `git` ever
-/// sees the whole of it: it prints, and errors, as the URL without them.
+/// One repository's clone URL, credentials and all.
+///
+/// The credential is carried only for the length of a clone: it prints, and
+/// errors, as [`Origin::scrub`] leaves it, and the workspace git wrote it
+/// into is set back to [`Origin::tokenless`] before anyone else can read it.
 pub struct Origin {
     url: String,
     token: Option<String>,
@@ -71,6 +74,15 @@ pub struct Origin {
 impl Origin {
     fn url(&self) -> &str {
         &self.url
+    }
+
+    /// The same URL with the credential taken out rather than covered up:
+    /// still a URL git can fetch and push over.
+    fn tokenless(&self) -> String {
+        self.token.as_ref().map_or_else(
+            || self.url.clone(),
+            |token| self.url.replace(&format!("{TOKEN_USER}:{token}@"), ""),
+        )
     }
 
     /// Whatever git said, with the token taken out of it.
@@ -145,14 +157,39 @@ pub fn names_a_branch(branch: &str) -> bool {
 
 /// Clone `origin` at `base_branch` into `dest`, history and all: ADR-0005's
 /// commits and ADR-0002's checkpoints are cut from it.
+///
+/// The clone records the URL it was given, so the remote is set back to the
+/// tokenless one before returning: the workspace is the agent's to read
+/// (ADR-0001).
 pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), GitError> {
     let doing = format!("clone {origin} at {base_branch}");
-    let dest = dest.to_string_lossy();
+    let scrub = |said: &str| origin.scrub(said);
+    let spelled_dest = dest.to_string_lossy();
     let output = git(
         &doing,
-        &["clone", "--branch", base_branch, "--", origin.url(), &dest],
+        &[
+            "clone",
+            "--branch",
+            base_branch,
+            "--",
+            origin.url(),
+            &spelled_dest,
+        ],
     )?;
-    judge(&doing, &output, |said| origin.scrub(said))
+    judge(&doing, &output, scrub)?;
+    let doing = format!("take the credential back out of {}", dest.display());
+    let output = git(
+        &doing,
+        &[
+            "-C",
+            &spelled_dest,
+            "remote",
+            "set-url",
+            "origin",
+            &origin.tokenless(),
+        ],
+    )?;
+    judge(&doing, &output, scrub)
 }
 
 /// Cut `branch` off whatever `workspace` has checked out and stand on it.
@@ -247,6 +284,11 @@ mod tests {
         assert!(
             !format!("{origin}{origin:?}").contains(TOKEN),
             "the token is spoken out loud: {origin:?}"
+        );
+        assert_eq!(
+            origin.tokenless(),
+            "https://github.com/CorVous/CorCode.git",
+            "what the workspace is left pointing at should still be fetchable"
         );
     }
 
