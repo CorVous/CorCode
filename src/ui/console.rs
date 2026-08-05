@@ -73,7 +73,7 @@ fn status_line(chats: &[Chat], workspace_image: &str) -> String {
          <dt>Image</dt><dd>{}</dd>\
          <dt>Sweep</dt><dd>{SWEEP}</dd></dl></details>",
         text(image_tag(workspace_image)),
-        titles(chats, RuntimeStatus::Live),
+        pool(chats),
         text(workspace_image),
     )
 }
@@ -112,12 +112,16 @@ fn options(chats: &[Chat], field: fn(&Manifest) -> &String) -> String {
         })
 }
 
-fn group(chats: &[Chat], status: RuntimeStatus) -> String {
-    let rows: String = chats
+/// The chats in one group, most recently active first as the store scanned
+/// them.
+fn in_group(chats: &[Chat], status: RuntimeStatus) -> impl Iterator<Item = &Chat> {
+    chats
         .iter()
-        .filter(|(_, chat_status)| *chat_status == status)
-        .map(row)
-        .collect();
+        .filter(move |(_, chat_status)| *chat_status == status)
+}
+
+fn group(chats: &[Chat], status: RuntimeStatus) -> String {
+    let rows: String = in_group(chats, status).map(row).collect();
     if rows.is_empty() {
         "<p>None.</p>".to_owned()
     } else {
@@ -137,22 +141,18 @@ fn row((manifest, _): &Chat) -> String {
 }
 
 fn count(chats: &[Chat], status: RuntimeStatus) -> usize {
-    chats
-        .iter()
-        .filter(|(_, chat_status)| *chat_status == status)
-        .count()
+    in_group(chats, status).count()
 }
 
-fn titles(chats: &[Chat], status: RuntimeStatus) -> String {
-    let titles: Vec<String> = chats
-        .iter()
-        .filter(|(_, chat_status)| *chat_status == status)
+/// Who holds a warm-pool slot right now; B10 adds the idle times.
+fn pool(chats: &[Chat]) -> String {
+    let holders: Vec<String> = in_group(chats, RuntimeStatus::Live)
         .map(|(manifest, _)| text(&manifest.title).to_string())
         .collect();
-    if titles.is_empty() {
+    if holders.is_empty() {
         "no containers running".to_owned()
     } else {
-        titles.join("<br>")
+        holders.join("<br>")
     }
 }
 
