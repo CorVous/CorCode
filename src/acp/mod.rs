@@ -8,6 +8,7 @@ mod scripted;
 use std::future::Future;
 use std::time::Duration;
 
+use log::debug;
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
@@ -132,7 +133,10 @@ impl<C: AcpChannel> Calls<C> {
             let line = self.channel.receive().await?;
             let message: Value = match serde_json::from_str(&line) {
                 Ok(message) => message,
-                Err(_) => continue,
+                Err(nonsense) => {
+                    debug!("adapter said something that is not json-rpc: {nonsense}");
+                    continue;
+                }
             };
             if message["id"].as_u64() != Some(id) {
                 continue;

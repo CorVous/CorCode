@@ -61,7 +61,7 @@ impl AcpTransport for DockerExec {
             Ok(StartExecResults::Attached { output, input }) => Ok(ExecChannel {
                 output,
                 input,
-                unread: String::new(),
+                unread: Vec::new(),
             }),
             Ok(StartExecResults::Detached) => Err(AcpError::Closed),
             Err(source) => Err(unreachable(source)),
@@ -69,11 +69,13 @@ impl AcpTransport for DockerExec {
     }
 }
 
-/// One adapter's stdio, cut into newline-delimited messages.
+/// One adapter's stdio, cut into newline-delimited messages. The bytes are
+/// held as bytes until a whole line is there: the daemon breaks the pipe
+/// wherever it likes, and a character broken in half is not text yet.
 pub struct ExecChannel {
     output: Pin<Box<dyn Stream<Item = Result<LogOutput, DockerError>> + Send>>,
     input: Pin<Box<dyn AsyncWrite + Send>>,
-    unread: String,
+    unread: Vec<u8>,
 }
 
 impl AcpChannel for ExecChannel {
@@ -91,8 +93,12 @@ impl AcpChannel for ExecChannel {
 
     async fn receive(&mut self) -> Result<String, AcpError> {
         loop {
-            if let Some(message) = take_line(&mut self.unread) {
-                return Ok(message);
+            if let Some(line) = take_line(&mut self.unread) {
+                match String::from_utf8(line) {
+                    Ok(message) => return Ok(message.trim().to_owned()),
+                    Err(nonsense) => debug!("adapter said something that is not utf-8: {nonsense}"),
+                }
+                continue;
             }
             match self.output.next().await {
                 Some(Ok(LogOutput::StdErr { message })) => {
@@ -101,7 +107,7 @@ impl AcpChannel for ExecChannel {
                         String::from_utf8_lossy(&message).trim()
                     );
                 }
-                Some(Ok(chunk)) => self.unread.push_str(&chunk.to_string()),
+                Some(Ok(chunk)) => self.unread.extend_from_slice(chunk.as_ref()),
                 Some(Err(source)) => {
                     return Err(AcpError::Unreachable {
                         container: "an attached adapter".to_owned(),
@@ -115,9 +121,9 @@ impl AcpChannel for ExecChannel {
 }
 
 /// The first whole line waiting in `unread`, taken out of it.
-fn take_line(unread: &mut String) -> Option<String> {
-    let end = unread.find('\n')?;
-    let line = unread[..end].trim().to_owned();
+fn take_line(unread: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let end = unread.iter().position(|byte| *byte == b'\n')?;
+    let line = unread[..end].to_vec();
     unread.drain(..=end);
     Some(line)
 }
@@ -128,12 +134,12 @@ mod tests {
 
     #[test]
     fn messages_come_out_of_the_stream_a_line_at_a_time() {
-        let mut unread = String::from("{\"id\":1}\n{\"id\"");
+        let mut unread = Vec::from(*b"{\"id\":1}\n{\"id\"");
 
-        assert_eq!(take_line(&mut unread).as_deref(), Some("{\"id\":1}"));
+        assert_eq!(take_line(&mut unread).as_deref(), Some(&b"{\"id\":1}"[..]));
         assert_eq!(take_line(&mut unread), None, "half a line is no line");
-        unread.push_str(":2}\n");
-        assert_eq!(take_line(&mut unread).as_deref(), Some("{\"id\":2}"));
+        unread.extend_from_slice(b":2}\n");
+        assert_eq!(take_line(&mut unread).as_deref(), Some(&b"{\"id\":2}"[..]));
         assert!(unread.is_empty());
     }
 
@@ -166,7 +172,7 @@ mod tests {
         ExecChannel {
             output: Box::pin(futures_util::stream::iter(chunks)),
             input: Box::pin(tokio::io::sink()),
-            unread: String::new(),
+            unread: Vec::new(),
         }
     }
 }
