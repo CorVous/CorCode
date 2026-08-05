@@ -5,6 +5,7 @@ use log::info;
 use tokio::net::TcpListener;
 
 use crate::config::Config;
+use crate::plane::MemoryPlane;
 use crate::server;
 
 /// Execute the serve command.
@@ -26,5 +27,5 @@ async fn serve(config: &Config) -> Result<()> {
         config.bind_addr,
         config.data_dir.display()
     );
-    server::serve(listener, server::router(config)?, server::shutdown_signal()).await
+    server::serve(listener, server::router(config, MemoryPlane::default())?, server::shutdown_signal()).await
 }

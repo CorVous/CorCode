@@ -20,6 +20,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::auth::gate::{Gate, SignIn};
 use crate::auth::session;
 use crate::config::Config;
+use crate::store::ContainerLiveness;
 
 /// Name of the cookie carrying the session (ADR-0003).
 pub const SESSION_COOKIE: &str = "corcode_session";
@@ -33,7 +34,10 @@ const HEALTH_PATH: &str = "/health";
 /// Build the application's routes. Every route is gated except the handful
 /// [`is_public`] names, so a route added here is protected by default
 /// (ADR-0003).
-pub fn router(config: &Config) -> Result<Router> {
+pub fn router<L>(config: &Config, _liveness: L) -> Result<Router>
+where
+    L: ContainerLiveness + Send + Sync + 'static,
+{
     let gate = Arc::new(Gate::new(config)?);
     Ok(Router::new()
         .route("/", get(home))

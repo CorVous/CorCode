@@ -15,6 +15,7 @@ use cor_code::auth::keystore::KeyStore;
 use cor_code::auth::rate_limit::FREE_ATTEMPTS;
 use cor_code::auth::session::{self, LIFETIME, REFRESH_AFTER, SigningKey};
 use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
+use cor_code::plane::MemoryPlane;
 use cor_code::server::{self, SESSION_COOKIE};
 
 const USERNAME: &str = "cassidy";
@@ -282,7 +283,7 @@ impl TestApp {
             .expect("ephemeral port should bind");
         let address = listener.local_addr().expect("listener reports its address");
         let config = test_config(data_dir.path().to_path_buf());
-        let router = server::router(&config).expect("router should build");
+        let router = server::router(&config, MemoryPlane::default()).expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {
             shutdown_rx.await.ok();
