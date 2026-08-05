@@ -72,8 +72,14 @@ impl<T: AcpTransport + Sync> Adapter<T> {
     /// Hand shake with the adapter and open a fresh session over the chat's
     /// workspace, answering with the session id ADR-0006 stores.
     pub async fn open_session(&self, container: &str) -> Result<String, AcpError> {
+        let channel = timeout(self.patience, self.transport.open(container))
+            .await
+            .map_err(|_| AcpError::Unstarted {
+                container: container.to_owned(),
+                patience: self.patience,
+            })??;
         let mut calls = Calls {
-            channel: self.transport.open(container).await?,
+            channel,
             patience: self.patience,
             next_id: 1,
         };
@@ -117,13 +123,24 @@ impl<C: AcpChannel> Calls<C> {
         let id = self.next_id;
         self.next_id += 1;
         let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        self.channel.send(&request.to_string()).await?;
-        timeout(self.patience, self.answer_to(id, method))
+        timeout(self.patience, self.exchange(&request, id, method))
             .await
             .map_err(|_| AcpError::Silent {
                 method: method.to_owned(),
                 patience: self.patience,
             })?
+    }
+
+    /// One request handed over and its answer waited for. Handing it over can
+    /// block as long as answering can: the adapter's stdin is a pipe.
+    async fn exchange(
+        &mut self,
+        request: &Value,
+        id: u64,
+        method: &str,
+    ) -> Result<Value, AcpError> {
+        self.channel.send(&request.to_string()).await?;
+        self.answer_to(id, method).await
     }
 
     /// The answer to request `id`. Notifications and answers to anything else

@@ -17,6 +17,11 @@ pub enum AcpError {
     Broken { doing: String, source: io::Error },
     #[error("the adapter closed its channel without answering")]
     Closed,
+    #[error("no adapter started in container {container} within {}s", patience.as_secs())]
+    Unstarted {
+        container: String,
+        patience: Duration,
+    },
     #[error("the adapter said nothing to {method} for {}s", patience.as_secs())]
     Silent { method: String, patience: Duration },
     #[error("the adapter refused {method}: {complaint}")]
