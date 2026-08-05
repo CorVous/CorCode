@@ -9,7 +9,7 @@ use bollard::errors::Error as DockerError;
 use bollard::models::{ContainerCreateBody, HostConfig, NetworkCreateRequest, NetworkInspect};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    ListNetworksOptionsBuilder, StopContainerOptionsBuilder,
+    StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt as _;
 
@@ -63,24 +63,37 @@ impl DockerPlane {
     }
 
     /// The agents' own network, cut off from the core and the wider host
-    /// (ADR-0001).
+    /// (ADR-0001). Whatever answers to the name is judged, created or not.
     async fn ensure_network(&self) -> Result<(), PlaneError> {
-        let filters = HashMap::from([("name".to_owned(), vec![NETWORK.to_owned()])]);
-        let options = ListNetworksOptionsBuilder::new().filters(&filters).build();
-        let existing =
-            self.docker
-                .list_networks(Some(options))
-                .await
-                .map_err(PlaneError::runtime(format!(
-                    "look for the {NETWORK} network"
-                )))?;
-        if existing
-            .iter()
-            .any(|network| network.name.as_deref() == Some(NETWORK))
-        {
-            return Ok(());
+        if self.agent_network().await?.is_none() {
+            self.create_agent_network().await?;
         }
-        self.docker
+        if routes_nowhere(self.agent_network().await?.as_ref()) {
+            Ok(())
+        } else {
+            Err(PlaneError::UnusableNetwork {
+                network: NETWORK.to_owned(),
+            })
+        }
+    }
+
+    async fn agent_network(&self) -> Result<Option<NetworkInspect>, PlaneError> {
+        match self.docker.inspect_network(NETWORK, None).await {
+            Ok(network) => Ok(Some(network)),
+            Err(DockerError::DockerResponseServerError {
+                status_code: NOT_FOUND,
+                ..
+            }) => Ok(None),
+            Err(source) => Err(PlaneError::runtime(format!(
+                "look for the {NETWORK} network"
+            ))(source)),
+        }
+    }
+
+    /// A second core racing us to it is a win, not a failure.
+    async fn create_agent_network(&self) -> Result<(), PlaneError> {
+        match self
+            .docker
             .create_network(NetworkCreateRequest {
                 name: NETWORK.to_owned(),
                 driver: Some("bridge".to_owned()),
@@ -88,8 +101,16 @@ impl DockerPlane {
                 ..NetworkCreateRequest::default()
             })
             .await
-            .map_err(PlaneError::runtime(format!("create the {NETWORK} network")))?;
-        Ok(())
+        {
+            Ok(_)
+            | Err(DockerError::DockerResponseServerError {
+                status_code: NAME_TAKEN,
+                ..
+            }) => Ok(()),
+            Err(source) => {
+                Err(PlaneError::runtime(format!("create the {NETWORK} network"))(source))
+            }
+        }
     }
 
     /// Pull the configured tag the first time a spawn misses it locally
@@ -265,8 +286,8 @@ fn create_body(
 /// A network the agents may be put on: it is there, and it routes nowhere
 /// (ADR-0001). Anything else — a leftover bridge, a compose-declared network —
 /// would hand every agent a way out.
-fn routes_nowhere(_network: Option<&NetworkInspect>) -> bool {
-    todo!("judge the network")
+fn routes_nowhere(network: Option<&NetworkInspect>) -> bool {
+    network.is_some_and(|network| network.internal == Some(true))
 }
 
 fn bind(host_dir: &Path, container_path: &str) -> Result<String, PlaneError> {
