@@ -2,11 +2,10 @@
 //! its chat is open (ADR-0002 rules 1 and 4).
 
 use std::collections::HashSet;
-use std::fmt;
 use std::hash::BuildHasher;
 
 /// What one pass over `workspaces/` found.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Sweep {
     /// Working trees no open chat claims, which are the sweep's to delete.
     pub orphaned: Vec<String>,
@@ -14,12 +13,6 @@ pub struct Sweep {
     /// the floor out from under a running agent, so the sweep says so and
     /// leaves it.
     pub held: Vec<String>,
-}
-
-impl fmt::Display for Sweep {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} swept, {} held", self.orphaned.len(), self.held.len())
-    }
 }
 
 /// Read `workspaces` against the chats that claim one.
@@ -81,16 +74,5 @@ mod tests {
             sweep.orphaned.is_empty(),
             "the floor was pulled out from under a running agent: {sweep:?}"
         );
-    }
-
-    #[test]
-    fn a_sweep_says_what_it_did_in_one_line() {
-        let sweep = reconcile(
-            &dirs(&["archived", "running"]),
-            &ids(&[]),
-            &ids(&["running"]),
-        );
-
-        assert_eq!(sweep.to_string(), "1 swept, 1 held");
     }
 }

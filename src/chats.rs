@@ -2,7 +2,6 @@
 //! (ADR-0005, ADR-0006).
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::Mutex;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -11,7 +10,7 @@ use serde_json::json;
 use thiserror::Error;
 use ulid::Ulid;
 
-use crate::acp::{AcpError, AcpTransport, Adapter, Connections, Held};
+use crate::acp::{AcpError, AcpTransport, Adapter, Connections, Held, Turn};
 use crate::config::Config;
 use crate::git::{self, GitError, Remotes};
 use crate::plane::ContainerPlane;
@@ -89,10 +88,23 @@ impl PromptError {
 pub enum ArchiveError {
     #[error("this dataset holds no such chat")]
     NoSuchChat,
+    #[error("this chat was archived already")]
+    AlreadyArchived,
+    #[error("this chat is in the middle of a turn")]
+    Busy,
     #[error("nothing reached the remote, so nothing was torn down")]
     NotPushed(#[source] anyhow::Error),
     #[error("the chat could not be archived")]
     Broke(#[source] anyhow::Error),
+}
+
+impl ArchiveError {
+    /// Whether the request was turned down over what the chat is doing rather
+    /// than the archive failing. A refusal touched nothing.
+    #[must_use]
+    pub const fn is_refusal(&self) -> bool {
+        matches!(self, Self::AlreadyArchived | Self::Busy)
+    }
 }
 
 fn unarchived(failure: impl Into<anyhow::Error>) -> ArchiveError {
@@ -104,6 +116,10 @@ const REFUSAL: &str = "refusal";
 
 /// What an archive that got nothing onto the remote calls itself there.
 const PUSH_FAILURE: &str = "push_failure";
+
+/// The right to decide who gives a container up, held by one capping at a
+/// time.
+type ParkingLock = tokio::sync::Mutex<()>;
 
 /// Every chat in one dataset: who is live, what they hold, and how a new one
 /// comes to exist.
@@ -117,7 +133,7 @@ pub struct Chats<P, T: AcpTransport> {
     anthropic_api_key: Option<String>,
     workspace_image: String,
     warm_pool: usize,
-    swept: Mutex<Sweep>,
+    parking: ParkingLock,
 }
 
 impl<P, T: AcpTransport + Sync> Chats<P, T> {
@@ -134,7 +150,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
             anthropic_api_key: config.anthropic_api_key.clone(),
             workspace_image: config.workspace_image.clone(),
             warm_pool: config.warm_pool,
-            swept: Mutex::default(),
+            parking: ParkingLock::default(),
         }
     }
 }
@@ -232,7 +248,12 @@ where
     /// Bring the pool back inside its cap. A pool that cannot be read is the
     /// operator's to hear about, not this request's to fail on: the turn or
     /// the chat it followed is already done.
+    ///
+    /// One capping at a time: two that weigh the same pool before either of
+    /// them parks anything would each pick the same victims and cut the pool
+    /// below its cap.
     async fn cap_the_pool(&self) {
+        let _capping = self.parking.lock().await;
         match self.overflowing().await {
             Ok(overflowing) => {
                 for chat_id in overflowing {
@@ -250,7 +271,7 @@ where
         Ok(pool::beyond_the_pool(
             &chats,
             &live,
-            &HashSet::new(),
+            &self.connections.busy_chat_ids(),
             self.warm_pool,
         ))
     }
@@ -282,6 +303,10 @@ where
     /// its own so the chat's branch keeps only the agent's own commits
     /// (ADR-0005); if any of it fails to land, the chat is left exactly as it
     /// was, told about in its own log, and the operator can try again.
+    ///
+    /// The turn lock is held throughout: the gate commits and then deletes the
+    /// whole working tree, which is the one thing that must never happen under
+    /// an agent that is writing into it.
     pub async fn archive(&self, chat_id: &Ulid) -> Result<(), ArchiveError> {
         let chat_id = chat_id.to_string();
         let manifest = match self.store.read_manifest(&chat_id) {
@@ -289,6 +314,10 @@ where
             Err(failure) if failure.is_missing() => return Err(ArchiveError::NoSuchChat),
             Err(failure) => return Err(unarchived(failure)),
         };
+        if manifest.state != ChatState::Open {
+            return Err(ArchiveError::AlreadyArchived);
+        }
+        let _turn = self.idle(&chat_id)?;
         let pushed = match self.push_everything(&manifest).await {
             Ok(pushed) => pushed,
             Err(failure) => {
@@ -310,6 +339,18 @@ where
         Ok(())
     }
 
+    /// Take the chat's connection for as long as the caller keeps what comes
+    /// back, so that no turn can run over it meanwhile. A chat holding no
+    /// connection has nothing to take and nothing running.
+    fn idle(&self, chat_id: &str) -> Result<Option<Turn<T::Channel>>, ArchiveError> {
+        self.connections.of(chat_id).map_or(Ok(None), |connection| {
+            connection
+                .try_lock_owned()
+                .map(Some)
+                .map_err(|_| ArchiveError::Busy)
+        })
+    }
+
     /// Reconcile `workspaces/` against the chats that claim a working tree,
     /// deleting the ones nothing does (ADR-0002 rule 4). A dataset that
     /// cannot be read is the operator's to hear about: a sweep repairs, it
@@ -328,19 +369,6 @@ where
                 Err(stubborn) => warn!("{chat_id} left a workspace that will not go: {stubborn:#}"),
             }
         }
-        *self
-            .swept
-            .lock()
-            .expect("the sweep record should not be poisoned") = swept;
-    }
-
-    /// What the last sweep found, for the console to say out loud.
-    #[must_use]
-    pub fn last_sweep(&self) -> Sweep {
-        self.swept
-            .lock()
-            .expect("the sweep record should not be poisoned")
-            .clone()
     }
 
     /// Which working trees on disk no open chat claims, and which of those a

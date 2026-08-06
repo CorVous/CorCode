@@ -194,10 +194,7 @@ async fn an_archive_over_a_running_turn_is_refused_and_tears_nothing_down() {
     assert!(app.workspace(&chat).join("README.md").is_file());
     assert_eq!(group(&app.body("/").await, &chat), "Live");
     assert_eq!(
-        in_flight
-            .await
-            .expect("the turn should not panic")
-            .status(),
+        in_flight.await.expect("the turn should not panic").status(),
         StatusCode::OK,
         "the refused archive interrupted the turn"
     );
@@ -221,10 +218,7 @@ async fn a_chat_in_the_middle_of_a_turn_is_not_parked_by_another_chats_arrival()
         "the pool parked a chat mid-stream"
     );
     assert_eq!(
-        in_flight
-            .await
-            .expect("the turn should not panic")
-            .status(),
+        in_flight.await.expect("the turn should not panic").status(),
         StatusCode::OK
     );
 }

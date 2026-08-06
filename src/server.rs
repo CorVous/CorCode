@@ -277,6 +277,9 @@ where
     match chats.archive(&chat_id).await {
         Ok(()) => ([(HX_REFRESH, "true")], "").into_response(),
         Err(ArchiveError::NoSuchChat) => no_such_chat(),
+        Err(refusal) if refusal.is_refusal() => {
+            (StatusCode::CONFLICT, format!("{refusal}.\n")).into_response()
+        }
         Err(failure @ ArchiveError::NotPushed(_)) => {
             error!("a chat was not archived: {:#}", anyhow::Error::new(failure));
             (

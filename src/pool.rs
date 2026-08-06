@@ -11,13 +11,19 @@ use crate::store::{ChatState, Manifest};
 /// `cap` of them: the least recently active first out, and every archived
 /// chat that somehow still holds one.
 ///
+/// A chat in `busy` is taking a turn and keeps its container whatever the cap
+/// says: `last_active_at` is written when a turn ends, so the chat answering
+/// longest reads as the stalest chat there is, and parking it would kill the
+/// agent mid-sentence. The pool can run over its cap for as long as a turn
+/// does (ADR-0002 rule 2).
+///
 /// Order among `chats` is not read; `last_active_at` is the whole of the
 /// order (ADR-0006).
 #[must_use]
 pub fn beyond_the_pool<S: BuildHasher>(
     chats: &[Manifest],
     live: &HashSet<String, S>,
-    _busy: &HashSet<String, S>,
+    busy: &HashSet<String, S>,
     cap: usize,
 ) -> Vec<String> {
     let mut holders: Vec<&Manifest> = chats
@@ -29,7 +35,8 @@ pub fn beyond_the_pool<S: BuildHasher>(
     holders
         .into_iter()
         .filter(|manifest| {
-            let keeps = manifest.state == ChatState::Open && kept < cap;
+            let keeps = busy.contains(&manifest.chat_id)
+                || (manifest.state == ChatState::Open && kept < cap);
             kept += usize::from(keeps);
             !keeps
         })

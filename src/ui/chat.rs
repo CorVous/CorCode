@@ -60,11 +60,11 @@ pub fn event_log(chat_id: &str, events: &[Event]) -> String {
 }
 
 /// The gate that pushes a chat's work and gives its workspace back, offered
-/// only where there is a container to close (ADR-0002 rule 3). A success
-/// re-renders the page rather than swapping a fragment: archiving changes the
-/// whole of what the chat is.
+/// wherever a workspace is still held — a parked chat has given up only its
+/// container (ADR-0002 rule 2). A success re-renders the page rather than
+/// swapping a fragment: archiving changes the whole of what the chat is.
 fn archive_button(chat_id: &str, status: RuntimeStatus) -> String {
-    if status != RuntimeStatus::Live {
+    if status == RuntimeStatus::Archived {
         return String::new();
     }
     format!(
