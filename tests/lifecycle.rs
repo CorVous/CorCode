@@ -88,6 +88,91 @@ async fn a_completed_turn_moves_its_chat_to_the_front_of_the_pool() {
     assert_eq!(group(&console, &fourth), "Live");
 }
 
+#[tokio::test]
+async fn archiving_a_clean_chat_pushes_its_branch_and_empties_its_workspace() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    let semantic = app.commit_in_workspace(&chat, "the agent's own commit");
+
+    let response = app.archive(&chat).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        app.origin_says(&["rev-parse", &app.branch(&chat)]),
+        semantic,
+        "the chat branch did not reach the remote"
+    );
+    let manifest = app.manifest(&chat);
+    assert_eq!(manifest["state"], "archived");
+    assert_eq!(manifest["last_pushed_commit"], semantic);
+    assert_eq!(manifest["checkpoint_branch"], Value::Null);
+    assert!(
+        !app.workspace(&chat).exists(),
+        "an archived chat kept its workspace (ADR-0002 rule 1)"
+    );
+    assert_eq!(group(&app.body("/").await, &chat), "Archived");
+}
+
+#[tokio::test]
+async fn archiving_a_dirty_chat_checkpoints_it_and_leaves_the_branch_where_the_agent_left_it() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    let semantic = app.commit_in_workspace(&chat, "the agent's own commit");
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+
+    let response = app.archive(&chat).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let checkpoint = app.manifest(&chat)["checkpoint_branch"]
+        .as_str()
+        .expect("a dirty tree should be archived onto a checkpoint branch")
+        .to_owned();
+    assert_eq!(
+        app.origin_says(&["rev-parse", &app.branch(&chat)]),
+        semantic,
+        "the chat branch left the agent's last semantic commit"
+    );
+    assert_eq!(
+        app.origin_says(&["show", &format!("{checkpoint}:scratch.txt")]),
+        "work in flight",
+        "the work in flight never reached the remote"
+    );
+}
+
+#[tokio::test]
+async fn a_chat_whose_push_fails_keeps_its_container_and_says_so() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+    app.lose_the_remote();
+
+    let response = app.archive(&chat).await;
+
+    assert!(
+        response.status().is_server_error(),
+        "a failed archive answered {}",
+        response.status()
+    );
+    assert_eq!(app.manifest(&chat)["state"], "open");
+    assert!(
+        app.workspace(&chat).join("scratch.txt").is_file(),
+        "the work nobody pushed was deleted anyway"
+    );
+    assert_eq!(group(&app.body("/").await, &chat), "Live");
+    assert!(
+        app.events(&chat).contains("push_failure"),
+        "the failure was not written down: {}",
+        app.events(&chat)
+    );
+    let log = app.body(&format!("/chats/{chat}/events")).await;
+    assert!(
+        log.contains("<blockquote>"),
+        "the operator is told nothing when they next look: {log}"
+    );
+}
+
 /// Which of the console's headings a chat is rendered under.
 fn group(console: &str, chat_id: &str) -> String {
     let at = console
@@ -108,7 +193,7 @@ struct TestApp {
     address: SocketAddr,
     cookie: String,
     data_dir: TempDir,
-    _origin: TempDir,
+    origin: TempDir,
     _server: JoinHandle<anyhow::Result<()>>,
     _shutdown: oneshot::Sender<()>,
 }
@@ -140,7 +225,7 @@ impl TestApp {
             cookie: sign_in(address).await,
             address,
             data_dir,
-            _origin: origin,
+            origin,
             _server: server,
             _shutdown: shutdown,
         }
@@ -180,6 +265,15 @@ impl TestApp {
             .expect("request")
     }
 
+    async fn archive(&self, chat_id: &str) -> reqwest::Response {
+        client()
+            .post(self.url(&format!("/chats/{chat_id}/archive")))
+            .header("cookie", &self.cookie)
+            .send()
+            .await
+            .expect("request")
+    }
+
     async fn body(&self, path: &str) -> String {
         let response = client()
             .get(self.url(path))
@@ -196,14 +290,51 @@ impl TestApp {
     }
 
     fn manifest(&self, chat_id: &str) -> Value {
-        let path = self
-            .data_dir
-            .path()
-            .join("chats")
-            .join(chat_id)
-            .join("manifest.json");
+        let path = self.chat_dir(chat_id).join("manifest.json");
         serde_json::from_str(&fs::read_to_string(&path).expect("the manifest should be readable"))
             .expect("the manifest should be json")
+    }
+
+    fn events(&self, chat_id: &str) -> String {
+        fs::read_to_string(self.chat_dir(chat_id).join("events.jsonl"))
+            .expect("the event log should be readable")
+    }
+
+    fn chat_dir(&self, chat_id: &str) -> PathBuf {
+        self.data_dir.path().join("chats").join(chat_id)
+    }
+
+    fn branch(&self, chat_id: &str) -> String {
+        self.manifest(chat_id)["branch"]
+            .as_str()
+            .expect("a chat names its branch")
+            .to_owned()
+    }
+
+    /// One commit in the chat's workspace, as its agent would make it,
+    /// answering with the sha it landed on.
+    fn commit_in_workspace(&self, chat_id: &str, message: &str) -> String {
+        let workspace = self.workspace(chat_id);
+        fs::write(workspace.join("third.txt"), message).expect("a file should be writable");
+        for args in [
+            vec!["config", "user.email", "agent@example.invalid"],
+            vec!["config", "user.name", "Agent"],
+            vec!["add", "."],
+            vec!["commit", "-m", message],
+        ] {
+            run(&workspace, &args);
+        }
+        says(&workspace, &["rev-parse", "HEAD"])
+    }
+
+    /// What the remote says, once whatever was pushed has reached it.
+    fn origin_says(&self, args: &[&str]) -> String {
+        says(&self.origin.path().join(BARE), args)
+    }
+
+    /// Take the remote away, so the next push has nowhere to land.
+    fn lose_the_remote(&self) {
+        fs::remove_dir_all(self.origin.path().join(BARE)).expect("the remote should be removable");
     }
 }
 
@@ -250,6 +381,10 @@ fn spelled(path: &Path) -> String {
 }
 
 fn run(cwd: &Path, args: &[&str]) {
+    says(cwd, args);
+}
+
+fn says(cwd: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)
@@ -260,6 +395,7 @@ fn run(cwd: &Path, args: &[&str]) {
         "git {args:?} failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 async fn sign_in(address: SocketAddr) -> String {

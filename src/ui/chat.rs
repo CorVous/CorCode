@@ -322,6 +322,37 @@ mod tests {
     }
 
     #[test]
+    fn a_live_chat_offers_to_archive_itself() {
+        let manifest = manifest(RuntimeStatus::Live);
+
+        let rendered = chat_page(&manifest, RuntimeStatus::Live, &[]);
+
+        assert!(
+            rendered.contains(&format!(
+                "hx-post=\"{}\"",
+                chat_archive_path(&manifest.chat_id)
+            )),
+            "the chat cannot be archived from its own page: {rendered}"
+        );
+        assert!(rendered.contains("Archive</button>"));
+    }
+
+    /// Parking already gave the container up and archiving already ran, so
+    /// neither has anything left for the gate to do (ADR-0002).
+    #[test]
+    fn a_chat_holding_no_container_is_offered_no_archive_button() {
+        for status in [RuntimeStatus::Parked, RuntimeStatus::Archived] {
+            let rendered = chat_page(&manifest(status), status, &[]);
+
+            assert!(
+                !rendered.contains("Archive</button>"),
+                "a {} chat was offered the gate: {rendered}",
+                status_word(status)
+            );
+        }
+    }
+
+    #[test]
     fn a_live_chat_needs_no_first_prompt_hint() {
         let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &[]);
 
