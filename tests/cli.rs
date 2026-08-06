@@ -50,6 +50,16 @@ fn cli_version_subcommand() {
 }
 
 #[test]
+fn cli_hash_password_subcommand_reads_the_password_off_stdin() {
+    cli()
+        .arg("hash-password")
+        .write_stdin("correct horse battery staple\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("$argon2id$"));
+}
+
+#[test]
 fn cli_verbose_flag_enables_info() {
     cli()
         .args(["-v", "version"])
