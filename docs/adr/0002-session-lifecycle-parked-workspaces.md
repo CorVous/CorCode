@@ -46,6 +46,19 @@ Lifecycle rules:
    gitignored files are gone. Parked-session resume needs no notice (the
    workspace is intact).
 
+## Amendment (2026-08-05): a configured cap, and a sweep that yields
+
+Rule 2's "2" is the default of `CORCODE_WARM_POOL`, not a constant: a bigger
+box can hold more warm chats without a new decision. The order is the
+manifest's `last_active_at`, written once per completed turn (ADR-0006), and
+the cap is enforced after each spawn and each turn.
+
+Rule 4 gets one exception. A workspace dir no open chat claims but whose
+container is still up is a contradiction the sweep cannot resolve by
+deleting: pulling the tree out from under a running agent destroys work that
+git does not have, which rule 3 forbids. The sweep says so loudly and removes
+nothing.
+
 ## Consequences
 
 - Container count is bounded (2 lingering + active) regardless of how many

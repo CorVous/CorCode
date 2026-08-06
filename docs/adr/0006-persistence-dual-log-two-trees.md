@@ -136,6 +136,7 @@ Core-injected notices are the one payload that is not ACP. They carry a
 {"corcode": "reset_notice", "text": "..."}
 {"corcode": "permission_declined", "text": "..."}
 {"corcode": "refusal", "text": "..."}
+{"corcode": "push_failure", "text": "..."}
 ```
 
 `reset_notice` says where the agent's memory was cut. `permission_declined`
@@ -143,11 +144,29 @@ says the agent asked the operator for something and this client answered no
 on their behalf, which is the only answer it has: the core declares no client
 capabilities, and an unanswered request blocks the agent's whole turn.
 `refusal` says a prompt never went out — no live connection, or a turn still
-running. Refusals belong in the log because the log is the whole of what the
-chat page renders (ADR-0008); a status code the browser swallows tells the
+running. `push_failure` says the archive gate got nothing onto the remote, so
+the chat is still open with its container up and can be archived again
+(ADR-0002 rule 3). Both belong in the log because the log is the whole of what
+the chat page renders (ADR-0008); a status code the browser swallows tells the
 operator nothing.
 
 ADR-0008 renders every core line as a block quote.
+
+## Amendment (2026-08-05): `checkpoint_branch`, and why the schema stays 1
+
+The archive gate puts a dirty working tree on a branch of its own (ADR-0005),
+and the manifest is the only record of which one:
+
+```json
+{"checkpoint_branch": "chat/2026-08-05-persistence-chkpt-20260805T1420"}
+```
+
+It is optional and read with a default: a chat archived before this field
+existed simply has no such branch, which is exactly what a missing key means.
+Nothing has to be migrated and no reader has to know two schemas, so `schema`
+stays `1`. A field that *changed* the meaning of what is already on disk would
+not get this treatment — the version is for readers that would otherwise
+misread a file, not for every addition.
 
 ## Consequences
 
