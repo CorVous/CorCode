@@ -400,6 +400,37 @@ mod tests {
         );
     }
 
+    /// The checkpoint branch was added to schema 1 after chats had already
+    /// been written: a manifest without it is an older chat, not damage
+    /// (ADR-0006 amendment).
+    #[test]
+    fn a_manifest_written_before_checkpoint_branches_reads_as_having_none() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("older"))
+            .expect("chat should be created");
+        let path = store.manifest_path(&manifest.chat_id);
+        let mut fields: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("manifest should be readable"))
+                .expect("manifest should be json");
+        assert!(
+            fields
+                .as_object_mut()
+                .expect("a manifest is an object")
+                .remove("checkpoint_branch")
+                .is_some(),
+            "a manifest this build writes should carry the field"
+        );
+        fs::write(&path, fields.to_string()).expect("manifest should be rewritable");
+
+        let older = store
+            .read_manifest(&manifest.chat_id)
+            .expect("an older manifest should still read");
+
+        assert_eq!(older.checkpoint_branch, None);
+        assert_eq!(older.schema, MANIFEST_SCHEMA);
+    }
+
     #[test]
     fn read_manifest_rejects_an_unknown_schema() {
         let (_root, store) = store();
