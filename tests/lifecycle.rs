@@ -173,6 +173,20 @@ async fn a_chat_whose_push_fails_keeps_its_container_and_says_so() {
     );
 }
 
+#[tokio::test]
+async fn archiving_a_chat_also_sweeps_the_working_trees_nothing_claims() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    let orphan = app.stray_workspace();
+
+    app.archive(&chat).await;
+
+    assert!(
+        !orphan.exists(),
+        "the sweep left a pile behind (ADR-0002 rule 4)"
+    );
+}
+
 /// Which of the console's headings a chat is rendered under.
 fn group(console: &str, chat_id: &str) -> String {
     let at = console
@@ -330,6 +344,14 @@ impl TestApp {
     /// What the remote says, once whatever was pushed has reached it.
     fn origin_says(&self, args: &[&str]) -> String {
         says(&self.origin.path().join(BARE), args)
+    }
+
+    /// A working tree left behind by a chat this dataset has never heard of,
+    /// as a crash mid-teardown would leave one.
+    fn stray_workspace(&self) -> PathBuf {
+        let stray = self.workspace("01KSTRAYWORKSPACE00000000");
+        fs::create_dir_all(&stray).expect("a stray workspace should be creatable");
+        stray
     }
 
     /// Take the remote away, so the next push has nowhere to land.

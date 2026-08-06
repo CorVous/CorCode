@@ -396,6 +396,54 @@ mod tests {
     }
 
     #[test]
+    fn the_working_trees_on_disk_are_listed_for_the_sweep_to_read() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("open"))
+            .expect("chat should be created");
+
+        assert_eq!(
+            store.workspace_ids().expect("workspaces should list"),
+            [manifest.chat_id]
+        );
+    }
+
+    #[test]
+    fn a_dataset_that_has_held_no_chat_yet_holds_no_working_trees() {
+        let (_root, store) = store();
+
+        assert!(
+            store
+                .workspace_ids()
+                .expect("a dataset with no workspaces dir should still list")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_working_tree_is_removed_whole_and_removing_it_twice_is_harmless() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("archived"))
+            .expect("chat should be created");
+        let workspace = store.workspace_dir(&manifest.chat_id);
+        fs::write(workspace.join("README.md"), "fixture").expect("a file should be writable");
+
+        store
+            .remove_workspace(&manifest.chat_id)
+            .expect("a working tree should be removable");
+        store
+            .remove_workspace(&manifest.chat_id)
+            .expect("removing what is already gone is the state asked for");
+
+        assert!(!workspace.exists());
+        assert!(
+            store.chat_dir(&manifest.chat_id).is_dir(),
+            "the chat's durable half went with its working tree"
+        );
+    }
+
+    #[test]
     fn scan_fails_loudly_on_a_corrupt_manifest() {
         let (_root, store) = store();
         let manifest = store
