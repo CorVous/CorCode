@@ -10,6 +10,7 @@ pub mod git;
 pub mod plane;
 pub mod pool;
 pub mod resume;
+pub mod secrets;
 pub mod server;
 pub mod status;
 pub mod store;
