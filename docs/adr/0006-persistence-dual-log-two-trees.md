@@ -136,6 +136,7 @@ Core-injected notices are the one payload that is not ACP. They carry a
 {"corcode": "reset_notice", "text": "..."}
 {"corcode": "permission_declined", "text": "..."}
 {"corcode": "refusal", "text": "..."}
+{"corcode": "wake_failure", "text": "..."}
 {"corcode": "push_failure", "text": "..."}
 ```
 
@@ -143,8 +144,10 @@ Core-injected notices are the one payload that is not ACP. They carry a
 says the agent asked the operator for something and this client answered no
 on their behalf, which is the only answer it has: the core declares no client
 capabilities, and an unanswered request blocks the agent's whole turn.
-`refusal` says a prompt never went out — no live connection, or a turn still
-running. `push_failure` says the archive gate got nothing onto the remote, so
+`refusal` says a prompt never went out because the chat was busy or already
+being woken. `wake_failure` says a prompt never went out because the chat
+could not be brought back at all, and names what stopped it (ADR-0007).
+`push_failure` says the archive gate got nothing onto the remote, so
 the chat is still open with its container up and can be archived again
 (ADR-0002 rule 3). Both belong in the log because the log is the whole of what
 the chat page renders (ADR-0008); a status code the browser swallows tells the
