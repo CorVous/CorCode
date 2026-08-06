@@ -4,8 +4,11 @@ use anyhow::{Context as _, Result};
 use log::info;
 use tokio::net::TcpListener;
 
+use crate::acp::DockerExec;
+use crate::chats::Chats;
 use crate::config::Config;
-use crate::plane::MemoryPlane;
+use crate::git::{GITHUB, Remotes};
+use crate::plane::{DockerPlane, PlaneSettings};
 use crate::server;
 use crate::store::ChatStore;
 
@@ -21,6 +24,7 @@ pub fn run() -> Result<()> {
 
 async fn serve(config: &Config) -> Result<()> {
     ChatStore::new(&config.data_dir).prepare()?;
+    let router = server::router(config, chats(config)?)?;
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;
@@ -29,12 +33,23 @@ async fn serve(config: &Config) -> Result<()> {
         config.bind_addr,
         config.data_dir.display()
     );
-    server::serve(
-        listener,
-        // The liveness source is a stub: nothing is live because nothing can
-        // yet be spawned. The spawn increment swaps in the real plane.
-        server::router(config, MemoryPlane::default())?,
-        server::shutdown_signal(),
-    )
-    .await
+    server::serve(listener, router, server::shutdown_signal()).await
+}
+
+/// The dataset as this deployment reaches it: real containers, real adapters,
+/// real repositories on GitHub. Both Docker clients want the daemon's socket
+/// to be there before the address is taken.
+fn chats(config: &Config) -> Result<Chats<DockerPlane, DockerExec>> {
+    let plane = DockerPlane::connect(PlaneSettings {
+        image: config.workspace_image.clone(),
+        memory_mb: config.container_memory_mb,
+        cpus: config.container_cpus,
+        registry: config.registry.clone(),
+    })?;
+    Ok(Chats::new(
+        config,
+        plane,
+        DockerExec::connect()?,
+        Remotes::new(GITHUB, config.github_token.clone()),
+    ))
 }

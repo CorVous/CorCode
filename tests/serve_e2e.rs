@@ -1,12 +1,22 @@
-//! End-to-end test: `Config` reaches a real bound socket.
+//! End-to-end test: `Config` reaches a real bound socket. Socket-gated —
+//! serving builds its Docker clients before it binds, and those refuse to be
+//! built unless the daemon's socket file is there. No daemon is talked to.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+/// Where bollard looks for the daemon, whatever `DOCKER_HOST` says.
+const DOCKER_SOCKET: &str = "/var/run/docker.sock";
+
 #[tokio::test]
 async fn serve_binds_the_configured_address() {
+    if !socket_is_there() {
+        eprintln!("SKIPPED serve_binds_the_configured_address: no docker socket");
+        return;
+    }
     let data_dir = TempDir::new().expect("temp dir should be creatable");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral port should bind");
     let addr = listener
@@ -27,6 +37,7 @@ async fn serve_binds_the_configured_address() {
             "CORCODE_WORKSPACE_IMAGE",
             "ghcr.io/corvous/corcode-workspace:2026-08-05",
         )
+        .env("CORCODE_REPOS", "CorVous/CorCode")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -48,4 +59,11 @@ async fn serve_binds_the_configured_address() {
 
     child.kill().expect("child should be killable");
     child.wait().expect("child should exit after being killed");
+}
+
+/// Whether the socket bollard will open is there. `DOCKER_HOST` is no help:
+/// the local-defaults connector never reads it, so a `tcp://` daemon is a
+/// daemon these tests cannot reach.
+fn socket_is_there() -> bool {
+    Path::new(DOCKER_SOCKET).exists()
 }

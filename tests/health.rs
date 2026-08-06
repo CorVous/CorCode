@@ -4,7 +4,10 @@ use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
+use cor_code::acp::ScriptedAdapter;
+use cor_code::chats::Chats;
 use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
+use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::MemoryPlane;
 
 #[tokio::test]
@@ -25,9 +28,20 @@ async fn health_endpoint_answers_on_ephemeral_port() {
         container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
         container_cpus: DEFAULT_CONTAINER_CPUS,
         registry: None,
+        repos: vec!["CorVous/CorCode".to_owned()],
+        github_token: None,
+        anthropic_api_key: None,
     };
-    let router =
-        cor_code::server::router(&config, MemoryPlane::default()).expect("router should build");
+    let router = cor_code::server::router(
+        &config,
+        Chats::new(
+            &config,
+            MemoryPlane::default(),
+            ScriptedAdapter::silent(),
+            Remotes::new(GITHUB, None),
+        ),
+    )
+    .expect("router should build");
     let (shutdown, shutdown_rx) = oneshot::channel();
     let server = tokio::spawn(cor_code::server::serve(listener, router, async {
         shutdown_rx.await.ok();

@@ -16,6 +16,14 @@ pub const DEFAULT_CONTAINER_MEMORY_MB: u32 = 4096;
 /// unset.
 pub const DEFAULT_CONTAINER_CPUS: u32 = 2;
 
+/// What a secret reads as anywhere it would otherwise be spelled out.
+pub const REDACTED: &str = "<redacted>";
+
+/// A secret, said out loud without being said.
+const fn hidden<T>(_secret: &T) -> &'static str {
+    REDACTED
+}
+
 /// A registry login for the lazy image pull (ADR-0009).
 #[derive(Clone)]
 pub struct RegistryCredentials {
@@ -28,7 +36,7 @@ impl fmt::Debug for RegistryCredentials {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RegistryCredentials")
             .field("user", &self.user)
-            .field("token", &"<redacted>")
+            .field("token", &hidden(&self.token))
             .finish()
     }
 }
@@ -52,6 +60,14 @@ pub struct Config {
     pub container_cpus: u32,
     /// Login for the registry holding the workspace image (ADR-0009).
     pub registry: Option<RegistryCredentials>,
+    /// The repositories a new chat may be cut from, first one default
+    /// (ADR-0005).
+    pub repos: Vec<String>,
+    /// Clones the private repositories when set; a GitHub token in all but
+    /// name.
+    pub github_token: Option<String>,
+    /// Handed to the agent as `ANTHROPIC_API_KEY` (ADR-0001).
+    pub anthropic_api_key: Option<String>,
 }
 
 impl Config {
@@ -82,6 +98,9 @@ impl Config {
             )?,
             container_cpus: number(&vars, "CORCODE_CONTAINER_CPUS", DEFAULT_CONTAINER_CPUS)?,
             registry: registry(&vars)?,
+            repos: repos(&vars)?,
+            github_token: optional(&vars, "CORCODE_GITHUB_TOKEN").map(ToOwned::to_owned),
+            anthropic_api_key: optional(&vars, "CORCODE_ANTHROPIC_API_KEY").map(ToOwned::to_owned),
         })
     }
 }
@@ -110,6 +129,38 @@ fn number(vars: &HashMap<String, String>, key: &str, default: u32) -> Result<u32
     })
 }
 
+/// The repositories the new-chat form offers. Each is checked here rather
+/// than where it becomes a URL: a boot is the right time to learn about a
+/// typo.
+fn repos(vars: &HashMap<String, String>) -> Result<Vec<String>> {
+    required(vars, "CORCODE_REPOS")?
+        .split(',')
+        .map(str::trim)
+        .map(|repo| {
+            if names_a_repository(repo) {
+                Ok(repo.to_owned())
+            } else {
+                bail!("CORCODE_REPOS holds {repo}, which is not an owner/name repository")
+            }
+        })
+        .collect()
+}
+
+/// `owner/name`, both halves there and neither of them a path trick.
+fn names_a_repository(repo: &str) -> bool {
+    let mut halves = repo.split('/');
+    let named = |half: Option<&str>| {
+        half.is_some_and(|half| {
+            !half.is_empty()
+                && !half.bytes().all(|byte| byte == b'.')
+                && half
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+    };
+    named(halves.next()) && named(halves.next()) && halves.next().is_none()
+}
+
 /// The registry login is optional, but half of one is a misconfiguration.
 fn registry(vars: &HashMap<String, String>) -> Result<Option<RegistryCredentials>> {
     match (
@@ -132,11 +183,17 @@ impl fmt::Debug for Config {
             .field("data_dir", &self.data_dir)
             .field("bind_addr", &self.bind_addr)
             .field("username", &self.username)
-            .field("password_hash", &"<redacted>")
+            .field("password_hash", &hidden(&self.password_hash))
             .field("workspace_image", &self.workspace_image)
             .field("container_memory_mb", &self.container_memory_mb)
             .field("container_cpus", &self.container_cpus)
             .field("registry", &self.registry)
+            .field("repos", &self.repos)
+            .field("github_token", &self.github_token.as_ref().map(hidden))
+            .field(
+                "anthropic_api_key",
+                &self.anthropic_api_key.as_ref().map(hidden),
+            )
             .finish()
     }
 }
@@ -160,10 +217,81 @@ mod tests {
                 "CORCODE_WORKSPACE_IMAGE",
                 "ghcr.io/corvous/corcode-workspace:2026-08-05",
             ),
+            ("CORCODE_REPOS", "CorVous/CorCode"),
         ]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect()
+    }
+
+    fn with(vars: &[(&str, &str)]) -> Result<Config> {
+        let mut all = required_vars();
+        all.retain(|(key, _)| !vars.iter().any(|(named, _)| named == key));
+        all.extend(
+            vars.iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+        );
+        Config::from_vars(all)
+    }
+
+    #[test]
+    fn the_offerable_repositories_load_in_the_order_they_were_given() {
+        let config = with(&[("CORCODE_REPOS", "CorVous/CorCode, CorVous/zenni-tools")])
+            .expect("a repository list should load");
+
+        assert_eq!(config.repos, ["CorVous/CorCode", "CorVous/zenni-tools"]);
+    }
+
+    #[test]
+    fn a_repository_that_is_not_owner_slash_name_fails_loudly() {
+        for spelling in ["CorCode", "CorVous/CorCode/extra", "CorVous/", "/CorCode"] {
+            let error = with(&[("CORCODE_REPOS", spelling)])
+                .expect_err("an unusable repository should fail");
+
+            assert!(
+                format!("{error:#}").contains(spelling),
+                "error should quote the offending repository, got: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_repository_list_fails_loudly() {
+        let error = required_vars()
+            .into_iter()
+            .filter(|(key, _)| key != "CORCODE_REPOS")
+            .collect::<Vec<_>>();
+        let error = Config::from_vars(error).expect_err("no repositories should fail");
+
+        assert!(
+            format!("{error:#}").contains("CORCODE_REPOS"),
+            "error should name the missing variable, got: {error:#}"
+        );
+    }
+
+    #[test]
+    fn the_tokens_are_optional() {
+        let config =
+            Config::from_vars(required_vars()).expect("a tokenless environment should load");
+
+        assert_eq!(config.github_token, None);
+        assert_eq!(config.anthropic_api_key, None);
+    }
+
+    #[test]
+    fn debug_redacts_every_token_it_carries() {
+        let config = with(&[
+            ("CORCODE_GITHUB_TOKEN", "ghs-clone-secret"),
+            ("CORCODE_ANTHROPIC_API_KEY", "sk-ant-secret"),
+        ])
+        .expect("a credentialled environment should load");
+
+        let debug = format!("{config:?}");
+
+        assert_eq!(config.github_token.as_deref(), Some("ghs-clone-secret"));
+        assert_eq!(config.anthropic_api_key.as_deref(), Some("sk-ant-secret"));
+        assert!(!debug.contains("ghs-clone-secret"), "token leaked: {debug}");
+        assert!(!debug.contains("sk-ant-secret"), "key leaked: {debug}");
     }
 
     #[test]

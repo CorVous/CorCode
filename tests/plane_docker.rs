@@ -178,8 +178,11 @@ async fn wait_until_exited(docker: &Docker, name: &str) {
     panic!("{name} should have exited within {EXIT_POLLS} polls");
 }
 
+/// The daemon behind the socket bollard will open. `DOCKER_HOST` is no help:
+/// the local-defaults connector never reads it, so a `tcp://` daemon is a
+/// daemon this test cannot reach.
 fn reachable_daemon() -> Option<Docker> {
-    if !Path::new(DOCKER_SOCKET).exists() && std::env::var_os("DOCKER_HOST").is_none() {
+    if !Path::new(DOCKER_SOCKET).exists() {
         return None;
     }
     Docker::connect_with_local_defaults().ok()

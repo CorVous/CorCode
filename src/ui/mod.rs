@@ -107,7 +107,11 @@ mod tests {
 
     #[test]
     fn the_console_styles_itself_only_from_the_stylesheet() {
-        assert_styling_is_only_the_stylesheet(&console_page(&[], "ghcr.io/corvous/x:2026-08-05"));
+        assert_styling_is_only_the_stylesheet(&console_page(
+            &[],
+            "ghcr.io/corvous/x:2026-08-05",
+            &["CorVous/CorCode".to_owned()],
+        ));
     }
 
     #[test]

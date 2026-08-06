@@ -13,7 +13,10 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use cor_code::acp::ScriptedAdapter;
+use cor_code::chats::Chats;
 use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
+use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::MemoryPlane;
 use cor_code::server;
 use cor_code::store::{ChatStore, Manifest, NewChat};
@@ -267,7 +270,16 @@ impl TestApp {
         ChatStore::new(data_dir.path())
             .prepare()
             .expect("the dataset should prepare, as serving does");
-        let router = server::router(&config, MemoryPlane::default()).expect("router should build");
+        let router = server::router(
+            &config,
+            Chats::new(
+                &config,
+                MemoryPlane::default(),
+                ScriptedAdapter::silent(),
+                Remotes::new(GITHUB, None),
+            ),
+        )
+        .expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {
             shutdown_rx.await.ok();
@@ -339,6 +351,9 @@ fn test_config(data_dir: std::path::PathBuf) -> Config {
         container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
         container_cpus: DEFAULT_CONTAINER_CPUS,
         registry: None,
+        repos: vec!["CorVous/CorCode".to_owned()],
+        github_token: None,
+        anthropic_api_key: None,
     }
 }
 

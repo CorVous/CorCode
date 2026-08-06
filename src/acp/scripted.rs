@@ -1,0 +1,199 @@
+//! An adapter that answers from a script, for tests that care about the
+//! protocol rather than about a container.
+
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use serde_json::{Value, json};
+
+use super::{AcpChannel, AcpError, AcpTransport};
+
+/// A notification the fake volunteers before every answer, as a real adapter
+/// does: no client may assume the next line is the one it is waiting for.
+const CHATTER: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}}"#;
+
+/// What the script says to one method. A method the script does not name is
+/// one the fake never answers.
+enum Answer {
+    Result(Value),
+    Refusal(String),
+}
+
+/// What the fake answers to each method it knows.
+type Script = BTreeMap<String, Answer>;
+
+/// Where a fake stops responding altogether, so that a client's patience can
+/// be proved rather than assumed.
+#[derive(Clone, Copy)]
+enum Stall {
+    Nowhere,
+    Starting,
+    Taking,
+}
+
+/// Answers ACP calls from a canned script and remembers what it was asked.
+pub struct ScriptedAdapter {
+    answers: Arc<Script>,
+    heard: Arc<Mutex<Heard>>,
+    stall: Stall,
+}
+
+/// Everything the fake was told, for the assertions to read back.
+#[derive(Default)]
+struct Heard {
+    containers: Vec<String>,
+    requests: Vec<Value>,
+    chattered: bool,
+}
+
+impl ScriptedAdapter {
+    /// The adapter as it behaves when all is well: a handshake, then a
+    /// session under `session_id`.
+    #[must_use]
+    pub fn opening(session_id: &str) -> Self {
+        Self::reading(working_script(session_id))
+    }
+
+    /// An adapter that turns `method` down.
+    #[must_use]
+    pub fn refusing(method: &str, complaint: &str) -> Self {
+        let mut script = working_script("never-opened");
+        script.insert(method.to_owned(), Answer::Refusal(complaint.to_owned()));
+        Self::reading(script)
+    }
+
+    /// An adapter that starts and then says nothing at all.
+    #[must_use]
+    pub fn silent() -> Self {
+        Self::reading(Script::new())
+    }
+
+    /// An adapter whose start never finishes, as a wedged container's exec
+    /// does.
+    #[must_use]
+    pub fn never_starting() -> Self {
+        Self::stalling(Stall::Starting)
+    }
+
+    /// An adapter that starts and then never takes a message, as a pipe
+    /// nobody is draining does.
+    #[must_use]
+    pub fn never_taking() -> Self {
+        Self::stalling(Stall::Taking)
+    }
+
+    /// The containers an adapter was started in, in order.
+    #[must_use]
+    pub fn containers(&self) -> Vec<String> {
+        self.heard().containers.clone()
+    }
+
+    /// The JSON-RPC requests the client sent, in order.
+    #[must_use]
+    pub fn requests(&self) -> Vec<Value> {
+        self.heard().requests.clone()
+    }
+
+    /// Whether the fake ever spoke out of turn, so that a test relying on
+    /// interleaved notifications knows it proved something.
+    #[must_use]
+    pub fn chattered(&self) -> bool {
+        self.heard().chattered
+    }
+
+    fn reading(script: Script) -> Self {
+        Self {
+            answers: Arc::new(script),
+            heard: Arc::new(Mutex::new(Heard::default())),
+            stall: Stall::Nowhere,
+        }
+    }
+
+    fn stalling(stall: Stall) -> Self {
+        Self {
+            stall,
+            ..Self::reading(Script::new())
+        }
+    }
+
+    fn heard(&self) -> MutexGuard<'_, Heard> {
+        self.heard.lock().expect("no holder of the lock panics")
+    }
+}
+
+/// What every scripted adapter answers before anything goes wrong.
+fn working_script(session_id: &str) -> Script {
+    Script::from([
+        (
+            "initialize".to_owned(),
+            Answer::Result(json!({
+                "protocolVersion": 1,
+                "agentInfo": {"name": "scripted", "version": "0.0.0"},
+            })),
+        ),
+        (
+            "session/new".to_owned(),
+            Answer::Result(json!({"sessionId": session_id})),
+        ),
+    ])
+}
+
+impl AcpTransport for ScriptedAdapter {
+    type Channel = ScriptedChannel;
+
+    async fn open(&self, container: &str) -> Result<Self::Channel, AcpError> {
+        self.heard().containers.push(container.to_owned());
+        if matches!(self.stall, Stall::Starting) {
+            std::future::pending::<()>().await;
+        }
+        Ok(ScriptedChannel {
+            answers: Arc::clone(&self.answers),
+            heard: Arc::clone(&self.heard),
+            unread: VecDeque::new(),
+            stall: self.stall,
+        })
+    }
+}
+
+/// One scripted conversation.
+pub struct ScriptedChannel {
+    answers: Arc<Script>,
+    heard: Arc<Mutex<Heard>>,
+    unread: VecDeque<String>,
+    stall: Stall,
+}
+
+impl AcpChannel for ScriptedChannel {
+    async fn send(&mut self, message: &str) -> Result<(), AcpError> {
+        if matches!(self.stall, Stall::Taking) {
+            std::future::pending::<()>().await;
+        }
+        let request: Value = serde_json::from_str(message).expect("the client should send JSON");
+        let method = request["method"].as_str().unwrap_or_default().to_owned();
+        let id = request["id"].clone();
+        let mut heard = self.heard.lock().expect("no holder of the lock panics");
+        heard.requests.push(request);
+        heard.chattered = true;
+        drop(heard);
+        self.unread.push_back(CHATTER.to_owned());
+        match self.answers.get(&method) {
+            Some(Answer::Result(result)) => self
+                .unread
+                .push_back(json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()),
+            Some(Answer::Refusal(complaint)) => self.unread.push_back(
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": complaint}})
+                    .to_string(),
+            ),
+            None => {}
+        }
+        Ok(())
+    }
+
+    async fn receive(&mut self) -> Result<String, AcpError> {
+        match self.unread.pop_front() {
+            Some(line) => Ok(line),
+            None => std::future::pending().await,
+        }
+    }
+}

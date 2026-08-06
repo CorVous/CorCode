@@ -15,7 +15,7 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt as _;
 
-use super::{ContainerPlane, ContainerRef, PlaneError, container_name};
+use super::{ContainerPlane, ContainerRef, PlaneError, WORKSPACE_MOUNT, container_name};
 use crate::config::RegistryCredentials;
 use crate::store::ContainerLiveness;
 
@@ -23,9 +23,6 @@ use crate::store::ContainerLiveness;
 const NETWORK: &str = "corcode-agents";
 /// Stamped on every container so liveness is a label query.
 const CHAT_ID_LABEL: &str = "corcode.chat-id";
-/// The same path for every chat, forever: the adapter's transcript encodes it
-/// (ADR-0006).
-const WORKSPACE_MOUNT: &str = "/workspace";
 /// `CLAUDE_CONFIG_DIR` in the workspace image (ADR-0004, ADR-0006).
 const CLAUDE_MOUNT: &str = "/home/agent/.claude";
 /// The only writable spot outside the two mounts, since the rootfs is
