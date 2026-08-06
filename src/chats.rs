@@ -12,7 +12,7 @@ use ulid::Ulid;
 
 use crate::acp::{AcpError, AcpTransport, Adapter, Connections, Held, Turn};
 use crate::config::Config;
-use crate::git::{self, GitError, Remotes};
+use crate::git::{self, Remotes};
 use crate::plane::ContainerPlane;
 use crate::pool;
 use crate::store::{
@@ -109,6 +109,22 @@ impl ArchiveError {
 
 fn unarchived(failure: impl Into<anyhow::Error>) -> ArchiveError {
     ArchiveError::Broke(failure.into())
+}
+
+/// What the chat's log is told about an archive that stopped part way. A
+/// checkpoint that landed is named: it is where the operator's work is, and
+/// nothing else will tell them (ADR-0006).
+fn half_pushed(failure: &git::PushFailure) -> String {
+    let retry = "The chat is still open and can be archived again.";
+    failure.landed.as_ref().map_or_else(
+        || format!("Nothing was archived: {failure}. {retry}"),
+        |landed| {
+            format!(
+                "The archive stopped part way: {failure}. \
+                 The work in flight is on the remote, on {landed}. {retry}"
+            )
+        },
+    )
 }
 
 /// What a refusal calls itself in a chat's own log (ADR-0006).
@@ -327,7 +343,7 @@ where
         let pushed = match self.push_everything(&manifest).await {
             Ok(pushed) => pushed,
             Err(failure) => {
-                self.note(&chat_id, PUSH_FAILURE, &format!("Nothing was archived: {failure}. The chat is still open and can be archived again."));
+                self.note(&chat_id, PUSH_FAILURE, &half_pushed(&failure));
                 return Err(ArchiveError::NotPushed(failure.into()));
             }
         };
@@ -393,7 +409,7 @@ where
 
     /// Get the chat's workspace onto the remote, whole. Git blocks, so it
     /// runs off the runtime.
-    async fn push_everything(&self, manifest: &Manifest) -> Result<git::Pushed, GitError> {
+    async fn push_everything(&self, manifest: &Manifest) -> Result<git::Pushed, git::PushFailure> {
         let origin = self.remotes.origin(&manifest.repo);
         let workspace = self.store.workspace_dir(&manifest.chat_id);
         let branch = manifest.branch.clone();

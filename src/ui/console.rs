@@ -10,9 +10,6 @@ use super::{CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, last_push, page, status_wo
 /// The branch a chat is cut from when the operator says nothing else.
 const DEFAULT_BASE_BRANCH: &str = "main";
 
-/// Warm-pool size, held here until the plane reports its own (ADR-0002).
-const POOL_SLOTS: usize = 2;
-
 /// Orphan-sweep result, held here until a sweep actually runs (ADR-0008).
 const SWEEP: &str = "ok";
 
@@ -30,7 +27,7 @@ pub fn console_page(
     chats: &[Chat],
     workspace_image: &str,
     repos: &[String],
-    _warm_pool: usize,
+    warm_pool: usize,
 ) -> String {
     page(
         "CorCode",
@@ -39,7 +36,7 @@ pub fn console_page(
              <form method=\"post\" action=\"{LOGOUT_PATH}\">\
              <p><button type=\"submit\">Log out everywhere</button></p></form>\
              <script src=\"{HTMX_PATH}\" defer></script>",
-            status_line(chats, workspace_image),
+            status_line(chats, workspace_image, warm_pool),
             new_chat_form(repos),
             chat_list(chats),
         ),
@@ -68,12 +65,12 @@ pub fn chat_list(chats: &[Chat]) -> String {
 }
 
 /// The container picture in one line, expanding in place (ADR-0008).
-fn status_line(chats: &[Chat], workspace_image: &str) -> String {
+fn status_line(chats: &[Chat], workspace_image: &str, warm_pool: usize) -> String {
     let live = count(chats, RuntimeStatus::Live);
     let parked = count(chats, RuntimeStatus::Parked);
     format!(
         "<details>\
-         <summary>pool {live}/{POOL_SLOTS} · parked {parked} · img {} · sweep {SWEEP}</summary>\
+         <summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {SWEEP}</summary>\
          <dl><dt>Pool</dt><dd>{}</dd>\
          <dt>Parked</dt><dd>{parked} chats — workspace kept, container torn down</dd>\
          <dt>Image</dt><dd>{}</dd>\
