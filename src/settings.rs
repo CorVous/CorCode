@@ -1,7 +1,69 @@
 //! The operational secrets as the console sets them: what one action on one
 //! secret came to, and nothing of what the secret is.
 
-use crate::verify::Verified;
+use std::sync::Arc;
+
+use crate::secrets::{Secret, Secrets, SecretsError, Source};
+use crate::verify::{Verified, VerifyClient};
+
+/// The two operational secrets as the settings panel acts on them: what is on
+/// disk, and where a credential is put to find out whether it works.
+#[derive(Debug)]
+pub struct Settings<V> {
+    secrets: Arc<Secrets>,
+    client: V,
+}
+
+impl<V: VerifyClient + Sync> Settings<V> {
+    /// The secrets `secrets` keeps, checked against their services through
+    /// `client`.
+    pub const fn new(secrets: Arc<Secrets>, client: V) -> Self {
+        Self { secrets, client }
+    }
+
+    /// Every secret this deployment holds and where each one's value comes
+    /// from, in the order the console lists them.
+    pub fn statuses(&self) -> Result<Vec<(Secret, Source)>, SecretsError> {
+        Secret::ALL
+            .into_iter()
+            .map(|secret| Ok((secret, self.source(secret)?)))
+            .collect()
+    }
+
+    /// Where the value in force for `secret` comes from.
+    pub fn source(&self, secret: Secret) -> Result<Source, SecretsError> {
+        self.secrets.source(secret)
+    }
+
+    /// Put `value` in force for `secret`. A blank box is a no-op: S1 made
+    /// writing nothing a failure so that a secret can only be unset through
+    /// [`Settings::clear`], and this is the panel answering before it gets
+    /// there.
+    pub fn save(&self, secret: Secret, value: &str) -> Result<Outcome, SecretsError> {
+        if value.trim().is_empty() {
+            return Ok(Outcome::NothingGiven);
+        }
+        self.secrets.write(secret, value)?;
+        Ok(Outcome::Saved)
+    }
+
+    /// Take the set value away, leaving whatever the environment bootstrapped
+    /// in force again.
+    pub fn clear(&self, secret: Secret) -> Result<Outcome, SecretsError> {
+        self.secrets.clear(secret)?;
+        Ok(Outcome::Cleared)
+    }
+
+    /// Put the value in force for `secret` right now to the service it opens.
+    /// The value is read afresh, so a rotation between two checks is what the
+    /// second one checks.
+    pub async fn verify(&self, secret: Secret) -> Result<Outcome, SecretsError> {
+        let Some(value) = self.secrets.read(secret)? else {
+            return Ok(Outcome::NothingToVerify);
+        };
+        Ok(Outcome::Verified(self.client.verify(secret, &value).await))
+    }
+}
 
 /// What was just done to one secret, as its panel reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +150,10 @@ mod tests {
 
         verify(&settings).await;
 
-        assert_eq!(client.heard(), vec![(Secret::GithubToken, TOKEN.to_owned())]);
+        assert_eq!(
+            client.heard(),
+            vec![(Secret::GithubToken, TOKEN.to_owned())]
+        );
     }
 
     #[tokio::test]

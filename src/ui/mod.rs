@@ -9,7 +9,7 @@ use crate::store::{Manifest, RuntimeStatus};
 
 pub use chat::{chat_page, event_log};
 pub use console::{chat_list, console_page, status_line, status_picture};
-pub use settings::{SecretStatus, secret_settings, settings_panel};
+pub use settings::{secret_settings, settings_panel};
 
 use escape::text;
 

@@ -1,6 +1,21 @@
 //! Putting an operational secret to the service it opens, so the operator
 //! finds out it is wrong here rather than in the middle of a chat.
 
+mod scripted;
+
+use std::future::Future;
+
+use crate::secrets::Secret;
+
+pub use scripted::ScriptedVerifier;
+
+/// Somewhere a credential can be put to the service it opens.
+pub trait VerifyClient {
+    /// Put `value` to the service `secret` opens and say what it made of it.
+    /// Being turned away is an answer, not a failure.
+    fn verify(&self, secret: Secret, value: &str) -> impl Future<Output = Verified> + Send;
+}
+
 /// What one service made of the credential it was handed.
 ///
 /// No variant carries anything the service said in its body: an upstream is

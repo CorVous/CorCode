@@ -15,12 +15,9 @@ use super::{secret_clear_path, secret_path, secret_verify_path, text};
 const SHORT_OF_REPO_SCOPE: &str =
     "<p role=\"alert\">This token has no repo scope: private repositories are closed to it.</p>";
 
-/// One secret paired with where its value comes from right now.
-pub type SecretStatus = (Secret, Source);
-
 /// The whole panel, as the console draws it with nothing just done to it.
 #[must_use]
-pub fn settings_panel(secrets: &[SecretStatus]) -> String {
+pub fn settings_panel(secrets: &[(Secret, Source)]) -> String {
     let sections: String = secrets
         .iter()
         .map(|&(secret, source)| secret_settings(secret, source, &Outcome::Untouched))
