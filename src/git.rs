@@ -212,7 +212,60 @@ pub fn revive_at(
     commit: &str,
     dest: &Path,
 ) -> Result<String, GitError> {
-    panic!("reviving a workspace is not written yet")
+    clone_at(origin, branch, dest)?;
+    if carries(dest, commit)? {
+        stand_at(dest, commit)?;
+    }
+    head(dest)
+}
+
+/// Whether the branch `workspace` stands on still reaches `commit`. A commit
+/// the clone cannot show at all is one the remote no longer has.
+fn carries(workspace: &Path, commit: &str) -> Result<bool, GitError> {
+    let spelled = workspace.to_string_lossy();
+    let doing = format!("look for {commit} on {}", workspace.display());
+    let known = answers(
+        &doing,
+        &[
+            "-C",
+            &spelled,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{commit}}"),
+        ],
+    )?;
+    if !known {
+        return Ok(false);
+    }
+    answers(
+        &doing,
+        &[
+            "-C",
+            &spelled,
+            "merge-base",
+            "--is-ancestor",
+            commit,
+            "HEAD",
+        ],
+    )
+}
+
+/// Move the branch `workspace` stands on back to `commit`, working tree and
+/// all.
+fn stand_at(workspace: &Path, commit: &str) -> Result<(), GitError> {
+    run(
+        &format!("stand {} at {commit}", workspace.display()),
+        &[
+            "-C",
+            &workspace.to_string_lossy(),
+            "reset",
+            "--hard",
+            commit,
+        ],
+        ToOwned::to_owned,
+    )
+    .map(drop)
 }
 
 /// Cut `branch` off whatever `workspace` has checked out and stand on it.
@@ -313,15 +366,20 @@ pub fn push_for_archive(
     }
 }
 
+/// The commit `workspace` has checked out.
+fn head(workspace: &Path) -> Result<String, GitError> {
+    run(
+        &format!("read where {} stands", workspace.display()),
+        &["-C", &workspace.to_string_lossy(), "rev-parse", "HEAD"],
+        ToOwned::to_owned,
+    )
+}
+
 /// Where `workspace` has HEAD right now.
 fn standing(workspace: &Path) -> Result<Standing, GitError> {
     let spelled = workspace.to_string_lossy();
     let doing = format!("read where {} stands", workspace.display());
-    let head = run(
-        &doing,
-        &["-C", &spelled, "rev-parse", "HEAD"],
-        ToOwned::to_owned,
-    )?;
+    let head = head(workspace)?;
     let branch = run(
         &doing,
         &["-C", &spelled, "branch", "--show-current"],
@@ -507,6 +565,17 @@ fn run(doing: &str, args: &[&str], scrub: impl FnOnce(&str) -> String) -> Result
         doing: doing.to_owned(),
         complaint: scrub(String::from_utf8_lossy(&output.stderr).trim()),
     })
+}
+
+/// Ask git something whose answer is its exit status. Git saying no and git
+/// being unable to tell both come back as no: what is being asked about is a
+/// commit, and one this repository cannot show is one the chat cannot have.
+fn answers(doing: &str, args: &[&str]) -> Result<bool, GitError> {
+    match run(doing, args, ToOwned::to_owned) {
+        Ok(_) => Ok(true),
+        Err(GitError::Refused { .. }) => Ok(false),
+        Err(unusable) => Err(unusable),
+    }
 }
 
 #[cfg(test)]
