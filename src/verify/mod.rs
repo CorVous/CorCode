@@ -2,12 +2,14 @@
 //! finds out it is wrong here rather than in the middle of a chat.
 
 mod scripted;
+mod upstream;
 
 use std::future::Future;
 
 use crate::secrets::Secret;
 
 pub use scripted::ScriptedVerifier;
+pub use upstream::UpstreamVerifier;
 
 /// Somewhere a credential can be put to the service it opens.
 pub trait VerifyClient {
