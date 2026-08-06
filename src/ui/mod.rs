@@ -3,6 +3,7 @@
 mod chat;
 mod console;
 mod escape;
+mod settings;
 
 use crate::store::{Manifest, RuntimeStatus};
 

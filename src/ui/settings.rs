@@ -1,0 +1,202 @@
+//! The settings panel: the two operational secrets, set and checked from the
+//! one screen (ADR-0008).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_says_whether_it_is_set_and_what_set_it() {
+        for (source, reads) in [
+            (Source::Unset, "not set"),
+            (Source::Environment, "set (from environment)"),
+            (Source::Settings, "set (from settings)"),
+        ] {
+            let rendered = untouched(source);
+
+            assert!(
+                rendered.contains(reads),
+                "a {source:?} secret does not read as {reads}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_box_a_secret_is_typed_into_never_carries_one_back() {
+        let rendered = untouched(Source::Settings);
+
+        assert!(
+            rendered.contains("type=\"password\""),
+            "the secret is typed in the clear: {rendered}"
+        );
+        assert!(
+            !rendered.contains("value=\""),
+            "the box would carry a value back to the browser: {rendered}"
+        );
+    }
+
+    #[test]
+    fn setting_checking_and_clearing_one_secret_each_post_to_a_path_of_their_own() {
+        let rendered = untouched(Source::Settings);
+
+        for path in [
+            secret_path("github_token"),
+            secret_clear_path("github_token"),
+            secret_verify_path("github_token"),
+        ] {
+            assert!(
+                rendered.contains(&format!("hx-post=\"{path}\"")),
+                "nothing posts to {path}: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("hx-target=\"#secret-github_token\""),
+            "an action would swap something other than its own secret: {rendered}"
+        );
+    }
+
+    /// Checking a credential costs a call to somebody else's service. Only a
+    /// click may spend it, so the panel carries no trigger of its own.
+    #[test]
+    fn nothing_in_the_panel_checks_a_credential_on_a_clock() {
+        let rendered = settings_panel(&[
+            (Secret::GithubToken, Source::Settings),
+            (Secret::AnthropicKey, Source::Environment),
+        ]);
+
+        assert!(
+            !rendered.contains("hx-trigger"),
+            "the panel would act without a click: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_panel_holds_every_secret_this_deployment_keeps() {
+        let rendered = settings_panel(&[
+            (Secret::GithubToken, Source::Settings),
+            (Secret::AnthropicKey, Source::Unset),
+        ]);
+
+        assert!(
+            rendered.contains("GitHub token") && rendered.contains("Anthropic API key"),
+            "the panel is missing a secret: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_blank_save_says_that_nothing_was_given_and_nothing_changed() {
+        let rendered = told(&Outcome::NothingGiven);
+
+        assert!(
+            rendered.contains("nothing given, nothing changed"),
+            "a blank save reads as something having happened: {rendered}"
+        );
+    }
+
+    #[test]
+    fn saving_and_clearing_each_say_what_they_did() {
+        assert!(told(&Outcome::Saved).contains("saved"));
+        assert!(told(&Outcome::Cleared).contains("cleared"));
+    }
+
+    #[test]
+    fn a_working_token_names_who_it_authenticated_as() {
+        let rendered = told(&Outcome::Verified(Verified::Accepted {
+            login: Some("cassidy".to_owned()),
+            without_repo_scope: false,
+        }));
+
+        assert!(
+            rendered.contains("ok — authenticated as cassidy"),
+            "a working token does not name its account: {rendered}"
+        );
+        assert!(
+            !rendered.contains("repo scope"),
+            "a token that may reach private repositories is warned about: {rendered}"
+        );
+    }
+
+    /// A classic token whose scopes stop short of `repo` cannot clone the
+    /// private repositories a chat is cut from (ADR-0005), and it authenticates
+    /// perfectly well right up until it tries.
+    #[test]
+    fn a_token_that_cannot_reach_private_repositories_is_flagged_as_working_anyway() {
+        let rendered = told(&Outcome::Verified(Verified::Accepted {
+            login: Some("cassidy".to_owned()),
+            without_repo_scope: true,
+        }));
+
+        assert!(rendered.contains("ok — authenticated as cassidy"));
+        assert!(
+            rendered.contains("repo scope"),
+            "a token short of the repo scope passes without a word: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_service_that_names_nobody_just_reads_ok() {
+        let rendered = told(&Outcome::Verified(Verified::Accepted {
+            login: None,
+            without_repo_scope: false,
+        }));
+
+        assert!(rendered.contains("ok"));
+        assert!(
+            !rendered.contains("authenticated as"),
+            "a service that named nobody is quoted naming somebody: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_refused_credential_reads_as_its_status_and_nothing_the_service_said() {
+        assert!(
+            told(&Outcome::Verified(Verified::Refused(401)))
+                .contains("invalid or expired (401)")
+        );
+        assert!(told(&Outcome::Verified(Verified::Refused(500))).contains("(500)"));
+    }
+
+    #[test]
+    fn a_service_that_did_not_answer_says_so() {
+        assert!(
+            told(&Outcome::Verified(Verified::Silent)).contains("could not be reached"),
+            "a silent service reads as something else"
+        );
+    }
+
+    #[test]
+    fn a_secret_nothing_holds_has_nothing_to_check() {
+        assert!(told(&Outcome::NothingToVerify).contains("nothing to check"));
+    }
+
+    #[test]
+    fn an_untouched_panel_reports_no_action_at_all() {
+        assert!(
+            !untouched(Source::Settings).contains("role=\"status\""),
+            "a freshly drawn panel claims something just happened"
+        );
+    }
+
+    #[test]
+    fn an_account_name_cannot_smuggle_markup_into_the_panel() {
+        let rendered = told(&Outcome::Verified(Verified::Accepted {
+            login: Some("<img src=x onerror=alert(1)>".to_owned()),
+            without_repo_scope: false,
+        }));
+
+        assert!(
+            !rendered.contains("<img"),
+            "the account name escaped into markup: {rendered}"
+        );
+    }
+
+    /// One secret's section, with nothing just done to it.
+    fn untouched(source: Source) -> String {
+        secret_settings(Secret::GithubToken, source, &Outcome::Untouched)
+    }
+
+    /// One secret's section, reporting what was just done to it.
+    fn told(outcome: &Outcome) -> String {
+        secret_settings(Secret::GithubToken, Source::Settings, outcome)
+    }
+}
