@@ -222,7 +222,11 @@ async fn a_credential_the_service_turned_away_reads_as_its_status_alone() {
 
 #[tokio::test]
 async fn a_service_that_did_not_answer_in_time_says_so() {
-    let app = TestApp::start(Some(FROM_ENV), ScriptedVerifier::answering(Verified::Silent)).await;
+    let app = TestApp::start(
+        Some(FROM_ENV),
+        ScriptedVerifier::answering(Verified::Silent),
+    )
+    .await;
 
     let fragment = app.act("/settings/github_token/verify").await;
 

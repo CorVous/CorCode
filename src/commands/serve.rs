@@ -32,7 +32,11 @@ async fn serve(config: &Config) -> Result<()> {
     let secrets = Arc::new(Secrets::from_config(config));
     let chats = chats(config, Arc::clone(&secrets))?;
     chats.sweep().await;
-    let router = server::router(config, chats, Settings::new(secrets, UpstreamVerifier::new()))?;
+    let router = server::router(
+        config,
+        chats,
+        Settings::new(secrets, UpstreamVerifier::new()),
+    )?;
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;

@@ -24,7 +24,9 @@ use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::server::{self, SESSION_COOKIE};
+use cor_code::settings::Settings;
 use cor_code::store::ChatStore;
+use cor_code::verify::ScriptedVerifier;
 
 const USERNAME: &str = "cassidy";
 const PASSWORD: &str = "correct horse battery staple";
@@ -294,6 +296,7 @@ impl TestApp {
         ChatStore::new(data_dir.path())
             .prepare()
             .expect("the dataset should prepare, as serving does");
+        let secrets = Arc::new(Secrets::from_config(&config));
         let router = server::router(
             &config,
             Chats::new(
@@ -301,8 +304,9 @@ impl TestApp {
                 MemoryPlane::default(),
                 ScriptedAdapter::silent(),
                 Remotes::new(GITHUB),
-                Arc::new(Secrets::from_config(&config)),
+                Arc::clone(&secrets),
             ),
+            Settings::new(secrets, ScriptedVerifier::default()),
         )
         .expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();

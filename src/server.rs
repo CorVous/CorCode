@@ -6,7 +6,8 @@ use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
 use axum::Router;
-use axum::extract::{Form, FromRef, Path, Request, State};
+use axum::extract::{Form, FromRef, FromRequestParts, Path, Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -53,11 +54,7 @@ const HX_REFRESH: &str = "HX-Refresh";
 /// Build the application's routes. Every route is gated except the handful
 /// [`is_public`] names, so a route added here is protected by default
 /// (ADR-0003).
-pub fn router<P, T, V>(
-    config: &Config,
-    chats: Chats<P, T>,
-    settings: Settings<V>,
-) -> Result<Router>
+pub fn router<P, T, V>(config: &Config, chats: Chats<P, T>, settings: Settings<V>) -> Result<Router>
 where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
     T: AcpTransport + Send + Sync + 'static,
@@ -168,13 +165,7 @@ where
     match chats.survey().await {
         Ok(survey) => {
             let status = chats.status_of(&survey, Utc::now());
-            Html(ui::console_page(
-                &survey,
-                &status,
-                chats.repos(),
-                &statuses,
-            ))
-            .into_response()
+            Html(ui::console_page(&survey, &status, chats.repos(), &statuses)).into_response()
         }
         Err(failure) => broken_invariant(&failure),
     }
@@ -184,15 +175,12 @@ where
 /// nothing (ADR-0003: unsetting one is Clear's to do).
 async fn save_secret<V>(
     State(settings): State<Arc<Settings<V>>>,
-    Path(secret): Path<String>,
+    secret: Secret,
     Form(form): Form<SecretForm>,
 ) -> Response
 where
     V: VerifyClient + Send + Sync + 'static,
 {
-    let Some(secret) = Secret::named(&secret) else {
-        return no_such_secret();
-    };
     answer(&settings, secret, settings.save(secret, &form.value))
 }
 
@@ -205,31 +193,19 @@ struct SecretForm {
 
 /// Take one secret's set value away, leaving whatever the environment
 /// bootstrapped in force again.
-async fn clear_secret<V>(
-    State(settings): State<Arc<Settings<V>>>,
-    Path(secret): Path<String>,
-) -> Response
+async fn clear_secret<V>(State(settings): State<Arc<Settings<V>>>, secret: Secret) -> Response
 where
     V: VerifyClient + Send + Sync + 'static,
 {
-    let Some(secret) = Secret::named(&secret) else {
-        return no_such_secret();
-    };
     answer(&settings, secret, settings.clear(secret))
 }
 
 /// Put one secret to the service it opens. Only a click reaches here: the
 /// panel carries no trigger that would spend a call on a clock.
-async fn verify_secret<V>(
-    State(settings): State<Arc<Settings<V>>>,
-    Path(secret): Path<String>,
-) -> Response
+async fn verify_secret<V>(State(settings): State<Arc<Settings<V>>>, secret: Secret) -> Response
 where
     V: VerifyClient + Send + Sync + 'static,
 {
-    let Some(secret) = Secret::named(&secret) else {
-        return no_such_secret();
-    };
     let outcome = settings.verify(secret).await;
     answer(&settings, secret, outcome)
 }
@@ -249,6 +225,18 @@ where
             Html(ui::secret_settings(secret, source, &outcome)).into_response()
         }
         Err(failure) => broken_invariant(&anyhow::Error::new(failure)),
+    }
+}
+
+/// Which secret a per-secret route was asked about: the one its path names.
+impl<S: Send + Sync> FromRequestParts<S> for Secret {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let named = Path::<String>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| no_such_secret())?;
+        Self::named(&named).ok_or_else(no_such_secret)
     }
 }
 
