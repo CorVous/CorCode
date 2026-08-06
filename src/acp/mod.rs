@@ -187,17 +187,70 @@ mod tests {
     /// a test waiting on nothing does not hold the suite up.
     const IMPATIENT: Duration = Duration::from_millis(200);
 
+    /// One `session/update` notification's params, as a real adapter sends
+    /// them: the session it belongs to, wrapped around the update itself.
+    fn update(session_id: &str, said: &str) -> Value {
+        json!({
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": said},
+            },
+        })
+    }
+
+    /// The update alone, as ADR-0006 writes it down.
+    fn recorded(said: &str) -> Value {
+        json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": said},
+        })
+    }
+
     #[tokio::test]
     async fn a_new_session_is_handed_back_by_the_adapter() {
         let adapter = Adapter::new(ScriptedAdapter::opening(SESSION));
 
-        let session_id = adapter
+        let connection = adapter
             .open_session(CONTAINER)
             .await
             .expect("the scripted adapter should open a session");
 
-        assert_eq!(session_id, SESSION);
+        assert_eq!(connection.session_id(), SESSION);
         assert_eq!(adapter.transport().containers(), [CONTAINER]);
+    }
+
+    #[tokio::test]
+    async fn a_turn_records_the_prompt_it_sent_and_then_the_updates_that_answered() {
+        let adapter = Adapter::new(ScriptedAdapter::answering(
+            SESSION,
+            &[update(SESSION, "on it"), update(SESSION, " — done")],
+        ));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("the scripted turn should end");
+
+        assert_eq!(
+            record,
+            [
+                json!({
+                    "sessionId": SESSION,
+                    "prompt": [{"type": "text", "text": "ship the ladder"}],
+                }),
+                recorded("on it"),
+                recorded(" — done"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -238,15 +291,151 @@ mod tests {
     async fn a_line_answering_no_request_is_passed_over() {
         let adapter = Adapter::new(ScriptedAdapter::opening(SESSION));
 
-        let session_id = adapter
+        let connection = adapter
             .open_session(CONTAINER)
             .await
             .expect("notifications between answers should not derail the handshake");
 
-        assert_eq!(session_id, SESSION);
+        assert_eq!(connection.session_id(), SESSION);
         assert!(
             adapter.transport().chattered(),
             "the fake never spoke out of turn, so nothing was proved"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_asks_the_adapter_over_the_session_the_handshake_opened() {
+        let adapter = Adapter::new(ScriptedAdapter::answering(SESSION, &[]));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        connection
+            .take_turn("ship the ladder", &mut |_| Ok(()))
+            .await
+            .expect("the scripted turn should end");
+
+        assert_eq!(
+            adapter.transport().requests().last(),
+            Some(&json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "session/prompt",
+                "params": {
+                    "sessionId": SESSION,
+                    "prompt": [{"type": "text", "text": "ship the ladder"}],
+                },
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_belonging_to_another_session_is_not_recorded() {
+        let adapter = Adapter::new(ScriptedAdapter::answering(
+            SESSION,
+            &[
+                update("3f2b1c4d-0000-4000-8000-000000000002", "not for you"),
+                update(SESSION, "on it"),
+            ],
+        ));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("the scripted turn should end");
+
+        assert_eq!(
+            record.len(),
+            2,
+            "another session's words landed in this one: {record:?}"
+        );
+        assert_eq!(record[1], recorded("on it"));
+    }
+
+    #[tokio::test]
+    async fn an_adapter_that_dies_mid_turn_fails_with_what_it_had_already_said_recorded() {
+        let adapter = Adapter::new(ScriptedAdapter::dying_mid_turn(
+            SESSION,
+            &[update(SESSION, "on i")],
+        ));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        let error = connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect_err("a turn the adapter never ends should fail");
+
+        assert!(
+            matches!(error, AcpError::Closed),
+            "a broken pipe should read as one, got: {error}"
+        );
+        assert_eq!(record, [
+            json!({
+                "sessionId": SESSION,
+                "prompt": [{"type": "text", "text": "ship the ladder"}],
+            }),
+            recorded("on i"),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn a_turn_the_adapter_never_ends_gives_up_rather_than_hangs() {
+        let adapter = Adapter::waiting(ScriptedAdapter::opening(SESSION), IMPATIENT);
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        let error = connection
+            .take_turn("ship the ladder", &mut |_| Ok(()))
+            .await
+            .expect_err("silence should end in a failure");
+
+        assert!(
+            format!("{error}").contains("session/prompt"),
+            "error should name the call that hung, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_whose_record_cannot_be_written_fails_rather_than_going_on() {
+        let adapter = Adapter::new(ScriptedAdapter::answering(SESSION, &[]));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        let error = connection
+            .take_turn("ship the ladder", &mut |_| {
+                Err(anyhow::anyhow!("the dataset is not mounted"))
+            })
+            .await
+            .expect_err("a turn that cannot be recorded should fail");
+
+        assert!(
+            format!("{error:#}").contains("the dataset is not mounted"),
+            "error should carry why the record failed, got: {error:#}"
+        );
+        assert_eq!(
+            adapter.transport().requests().len(),
+            2,
+            "the prompt went out although it was never recorded"
         );
     }
 
