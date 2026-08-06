@@ -23,6 +23,7 @@ async fn health_endpoint_answers_on_ephemeral_port() {
         .expect("listener should report address");
     let config = Config {
         data_dir: data_dir.path().to_path_buf(),
+        host_data_dir: data_dir.path().to_path_buf(),
         bind_addr: addr,
         username: "cassidy".to_owned(),
         password_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".to_owned(),

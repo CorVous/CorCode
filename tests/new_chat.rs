@@ -270,11 +270,7 @@ async fn a_containerised_core_hands_the_daemon_the_hosts_own_paths() {
     let app = TestApp::start_reading_the_dataset_at(Some(host_root)).await;
 
     let response = app
-        .create(&[
-            ("repo", REPO),
-            ("base_branch", "main"),
-            ("slug", "mounted"),
-        ])
+        .create(&[("repo", REPO), ("base_branch", "main"), ("slug", "mounted")])
         .await;
 
     let chat_id = chat_id_of(&response);
@@ -282,7 +278,10 @@ async fn a_containerised_core_hands_the_daemon_the_hosts_own_paths() {
         .plane
         .mounts_of(&chat_id)
         .expect("the new chat should hold a container");
-    assert_eq!(mounts.workspace, host_root.join("workspaces").join(&chat_id));
+    assert_eq!(
+        mounts.workspace,
+        host_root.join("workspaces").join(&chat_id)
+    );
     assert_eq!(
         mounts.claude,
         host_root.join("chats").join(&chat_id).join("claude")

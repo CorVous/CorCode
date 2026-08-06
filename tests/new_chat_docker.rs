@@ -352,6 +352,7 @@ fn settings(deployment: &Deployment) -> PlaneSettings {
 
 fn test_config(data_dir: PathBuf, deployment: &Deployment) -> Config {
     Config {
+        host_data_dir: data_dir.clone(),
         data_dir,
         bind_addr: "127.0.0.1:0".parse().expect("valid address"),
         username: USERNAME.to_owned(),

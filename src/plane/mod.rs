@@ -11,7 +11,7 @@ use std::path::Path;
 
 pub use docker::{DockerPlane, PlaneSettings};
 pub use error::PlaneError;
-pub use memory::MemoryPlane;
+pub use memory::{MemoryPlane, Mounts};
 
 const NAME_PREFIX: &str = "corcode-chat-";
 

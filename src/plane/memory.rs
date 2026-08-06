@@ -3,32 +3,53 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::{ContainerPlane, ContainerRef, PlaneError};
 use crate::store::ContainerLiveness;
 
-/// Records spawns in memory and answers liveness from them.
-#[derive(Debug, Default)]
+/// The two directories a chat's container was asked to bind (ADR-0006), in
+/// the names the plane was handed rather than the names it reads them by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mounts {
+    pub workspace: PathBuf,
+    pub claude: PathBuf,
+}
+
+/// Records spawns in memory and answers liveness from them. Clones share one
+/// record, so a test can keep watching a plane it has given away.
+#[derive(Debug, Default, Clone)]
 pub struct MemoryPlane {
-    live: Mutex<HashMap<String, ContainerRef>>,
+    live: Arc<Mutex<HashMap<String, Spawned>>>,
+}
+
+#[derive(Debug, Clone)]
+struct Spawned {
+    container: ContainerRef,
+    mounts: Mounts,
 }
 
 impl ContainerPlane for MemoryPlane {
     async fn spawn(
         &self,
         chat_id: &str,
-        _workspace_dir: &Path,
-        _claude_dir: &Path,
+        workspace_dir: &Path,
+        claude_dir: &Path,
         _env: &BTreeMap<String, String>,
     ) -> Result<ContainerRef, PlaneError> {
-        let container = ContainerRef::new(chat_id, format!("in-memory-{chat_id}"));
+        let spawned = Spawned {
+            container: ContainerRef::new(chat_id, format!("in-memory-{chat_id}")),
+            mounts: Mounts {
+                workspace: workspace_dir.to_path_buf(),
+                claude: claude_dir.to_path_buf(),
+            },
+        };
         match self.live().entry(chat_id.to_owned()) {
             Entry::Occupied(_) => Err(PlaneError::AlreadyLive {
                 chat_id: chat_id.to_owned(),
             }),
-            Entry::Vacant(slot) => Ok(slot.insert(container).clone()),
+            Entry::Vacant(slot) => Ok(slot.insert(spawned).container.clone()),
         }
     }
 
@@ -47,7 +68,16 @@ impl ContainerPlane for MemoryPlane {
 }
 
 impl MemoryPlane {
-    fn live(&self) -> MutexGuard<'_, HashMap<String, ContainerRef>> {
+    /// What a live chat's container was told to bind, or nothing if the chat
+    /// holds no container.
+    #[must_use]
+    pub fn mounts_of(&self, chat_id: &str) -> Option<Mounts> {
+        self.live()
+            .get(chat_id)
+            .map(|spawned| spawned.mounts.clone())
+    }
+
+    fn live(&self) -> MutexGuard<'_, HashMap<String, Spawned>> {
         self.live.lock().expect("no holder of the lock panics")
     }
 }

@@ -48,8 +48,13 @@ impl fmt::Debug for RegistryCredentials {
 /// Everything the core needs from its deployment environment.
 #[derive(Clone)]
 pub struct Config {
-    /// Root of the NAS dataset holding chats and workspaces (ADR-0006).
+    /// Root of the NAS dataset holding chats and workspaces (ADR-0006), as
+    /// this process reads it.
     pub data_dir: PathBuf,
+    /// The same dataset root under the name the Docker daemon knows, which
+    /// differs from `data_dir` whenever the core is itself in a container
+    /// (ADR-0001).
+    pub host_data_dir: PathBuf,
     /// Address the HTTP server binds.
     pub bind_addr: SocketAddr,
     /// The single account's name (ADR-0003).
@@ -89,8 +94,12 @@ impl Config {
     {
         let vars: HashMap<String, String> = vars.into_iter().collect();
         let bind_addr = optional(&vars, "CORCODE_BIND_ADDR").unwrap_or(DEFAULT_BIND_ADDR);
+        let data_dir = required(&vars, "CORCODE_DATA_DIR")?;
         Ok(Self {
-            data_dir: PathBuf::from(required(&vars, "CORCODE_DATA_DIR")?),
+            host_data_dir: PathBuf::from(
+                optional(&vars, "CORCODE_HOST_DATA_DIR").unwrap_or(data_dir),
+            ),
+            data_dir: PathBuf::from(data_dir),
             bind_addr: bind_addr
                 .parse()
                 .with_context(|| format!("CORCODE_BIND_ADDR is not an address: {bind_addr}"))?,
@@ -192,6 +201,7 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("data_dir", &self.data_dir)
+            .field("host_data_dir", &self.host_data_dir)
             .field("bind_addr", &self.bind_addr)
             .field("username", &self.username)
             .field("password_hash", &hidden(&self.password_hash))

@@ -211,7 +211,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
     /// `transport` reaches, from the repositories `remotes` holds.
     pub fn new(config: &Config, plane: P, transport: T, remotes: Remotes) -> Self {
         Self {
-            store: ChatStore::new(&config.data_dir),
+            store: ChatStore::mounted(&config.data_dir, &config.host_data_dir),
             plane,
             adapter: Adapter::new(transport),
             connections: Connections::default(),
@@ -867,8 +867,8 @@ where
             .plane
             .spawn(
                 chat_id,
-                &self.store.workspace_dir(chat_id),
-                &self.store.claude_dir(chat_id),
+                &self.store.host_workspace_dir(chat_id),
+                &self.store.host_claude_dir(chat_id),
                 &env,
             )
             .await?
