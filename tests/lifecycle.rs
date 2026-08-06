@@ -6,6 +6,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use argon2::password_hash::{PasswordHasher as _, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -31,6 +32,9 @@ const PASSWORD: &str = "correct horse battery staple";
 const REPO: &str = "CorVous/fixture";
 const BARE: &str = "CorVous/fixture.git";
 const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
+
+/// What one line out of a slow agent costs.
+const DAWDLE: Duration = Duration::from_millis(200);
 
 #[tokio::test]
 async fn a_chat_beyond_the_pool_gives_up_its_container_and_keeps_its_workspace() {
@@ -173,6 +177,76 @@ async fn a_chat_whose_push_fails_keeps_its_container_and_says_so() {
     );
 }
 
+/// The gate stages and commits the whole working tree, and then kills the
+/// container: doing that to an agent mid-turn destroys work git never saw
+/// (ADR-0002 rule 3).
+#[tokio::test]
+async fn an_archive_over_a_running_turn_is_refused_and_tears_nothing_down() {
+    let app = TestApp::dawdling().await;
+    let chat = app.create_chat("first").await;
+
+    let in_flight = app.spawn_prompt(&chat, "ship the ladder");
+    tokio::time::sleep(DAWDLE).await;
+    let refused = app.archive(&chat).await;
+
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert_eq!(app.manifest(&chat)["state"], "open");
+    assert!(app.workspace(&chat).join("README.md").is_file());
+    assert_eq!(group(&app.body("/").await, &chat), "Live");
+    assert_eq!(
+        in_flight
+            .await
+            .expect("the turn should not panic")
+            .status(),
+        StatusCode::OK,
+        "the refused archive interrupted the turn"
+    );
+}
+
+/// `last_active_at` is only written when a turn ends, so the chat that has
+/// been answering longest looks like the stalest chat there is.
+#[tokio::test]
+async fn a_chat_in_the_middle_of_a_turn_is_not_parked_by_another_chats_arrival() {
+    let app = TestApp::dawdling().await;
+    let answering = app.create_chat("first").await;
+    app.create_chat("second").await;
+
+    let in_flight = app.spawn_prompt(&answering, "ship the ladder");
+    tokio::time::sleep(DAWDLE).await;
+    app.create_chat("third").await;
+
+    assert_eq!(
+        group(&app.body("/").await, &answering),
+        "Live",
+        "the pool parked a chat mid-stream"
+    );
+    assert_eq!(
+        in_flight
+            .await
+            .expect("the turn should not panic")
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn archiving_an_archived_chat_runs_no_git_and_says_it_is_already_done() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    app.archive(&chat).await;
+    let archived = app.events(&chat);
+
+    let again = app.archive(&chat).await;
+
+    assert_eq!(again.status(), StatusCode::CONFLICT);
+    assert_eq!(app.manifest(&chat)["state"], "archived");
+    assert_eq!(
+        app.events(&chat),
+        archived,
+        "the second archive wrote into a finished transcript"
+    );
+}
+
 #[tokio::test]
 async fn archiving_a_chat_also_sweeps_the_working_trees_nothing_claims() {
     let app = TestApp::start().await;
@@ -214,6 +288,17 @@ struct TestApp {
 
 impl TestApp {
     async fn start() -> Self {
+        Self::serving(ScriptedAdapter::answering(SESSION, &[update("on it")])).await
+    }
+
+    /// An app whose agent answers in many slow lines, so that a turn stays in
+    /// flight long enough for another request to be made against it.
+    async fn dawdling() -> Self {
+        let unhurried: Vec<Value> = (0..8).map(|line| update(&format!("line {line}"))).collect();
+        Self::serving(ScriptedAdapter::dawdling(SESSION, &unhurried, DAWDLE)).await
+    }
+
+    async fn serving(adapter: ScriptedAdapter) -> Self {
         let data_dir = TempDir::new().expect("temp dir should be creatable");
         let (origin, remotes) = seeded_repository();
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -224,12 +309,7 @@ impl TestApp {
         ChatStore::new(data_dir.path())
             .prepare()
             .expect("the dataset should prepare, as serving does");
-        let chats = Chats::new(
-            &config,
-            MemoryPlane::default(),
-            ScriptedAdapter::answering(SESSION, &[update("on it")]),
-            remotes,
-        );
+        let chats = Chats::new(&config, MemoryPlane::default(), adapter, remotes);
         let router = server::router(&config, chats).expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {
@@ -277,6 +357,16 @@ impl TestApp {
             .send()
             .await
             .expect("request")
+    }
+
+    /// A turn put in flight, to be awaited once the test has looked at what
+    /// happens while it runs.
+    fn spawn_prompt(&self, chat_id: &str, said: &str) -> JoinHandle<reqwest::Response> {
+        let request = client()
+            .post(self.url(&format!("/chats/{chat_id}/prompt")))
+            .header("cookie", &self.cookie)
+            .form(&[("prompt", said)]);
+        tokio::spawn(async move { request.send().await.expect("request") })
     }
 
     async fn archive(&self, chat_id: &str) -> reqwest::Response {

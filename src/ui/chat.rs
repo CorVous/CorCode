@@ -340,35 +340,39 @@ mod tests {
         );
     }
 
+    /// Parked is the state the gate exists for: the workspace is still on
+    /// disk holding work nothing has pushed (ADR-0002 rule 1).
     #[test]
-    fn a_live_chat_offers_to_archive_itself() {
-        let manifest = manifest(RuntimeStatus::Live);
+    fn a_chat_that_still_holds_a_workspace_offers_to_archive_itself() {
+        for status in [RuntimeStatus::Live, RuntimeStatus::Parked] {
+            let manifest = manifest(status);
 
-        let rendered = chat_page(&manifest, RuntimeStatus::Live, &[]);
-
-        assert!(
-            rendered.contains(&format!(
-                "hx-post=\"{}\"",
-                chat_archive_path(&manifest.chat_id)
-            )),
-            "the chat cannot be archived from its own page: {rendered}"
-        );
-        assert!(rendered.contains("Archive</button>"));
-    }
-
-    /// Parking already gave the container up and archiving already ran, so
-    /// neither has anything left for the gate to do (ADR-0002).
-    #[test]
-    fn a_chat_holding_no_container_is_offered_no_archive_button() {
-        for status in [RuntimeStatus::Parked, RuntimeStatus::Archived] {
-            let rendered = chat_page(&manifest(status), status, &[]);
+            let rendered = chat_page(&manifest, status, &[]);
 
             assert!(
-                !rendered.contains("Archive</button>"),
-                "a {} chat was offered the gate: {rendered}",
+                rendered.contains(&format!(
+                    "hx-post=\"{}\"",
+                    chat_archive_path(&manifest.chat_id)
+                )),
+                "a {} chat cannot be archived from its own page: {rendered}",
                 status_word(status)
             );
+            assert!(rendered.contains("Archive</button>"));
         }
+    }
+
+    #[test]
+    fn an_archived_chat_is_offered_no_archive_button() {
+        let rendered = chat_page(
+            &manifest(RuntimeStatus::Archived),
+            RuntimeStatus::Archived,
+            &[],
+        );
+
+        assert!(
+            !rendered.contains("Archive</button>"),
+            "an archived chat was offered the gate again: {rendered}"
+        );
     }
 
     #[test]

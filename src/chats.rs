@@ -247,7 +247,12 @@ where
     async fn overflowing(&self) -> Result<Vec<String>> {
         let chats = self.store.scan()?;
         let live = self.plane.live_chat_ids().await?;
-        Ok(pool::beyond_the_pool(&chats, &live, self.warm_pool))
+        Ok(pool::beyond_the_pool(
+            &chats,
+            &live,
+            &HashSet::new(),
+            self.warm_pool,
+        ))
     }
 
     /// Park one chat: the container goes, the workspace and the agent's

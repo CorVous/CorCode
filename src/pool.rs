@@ -17,6 +17,7 @@ use crate::store::{ChatState, Manifest};
 pub fn beyond_the_pool<S: BuildHasher>(
     chats: &[Manifest],
     live: &HashSet<String, S>,
+    _busy: &HashSet<String, S>,
     cap: usize,
 ) -> Vec<String> {
     let mut holders: Vec<&Manifest> = chats
@@ -66,12 +67,17 @@ mod tests {
             .collect()
     }
 
+    /// Nobody is mid-turn.
+    fn idle() -> HashSet<String> {
+        HashSet::new()
+    }
+
     #[test]
     fn the_least_recently_active_container_is_the_one_that_goes() {
         let pool = [chat("stale", 60), chat("fresh", 1), chat("middling", 10)];
         let stale = pool[0].chat_id.clone();
 
-        let parking = beyond_the_pool(&pool, &live(&pool), 2);
+        let parking = beyond_the_pool(&pool, &live(&pool), &idle(), 2);
 
         assert_eq!(parking, [stale]);
     }
@@ -80,14 +86,14 @@ mod tests {
     fn a_pool_inside_its_cap_parks_nothing() {
         let pool = [chat("fresh", 1), chat("stale", 60)];
 
-        assert!(beyond_the_pool(&pool, &live(&pool), 2).is_empty());
+        assert!(beyond_the_pool(&pool, &live(&pool), &idle(), 2).is_empty());
     }
 
     #[test]
     fn a_chat_that_holds_no_container_is_never_parked_again() {
         let pool = [chat("fresh", 1), chat("middling", 10), chat("stale", 60)];
 
-        let parking = beyond_the_pool(&pool, &live(&pool[2..]), 2);
+        let parking = beyond_the_pool(&pool, &live(&pool[2..]), &idle(), 2);
 
         assert!(
             parking.is_empty(),
@@ -101,8 +107,34 @@ mod tests {
         pool[0].state = ChatState::Archived;
         let archived = pool[0].chat_id.clone();
 
-        let parking = beyond_the_pool(&pool, &live(&pool), 2);
+        let parking = beyond_the_pool(&pool, &live(&pool), &idle(), 2);
 
         assert_eq!(parking, [archived]);
+    }
+
+    /// A turn that has been running ten minutes is the stalest thing in the
+    /// pool by `last_active_at`, and the one chat that must not be touched.
+    #[test]
+    fn a_chat_in_the_middle_of_a_turn_is_never_the_victim() {
+        let pool = [chat("answering", 10), chat("fresh", 1), chat("idle", 5)];
+        let answering = live(&pool[..1]);
+
+        let parking = beyond_the_pool(&pool, &live(&pool), &answering, 2);
+
+        assert!(
+            parking.is_empty(),
+            "a chat was parked mid-stream: {parking:?}"
+        );
+    }
+
+    #[test]
+    fn a_chat_in_the_middle_of_a_turn_holds_a_slot_while_it_runs() {
+        let pool = [chat("answering", 1), chat("idle", 5), chat("stale", 60)];
+        let answering = live(&pool[..1]);
+        let stale = pool[2].chat_id.clone();
+
+        let parking = beyond_the_pool(&pool, &live(&pool), &answering, 2);
+
+        assert_eq!(parking, [stale]);
     }
 }
