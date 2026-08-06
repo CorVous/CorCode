@@ -3,10 +3,12 @@
 
 use std::fmt;
 use std::io;
+use std::iter;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
 use chrono::Utc;
+use log::warn;
 use thiserror::Error;
 
 use crate::config::REDACTED;
@@ -20,6 +22,12 @@ const TOKEN_USER: &str = "x-access-token";
 /// Git is never given a terminal to ask for credentials on: a chat that
 /// cannot be cloned must fail, not hang holding a request open.
 const NO_PROMPTS: (&str, &str) = ("GIT_TERMINAL_PROMPT", "0");
+
+/// Who the core commits as on the one commit it authors itself (ADR-0005).
+const CORE_COMMITTER: (&str, &str) = ("CorCode core", "corcode@local");
+
+/// What that commit says it is.
+const CHECKPOINT_MESSAGE: &str = "Checkpoint uncommitted work at archive";
 
 /// The site the chats' repositories are cloned from, and the token that
 /// opens the private ones.
@@ -162,11 +170,9 @@ pub fn names_a_branch(branch: &str) -> bool {
 /// tokenless one before returning: the workspace is the agent's to read
 /// (ADR-0001).
 pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), GitError> {
-    let doing = format!("clone {origin} at {base_branch}");
-    let scrub = |said: &str| origin.scrub(said);
     let spelled_dest = dest.to_string_lossy();
-    let output = git(
-        &doing,
+    run(
+        &format!("clone {origin} at {base_branch}"),
         &[
             "clone",
             "--branch",
@@ -175,48 +181,187 @@ pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), G
             origin.url(),
             &spelled_dest,
         ],
+        |said| origin.scrub(said),
     )?;
-    judge(&doing, &output, scrub)?;
-    let doing = format!("take the credential back out of {}", dest.display());
-    let output = git(
-        &doing,
+    let tokenless = origin.tokenless();
+    run(
+        &format!("take the credential back out of {}", dest.display()),
         &[
             "-C",
             &spelled_dest,
             "remote",
             "set-url",
             "origin",
-            &origin.tokenless(),
+            &tokenless,
         ],
-    )?;
-    judge(&doing, &output, scrub)
+        |said| origin.scrub(said),
+    )
+    .map(drop)
 }
 
 /// Cut `branch` off whatever `workspace` has checked out and stand on it.
 /// Nothing is pushed: the branch reaches the remote with its first commit
 /// (ADR-0005).
 pub fn create_branch(workspace: &Path, branch: &str) -> Result<(), GitError> {
-    let doing = format!("cut branch {branch}");
-    let workspace = workspace.to_string_lossy();
-    let output = git(&doing, &["-C", &workspace, "checkout", "-b", branch])?;
-    judge(&doing, &output, ToOwned::to_owned)
+    run(
+        &format!("cut branch {branch}"),
+        &["-C", &workspace.to_string_lossy(), "checkout", "-b", branch],
+        ToOwned::to_owned,
+    )
+    .map(drop)
 }
 
-fn git(doing: &str, args: &[&str]) -> Result<Output, GitError> {
-    Command::new("git")
+/// The branch a dirty tree is checkpointed onto when its chat is archived
+/// (ADR-0005): the chat's own branch, stamped to the minute.
+#[must_use]
+pub fn checkpoint_branch(branch: &str) -> String {
+    format!("{branch}-chkpt-{}", Utc::now().format("%Y%m%dT%H%M"))
+}
+
+/// What the archive gate got onto the remote (ADR-0005).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pushed {
+    /// Where `branch` stands now: the agent's last semantic commit.
+    pub tip: String,
+    /// The branch the dirty tree went onto, if there was one to commit.
+    pub checkpoint_branch: Option<String>,
+}
+
+/// Get everything in `workspace` onto the remote so the directory can be
+/// deleted (ADR-0002 rule 3, ADR-0005).
+///
+/// A dirty tree is committed whole onto a checkpoint branch of its own,
+/// leaving `branch` at the agent's last semantic commit; both branches are
+/// then pushed. Nothing here is destructive: if a push fails the workspace is
+/// put back the way it was found, so the operator can retry from it.
+pub fn push_for_archive(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+) -> Result<Pushed, GitError> {
+    let checkpoint = dirty(workspace)?.then(|| checkpoint_branch(branch));
+    if let Some(checkpoint) = &checkpoint {
+        commit_everything(workspace, checkpoint)?;
+    }
+    match push_branches(origin, workspace, branch, checkpoint.as_deref()) {
+        Ok(tip) => Ok(Pushed {
+            tip,
+            checkpoint_branch: checkpoint,
+        }),
+        Err(failure) => {
+            if let Some(checkpoint) = &checkpoint
+                && let Err(stubborn) = undo_checkpoint(workspace, branch, checkpoint)
+            {
+                warn!("{checkpoint} could not be rolled back: {stubborn}");
+            }
+            Err(failure)
+        }
+    }
+}
+
+/// Whether `workspace` holds anything git has not been told about.
+fn dirty(workspace: &Path) -> Result<bool, GitError> {
+    let said = run(
+        &format!("read the state of {}", workspace.display()),
+        &["-C", &workspace.to_string_lossy(), "status", "--porcelain"],
+        ToOwned::to_owned,
+    )?;
+    Ok(!said.is_empty())
+}
+
+/// Cut `checkpoint` off the current commit and commit the whole working tree
+/// onto it, in the core's own name: these are the one kind of commit no agent
+/// authored (ADR-0005).
+fn commit_everything(workspace: &Path, checkpoint: &str) -> Result<(), GitError> {
+    let workspace = workspace.to_string_lossy();
+    let doing = |what: &str| format!("{what} on {checkpoint}");
+    run(
+        &doing("checkpoint the working tree"),
+        &["-C", &workspace, "checkout", "-b", checkpoint],
+        ToOwned::to_owned,
+    )?;
+    run(
+        &doing("stage the working tree"),
+        &["-C", &workspace, "add", "-A"],
+        ToOwned::to_owned,
+    )?;
+    run(
+        &doing("commit the working tree"),
+        &[
+            "-C",
+            &workspace,
+            "-c",
+            &format!("user.name={}", CORE_COMMITTER.0),
+            "-c",
+            &format!("user.email={}", CORE_COMMITTER.1),
+            "commit",
+            "--message",
+            CHECKPOINT_MESSAGE,
+        ],
+        ToOwned::to_owned,
+    )
+    .map(drop)
+}
+
+/// Push the checkpoint branch, then the chat's own, answering with where the
+/// chat's branch stands.
+fn push_branches(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    checkpoint: Option<&str>,
+) -> Result<String, GitError> {
+    let spelled = workspace.to_string_lossy();
+    for pushing in checkpoint.into_iter().chain(iter::once(branch)) {
+        run(
+            &format!("push {pushing} to {origin}"),
+            &[
+                "-C",
+                &spelled,
+                "push",
+                "--",
+                origin.url(),
+                &format!("{pushing}:refs/heads/{pushing}"),
+            ],
+            |said| origin.scrub(said),
+        )?;
+    }
+    run(
+        &format!("read where {branch} stands"),
+        &["-C", &spelled, "rev-parse", branch],
+        ToOwned::to_owned,
+    )
+}
+
+/// Put a checkpoint nobody could push back the way it was found: the commit
+/// undone, its files dirty again, the branch gone.
+fn undo_checkpoint(workspace: &Path, branch: &str, checkpoint: &str) -> Result<(), GitError> {
+    let workspace = workspace.to_string_lossy();
+    let doing = format!("roll back {checkpoint}");
+    for args in [
+        vec!["-C", &workspace, "reset", "--mixed", branch],
+        vec!["-C", &workspace, "checkout", branch],
+        vec!["-C", &workspace, "branch", "-d", checkpoint],
+    ] {
+        run(&doing, &args, ToOwned::to_owned)?;
+    }
+    Ok(())
+}
+
+/// Run one git command, answering with what it wrote on its way out. A
+/// non-zero exit is the failure it is, in git's own words with `scrub`
+/// applied to them.
+fn run(doing: &str, args: &[&str], scrub: impl FnOnce(&str) -> String) -> Result<String, GitError> {
+    let output = Command::new("git")
         .args(args)
         .env(NO_PROMPTS.0, NO_PROMPTS.1)
         .output()
         .map_err(|source| GitError::Unusable {
             doing: doing.to_owned(),
             source,
-        })
-}
-
-/// Turn a non-zero exit into the failure it is, in git's own words.
-fn judge(doing: &str, output: &Output, scrub: impl FnOnce(&str) -> String) -> Result<(), GitError> {
+        })?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
     Err(GitError::Refused {
         doing: doing.to_owned(),
@@ -525,7 +670,10 @@ mod tests {
         let workspace = into.path().join("workspace");
         clone_at(origin, "main", &workspace).expect("the seeded repo should clone");
         create_branch(&workspace, CHAT_BRANCH).expect("the chat branch should be cut");
-        run(&workspace, &["config", "user.email", "agent@example.invalid"]);
+        run(
+            &workspace,
+            &["config", "user.email", "agent@example.invalid"],
+        );
         run(&workspace, &["config", "user.name", "Agent"]);
         (into, workspace)
     }
