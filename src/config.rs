@@ -281,6 +281,27 @@ mod tests {
         );
     }
 
+    /// A core in a container reads the dataset through its own mount, but
+    /// the sibling daemon binds the host's name for it (ADR-0001).
+    #[test]
+    fn the_host_side_dataset_root_defaults_to_the_one_the_core_reads() {
+        let on_the_host =
+            Config::from_vars(required_vars()).expect("an uncontainerised core should load");
+        let containerised = with(&[
+            ("CORCODE_DATA_DIR", "/data"),
+            ("CORCODE_HOST_DATA_DIR", "/mnt/tank/corcode"),
+        ])
+        .expect("a containerised core should load");
+
+        assert_eq!(on_the_host.host_data_dir, on_the_host.data_dir);
+        assert_eq!(containerised.data_dir, Path::new("/data"));
+        assert_eq!(
+            containerised.host_data_dir,
+            Path::new("/mnt/tank/corcode"),
+            "the daemon would have been handed the core's own mount point"
+        );
+    }
+
     #[test]
     fn the_tokens_are_optional() {
         let config =

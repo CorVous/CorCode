@@ -414,6 +414,36 @@ mod tests {
         assert_eq!(titles, ["fresh", "middling", "stale"]);
     }
 
+    /// A containerised core reads the dataset through a mount of its own,
+    /// but the sibling daemon it asks for containers only knows the host's
+    /// name for the same directories (ADR-0001).
+    #[test]
+    fn a_mounted_dataset_reads_through_its_own_path_and_binds_the_hosts() {
+        let store = ChatStore::mounted("/data", "/mnt/tank/corcode");
+
+        assert_eq!(store.workspace_dir("01K1CHAT"), Path::new("/data/workspaces/01K1CHAT"));
+        assert_eq!(store.claude_dir("01K1CHAT"), Path::new("/data/chats/01K1CHAT/claude"));
+        assert_eq!(
+            store.host_workspace_dir("01K1CHAT"),
+            Path::new("/mnt/tank/corcode/workspaces/01K1CHAT")
+        );
+        assert_eq!(
+            store.host_claude_dir("01K1CHAT"),
+            Path::new("/mnt/tank/corcode/chats/01K1CHAT/claude")
+        );
+    }
+
+    #[test]
+    fn a_dataset_the_core_reads_at_its_own_name_binds_that_same_name() {
+        let store = ChatStore::new("/mnt/tank/corcode");
+
+        assert_eq!(
+            store.host_workspace_dir("01K1CHAT"),
+            store.workspace_dir("01K1CHAT")
+        );
+        assert_eq!(store.host_claude_dir("01K1CHAT"), store.claude_dir("01K1CHAT"));
+    }
+
     #[test]
     fn the_working_trees_on_disk_are_listed_for_the_sweep_to_read() {
         let (_root, store) = store();

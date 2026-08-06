@@ -260,6 +260,58 @@ async fn a_chat_cannot_be_created_from_another_origin() {
     app.stop().await;
 }
 
+/// The core writes the dataset through whatever it has mounted, but the
+/// sibling daemon only knows the host's name for the same directories
+/// (ADR-0001): a bind carrying the core's own mount point would hand the
+/// agent an empty workspace.
+#[tokio::test]
+async fn a_containerised_core_hands_the_daemon_the_hosts_own_paths() {
+    let host_root = Path::new("/mnt/tank/corcode");
+    let app = TestApp::start_reading_the_dataset_at(Some(host_root)).await;
+
+    let response = app
+        .create(&[
+            ("repo", REPO),
+            ("base_branch", "main"),
+            ("slug", "mounted"),
+        ])
+        .await;
+
+    let chat_id = chat_id_of(&response);
+    let mounts = app
+        .plane
+        .mounts_of(&chat_id)
+        .expect("the new chat should hold a container");
+    assert_eq!(mounts.workspace, host_root.join("workspaces").join(&chat_id));
+    assert_eq!(
+        mounts.claude,
+        host_root.join("chats").join(&chat_id).join("claude")
+    );
+    assert!(
+        app.workspace(&chat_id).join("README.md").is_file(),
+        "the core stopped writing through its own mount"
+    );
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_core_on_the_host_binds_the_very_paths_it_reads_itself() {
+    let app = TestApp::start().await;
+
+    let response = app
+        .create(&[("repo", REPO), ("base_branch", "main"), ("slug", "on-box")])
+        .await;
+
+    let chat_id = chat_id_of(&response);
+    let mounts = app
+        .plane
+        .mounts_of(&chat_id)
+        .expect("the new chat should hold a container");
+    assert_eq!(mounts.workspace, app.workspace(&chat_id));
+    assert_eq!(mounts.claude, app.chat_dir(&chat_id).join("claude"));
+    app.stop().await;
+}
+
 /// The chat id the redirect points a browser at.
 fn chat_id_of(response: &reqwest::Response) -> String {
     let location = response
@@ -291,6 +343,7 @@ fn head_of(workspace: &Path) -> String {
 struct TestApp {
     address: SocketAddr,
     cookie: String,
+    plane: MemoryPlane,
     shutdown: oneshot::Sender<()>,
     server: JoinHandle<anyhow::Result<()>>,
     data_dir: TempDir,
@@ -299,19 +352,29 @@ struct TestApp {
 
 impl TestApp {
     async fn start() -> Self {
+        Self::start_reading_the_dataset_at(None).await
+    }
+
+    /// The app over a dataset the sibling daemon knows by `host_data_dir`,
+    /// which is the core's own path unless the core is containerised.
+    async fn start_reading_the_dataset_at(host_data_dir: Option<&Path>) -> Self {
         let data_dir = TempDir::new().expect("temp dir should be creatable");
         let (origin, remotes) = seeded_repository();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("ephemeral port should bind");
         let address = listener.local_addr().expect("listener reports its address");
-        let config = test_config(data_dir.path().to_path_buf());
+        let config = test_config(
+            data_dir.path().to_path_buf(),
+            host_data_dir.map_or_else(|| data_dir.path().to_path_buf(), Path::to_path_buf),
+        );
         ChatStore::new(data_dir.path())
             .prepare()
             .expect("the dataset should prepare, as serving does");
+        let plane = MemoryPlane::default();
         let chats = Chats::new(
             &config,
-            MemoryPlane::default(),
+            plane.clone(),
             ScriptedAdapter::opening(SESSION),
             remotes,
         );
@@ -324,6 +387,7 @@ impl TestApp {
         Self {
             address,
             cookie,
+            plane,
             shutdown,
             server,
             data_dir,
@@ -467,9 +531,10 @@ async fn sign_in(address: SocketAddr) -> String {
         .to_owned()
 }
 
-fn test_config(data_dir: PathBuf) -> Config {
+fn test_config(data_dir: PathBuf, host_data_dir: PathBuf) -> Config {
     Config {
         data_dir,
+        host_data_dir,
         bind_addr: "127.0.0.1:0".parse().expect("valid address"),
         username: USERNAME.to_owned(),
         password_hash: password_hash(PASSWORD),

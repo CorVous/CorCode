@@ -161,6 +161,7 @@ impl Dataset {
 fn config(data_dir: &Path) -> Config {
     Config {
         data_dir: data_dir.to_path_buf(),
+        host_data_dir: data_dir.to_path_buf(),
         bind_addr: "127.0.0.1:0".parse().expect("valid address"),
         username: "cassidy".to_owned(),
         password_hash: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".to_owned(),
