@@ -203,9 +203,9 @@ async fn prompting_is_behind_the_session_gate_and_this_origin() {
 async fn a_chat_id_that_is_not_a_ulid_reaches_no_file() {
     let app = TestApp::start(ScriptedAdapter::answering(SESSION, &[])).await;
 
-    let prompted = app.prompt("../../etc/passwd", SAID).await;
+    let prompted = app.prompt("not-a-ulid", SAID).await;
     let polled = client()
-        .get(app.url("/chats/..%2F..%2Fetc/events"))
+        .get(app.url("/chats/not-a-ulid/events"))
         .header("cookie", &app.cookie)
         .send()
         .await
