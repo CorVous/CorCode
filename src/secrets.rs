@@ -191,7 +191,10 @@ impl Secrets {
     }
 
     /// The value in force for `secret` and where it came from: what was last
-    /// written for it, else what the environment bootstrapped.
+    /// written for it, else what the environment bootstrapped. Neither
+    /// carries the whitespace around it — a variable quoted by hand in a
+    /// compose file keeps what the quoting left, and a prefix that is not at
+    /// the front reads as the wrong kind of credential.
     fn in_force(&self, secret: Secret) -> Result<Option<(Source, String)>, SecretsError> {
         if let Some(written) = self.written(secret)? {
             return Ok(Some((Source::Settings, written)));
@@ -199,7 +202,7 @@ impl Secrets {
         Ok(self
             .from_env
             .get(&secret)
-            .map(|value| (Source::Environment, value.clone())))
+            .map(|value| (Source::Environment, value.trim().to_owned())))
     }
 
     /// Put `value` in force for every read after this one, without the
