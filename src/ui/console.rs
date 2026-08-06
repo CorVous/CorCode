@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn an_empty_dataset_still_renders_every_group() {
-        let rendered = console_page(&[], IMAGE, &repos(), POOL);
+        let rendered = console_page(&[], &status(), &repos());
 
         for status in [
             RuntimeStatus::Live,
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn the_status_line_reports_the_configured_pool_size_the_parked_count_and_the_image_tag() {
-        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
+        let rendered = console_page(&every_state(), &status(), &repos());
 
         assert!(
             rendered.contains("<summary>pool 1/3 · parked 1 · img 2026-08-05 · sweep ok</summary>"),
@@ -308,8 +308,102 @@ mod tests {
     }
 
     #[test]
+    fn the_status_line_polls_itself_while_the_console_is_open() {
+        let fragment = status_line(&status());
+
+        assert!(
+            fragment.starts_with("<section id=\"status\""),
+            "the status line is not a fragment htmx can swap: {fragment}"
+        );
+        assert!(
+            fragment.contains(&format!("hx-get=\"{STATUS_PATH}\""))
+                && fragment.contains("hx-trigger=\"every 5s\""),
+            "the status line does not poll itself: {fragment}"
+        );
+        assert!(
+            console_page(&every_state(), &status(), &repos()).contains(&fragment),
+            "the console and the fragment render the status differently"
+        );
+    }
+
+    #[test]
+    fn the_expanded_picture_names_every_slot_the_parked_count_the_image_and_the_sweep() {
+        let fragment = status_line(&Status {
+            pool: vec![
+                slot("running", TimeDelta::minutes(3)),
+                slot("waiting", TimeDelta::hours(2)),
+            ],
+            sweep: Some(Sweep {
+                orphaned: vec!["01K1ORPHAN".to_owned()],
+                held: Vec::new(),
+            }),
+            ..status()
+        });
+
+        assert!(
+            fragment.contains("running · 3m") && fragment.contains("waiting · 2h"),
+            "the slots do not carry their idle times: {fragment}"
+        );
+        assert!(fragment.contains(IMAGE), "the pinned image is missing: {fragment}");
+        assert!(
+            fragment.contains("01K1ORPHAN"),
+            "the sweep does not name what it removed: {fragment}"
+        );
+    }
+
+    #[test]
+    fn an_empty_pool_says_so_rather_than_showing_nothing() {
+        let fragment = status_line(&Status {
+            pool: Vec::new(),
+            ..status()
+        });
+
+        assert!(
+            fragment.contains("no containers running"),
+            "an empty pool renders as a blank: {fragment}"
+        );
+    }
+
+    #[test]
+    fn an_idle_time_reads_in_the_largest_unit_it_fills() {
+        for (idle, reads) in [
+            (TimeDelta::seconds(4), "4s"),
+            (TimeDelta::seconds(59), "59s"),
+            (TimeDelta::minutes(3), "3m"),
+            (TimeDelta::hours(2), "2h"),
+            (TimeDelta::hours(26), "1d"),
+        ] {
+            assert_eq!(idle_for(idle), reads);
+        }
+    }
+
+    /// A clock that has slipped backwards is not a chat from the future.
+    #[test]
+    fn an_idle_time_that_ran_backwards_reads_as_no_time_at_all() {
+        assert_eq!(idle_for(TimeDelta::seconds(-30)), "0s");
+    }
+
+    fn slot(title: &str, idle: TimeDelta) -> Slot {
+        Slot {
+            title: title.to_owned(),
+            idle,
+        }
+    }
+
+    /// A pool holding the one live chat of [`every_state`], swept clean.
+    fn status() -> Status {
+        Status {
+            pool: vec![slot("running", TimeDelta::zero())],
+            warm_pool: POOL,
+            parked: 1,
+            image: IMAGE.to_owned(),
+            sweep: Some(Sweep::default()),
+        }
+    }
+
+    #[test]
     fn the_new_chat_form_offers_the_repositories_this_deployment_was_given() {
-        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
+        let rendered = console_page(&every_state(), &status(), &repos());
 
         assert!(
             rendered
@@ -324,7 +418,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_previews_the_branch_it_would_cut() {
-        let rendered = console_page(&[], IMAGE, &repos(), POOL);
+        let rendered = console_page(&[], &status(), &repos());
         let today = Utc::now().format("%Y-%m-%d");
 
         assert!(
@@ -335,7 +429,7 @@ mod tests {
 
     #[test]
     fn the_branch_preview_slugifies_what_you_type() {
-        let rendered = console_page(&[], IMAGE, &repos(), POOL);
+        let rendered = console_page(&[], &status(), &repos());
 
         assert!(
             rendered.contains("toLowerCase()") && rendered.contains("[^a-z0-9]+"),
@@ -345,7 +439,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_posts_itself_to_the_chats_path() {
-        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
+        let rendered = console_page(&every_state(), &status(), &repos());
 
         assert!(
             rendered.contains(&format!("<form method=\"post\" action=\"{CHATS_PATH}\">")),
@@ -359,7 +453,7 @@ mod tests {
 
     #[test]
     fn the_chat_list_refreshes_itself_through_htmx() {
-        let rendered = console_page(&[], IMAGE, &repos(), POOL);
+        let rendered = console_page(&[], &status(), &repos());
 
         assert!(
             rendered.contains(&format!("src=\"{}\"", super::super::HTMX_PATH)),

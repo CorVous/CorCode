@@ -134,9 +134,14 @@ mod tests {
     fn the_console_styles_itself_only_from_the_stylesheet() {
         assert_styling_is_only_the_stylesheet(&console_page(
             &[],
-            "ghcr.io/corvous/x:2026-08-05",
+            &Status {
+                pool: Vec::new(),
+                warm_pool: 2,
+                parked: 0,
+                image: "ghcr.io/corvous/x:2026-08-05".to_owned(),
+                sweep: None,
+            },
             &["CorVous/CorCode".to_owned()],
-            2,
         ));
     }
 
