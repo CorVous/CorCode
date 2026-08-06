@@ -226,7 +226,7 @@ fn judge(doing: &str, output: &Output, scrub: impl FnOnce(&str) -> String) -> Re
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use tempfile::TempDir;
@@ -402,6 +402,141 @@ mod tests {
 
     const REPO: &str = "CorVous/fixture";
     const BARE: &str = "CorVous/fixture.git";
+    const CHAT_BRANCH: &str = "chat/2026-08-05-archived";
+
+    #[test]
+    fn a_checkpoint_branch_is_stamped_to_the_minute() {
+        let stamp = Utc::now().format("%Y%m%dT%H%M");
+
+        assert_eq!(
+            checkpoint_branch(CHAT_BRANCH),
+            format!("{CHAT_BRANCH}-chkpt-{stamp}")
+        );
+    }
+
+    #[test]
+    fn a_clean_workspace_pushes_its_branch_and_cuts_no_checkpoint() {
+        let (origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let semantic = commit_in(&workspace, "third.txt", "the agent's own commit");
+
+        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect("a clean workspace should push");
+
+        assert_eq!(pushed.checkpoint_branch, None);
+        assert_eq!(pushed.tip, semantic);
+        assert_eq!(
+            git_says(&origin_dir.path().join(BARE), &["rev-parse", CHAT_BRANCH]),
+            semantic,
+            "the chat branch did not reach the remote"
+        );
+    }
+
+    #[test]
+    fn a_dirty_workspace_checkpoints_onto_a_branch_of_its_own() {
+        let (origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let semantic = commit_in(&workspace, "third.txt", "the agent's own commit");
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+        let bare = origin_dir.path().join(BARE);
+
+        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect("a dirty workspace should push");
+
+        let checkpoint = pushed
+            .checkpoint_branch
+            .expect("a dirty tree should cut a checkpoint branch");
+        assert!(
+            checkpoint.starts_with(&format!("{CHAT_BRANCH}-chkpt-")),
+            "the checkpoint branch is not named after the chat's: {checkpoint}"
+        );
+        assert_eq!(
+            pushed.tip, semantic,
+            "the chat branch left the agent's last semantic commit"
+        );
+        assert_eq!(git_says(&bare, &["rev-parse", CHAT_BRANCH]), semantic);
+        assert_eq!(
+            git_says(&bare, &["show", &format!("{checkpoint}:scratch.txt")]),
+            "work in flight",
+            "the dirty state never reached the remote"
+        );
+        assert_eq!(
+            git_says(&bare, &["log", "-1", "--format=%cn <%ce>", &checkpoint]),
+            "CorCode core <corcode@local>",
+            "the checkpoint was committed as somebody else"
+        );
+    }
+
+    #[test]
+    fn a_push_that_fails_leaves_the_workspace_as_it_was() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        commit_in(&workspace, "third.txt", "the agent's own commit");
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+        let unreachable = Remotes::new("file:///nowhere/at/all", None);
+
+        let error = push_for_archive(&unreachable.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect_err("a push to nowhere should fail");
+
+        assert!(
+            format!("{error}").contains("push"),
+            "error should say what it was doing, got: {error}"
+        );
+        assert_eq!(
+            git_says(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            CHAT_BRANCH,
+            "the workspace was left standing somewhere else"
+        );
+        assert_eq!(
+            git_says(&workspace, &["status", "--porcelain"]),
+            "?? scratch.txt",
+            "the work the operator can still retry from was swallowed"
+        );
+        assert_eq!(
+            git_says(&workspace, &["branch", "--list", "*chkpt*"]),
+            "",
+            "an unpushed checkpoint branch was left where the next try will not find it"
+        );
+    }
+
+    #[test]
+    fn the_gate_leaves_no_credential_behind_in_the_workspace() {
+        let (_origin_dir, origin) = credentialed_repository();
+        let (_into, workspace) = chat_workspace(&origin);
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+
+        push_for_archive(&origin, &workspace, CHAT_BRANCH).expect("a credentialed push should go");
+
+        let config = std::fs::read_to_string(workspace.join(".git").join("config"))
+            .expect("a clone writes a config");
+        assert!(
+            !config.contains(TOKEN),
+            "the token was left where the agent can read it: {config}"
+        );
+    }
+
+    /// A cloned workspace standing on its chat branch, ready to commit as the
+    /// agent would.
+    fn chat_workspace(origin: &Origin) -> (TempDir, PathBuf) {
+        let into = TempDir::new().expect("clone target should be created");
+        let workspace = into.path().join("workspace");
+        clone_at(origin, "main", &workspace).expect("the seeded repo should clone");
+        create_branch(&workspace, CHAT_BRANCH).expect("the chat branch should be cut");
+        run(&workspace, &["config", "user.email", "agent@example.invalid"]);
+        run(&workspace, &["config", "user.name", "Agent"]);
+        (into, workspace)
+    }
+
+    /// One agent-authored commit, answering with the sha it landed on.
+    fn commit_in(workspace: &Path, file: &str, message: &str) -> String {
+        std::fs::write(workspace.join(file), message).expect("a file should be writable");
+        run(workspace, &["add", "."]);
+        run(workspace, &["commit", "-m", message]);
+        git_says(workspace, &["rev-parse", "HEAD"])
+    }
 
     /// A bare repository with two commits on `main`, reachable over `file://`
     /// so that no test needs the network.
