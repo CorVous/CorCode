@@ -132,7 +132,8 @@ where
     /// they will talk over. A step that fails leaves what came before it on
     /// disk for the operator to look at (ADR-0007 rule 5).
     pub async fn create(&self, wanted: WantedChat) -> Result<String, CreateError> {
-        let slug = git::slugify(&wanted.slug);
+        let typed = wanted.slug.trim();
+        let slug = git::slugify(typed);
         if slug.is_empty() {
             return Err(CreateError::Unnamed);
         }
@@ -152,7 +153,7 @@ where
         let manifest = self
             .store
             .create_chat(NewChat {
-                title: slug,
+                title: typed.to_owned(),
                 repo: wanted.repo.clone(),
                 branch: branch.clone(),
                 base_branch: wanted.base_branch.clone(),
