@@ -13,9 +13,8 @@ pub fn run() -> Result<()> {
     hash_stdin(io::stdin().lock(), &mut io::stdout())
 }
 
-fn hash_stdin(input: impl BufRead, output: &mut impl Write) -> Result<()> {
+fn hash_stdin(mut input: impl BufRead, output: &mut impl Write) -> Result<()> {
     let mut typed = String::new();
-    let mut input = input;
     input
         .read_line(&mut typed)
         .context("the password could not be read from stdin")?;
