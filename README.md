@@ -40,6 +40,7 @@ Serving (the default action) reads its configuration from the environment:
 | `CORCODE_PASSWORD_HASH`     | yes      | -              |
 | `CORCODE_WORKSPACE_IMAGE`   | yes      | -              |
 | `CORCODE_REPOS`             | yes      | -              |
+| `CORCODE_HOST_DATA_DIR`     | no       | `CORCODE_DATA_DIR` |
 | `CORCODE_BIND_ADDR`         | no       | `0.0.0.0:8080` |
 | `CORCODE_CONTAINER_MEMORY_MB` | no     | `4096`         |
 | `CORCODE_CONTAINER_CPUS`    | no       | `2`            |
@@ -55,6 +56,13 @@ repositories and pushes at archive; `CORCODE_ANTHROPIC_API_KEY` reaches the
 agent as `ANTHROPIC_API_KEY`. `CORCODE_WARM_POOL` is how many chats keep a
 container: the rest are parked, workspaces kept. A chat taking a turn keeps
 its container until the turn ends, so the pool can sit one over its size.
+
+`CORCODE_HOST_DATA_DIR` is the dataset root as the Docker daemon sees it,
+which differs from `CORCODE_DATA_DIR` when the core is itself containerised:
+agent containers are siblings, so their binds resolve against the host. Set
+it to the host path bound into the core, and leave it unset anywhere else.
+
+Deploying on TrueNAS: [`deploy/README.md`](deploy/README.md).
 
 ## Development
 
