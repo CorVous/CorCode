@@ -1,7 +1,7 @@
 //! `hash-password` subcommand — turn a password into the hash
 //! `CORCODE_PASSWORD_HASH` wants (ADR-0003).
 
-use std::io::{self, IsTerminal as _, Write};
+use std::io::{self, BufRead, IsTerminal as _, Write};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -20,8 +20,12 @@ fn read_password() -> io::Result<String> {
     if io::stdin().is_terminal() {
         rpassword::read_password()
     } else {
-        rpassword::read_password_from_bufread(&mut io::stdin().lock())
+        read_piped(&mut io::stdin().lock())
     }
+}
+
+fn read_piped(input: &mut impl BufRead) -> io::Result<String> {
+    rpassword::read_password_from_bufread(input)
 }
 
 fn print_hash(password: &str, output: &mut impl Write) -> Result<()> {
@@ -58,6 +62,22 @@ mod tests {
             !printed.contains(PASSWORD),
             "the password itself was printed: {printed}"
         );
+    }
+
+    #[test]
+    fn a_pipe_that_closes_ends_the_password_as_surely_as_a_newline() {
+        let read = read_piped(&mut PASSWORD.as_bytes()).expect("a closed pipe should end the line");
+
+        assert_eq!(read, PASSWORD);
+    }
+
+    #[test]
+    fn a_password_piped_in_as_a_whole_line_arrives_without_its_newline() {
+        let line = format!("{PASSWORD}\n");
+
+        let read = read_piped(&mut line.as_bytes()).expect("a whole line should read");
+
+        assert_eq!(read, PASSWORD);
     }
 
     #[test]
