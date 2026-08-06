@@ -158,7 +158,7 @@ The archive gate puts a dirty working tree on a branch of its own (ADR-0005),
 and the manifest is the only record of which one:
 
 ```json
-{"checkpoint_branch": "chat/2026-08-05-persistence-chkpt-20260805T1420"}
+{"checkpoint_branch": "chat/2026-08-05-persistence-chkpt-20260805T142033"}
 ```
 
 It is optional and read with a default: a chat archived before this field
@@ -167,6 +167,19 @@ Nothing has to be migrated and no reader has to know two schemas, so `schema`
 stays `1`. A field that *changed* the meaning of what is already on disk would
 not get this treatment — the version is for readers that would otherwise
 misread a file, not for every addition.
+
+The compatibility runs one way only. Manifests are read with
+`deny_unknown_fields`, so a binary from before this field that meets a
+manifest carrying it fails the read — and because the console scans the whole
+of `chats/`, that failure takes the console with it rather than one chat
+(ADR-0007 rule 5: no skipping). Rolling a deployment back past this change
+means rolling the dataset back with it.
+
+The stamp is `yyyymmddTHHMMSS` in UTC. Seconds and not minutes: a push the
+remote refuses is retried straight away, and two archives in one minute must
+not name the same branch — the second push would be refused as a
+non-fast-forward and the retry would fail for a reason that has nothing to do
+with what went wrong the first time.
 
 ## Consequences
 

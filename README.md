@@ -52,7 +52,8 @@ Serving (the default action) reads its configuration from the environment:
 offers, first entry the default. `CORCODE_GITHUB_TOKEN` clones private
 repositories and pushes at archive; `CORCODE_ANTHROPIC_API_KEY` reaches the
 agent as `ANTHROPIC_API_KEY`. `CORCODE_WARM_POOL` is how many chats keep a
-container: the rest are parked, workspaces kept.
+container: the rest are parked, workspaces kept. A chat taking a turn keeps
+its container until the turn ends, so the pool can sit one over its size.
 
 ## Development
 

@@ -42,6 +42,19 @@ workspace is about to be destroyed.
 - **In-session push failure**: agent reports it in chat and continues; the
   next turn's nudge retries naturally. No core-side retry machinery.
 
+## Amendment (2026-08-05): what "clean" means, and how the stamp is spelled
+
+"A clean tree makes no branch" was written with a workspace standing on its
+chat branch in mind. An agent that wanders — a detached rebase, a stray
+`checkout -b` it never merged — leaves commits the chat branch does not carry
+and the archive would delete unpushed. So the gate checkpoints a clean tree
+too whenever HEAD is not on the chat branch, and the rule reads: everything
+the chat branch does not already carry goes onto the checkpoint branch.
+
+The stamp is to the second (`-chkpt-20260805T214033`), not the minute: a
+refused push is retried immediately, and a retry within the same minute would
+otherwise name a branch the remote already has.
+
 ## Consequences
 
 - Chat branches carry only agent-authored semantic commits; mechanical

@@ -53,6 +53,13 @@ box can hold more warm chats without a new decision. The order is the
 manifest's `last_active_at`, written once per completed turn (ADR-0006), and
 the cap is enforced after each spawn and each turn.
 
+A turn in flight outranks the cap. `last_active_at` is written when a turn
+ends, so the chat that has been answering longest reads as the stalest chat
+there is, and parking it would kill the agent mid-sentence. A chat holding its
+connection keeps its container, and the pool runs over its cap for as long as
+that turn does. The same lock refuses the archive gate: rule 3's commit and
+teardown must never happen under an agent writing into the tree.
+
 Rule 4 gets one exception. A workspace dir no open chat claims but whose
 container is still up is a contradiction the sweep cannot resolve by
 deleting: pulling the tree out from under a running agent destroys work that
