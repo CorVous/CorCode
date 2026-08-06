@@ -70,7 +70,10 @@ async fn a_chat_cut_and_archived_over_a_written_token_leaves_no_credential_behin
     let chat = dataset.create("archived").await;
     let cloned = fs::read_to_string(dataset.workspace(&chat).join(".git").join("config"))
         .expect("a clone writes a config");
-    assert!(!cloned.contains(TOKEN), "the token was left behind: {cloned}");
+    assert!(
+        !cloned.contains(TOKEN),
+        "the token was left behind: {cloned}"
+    );
 
     dataset.write(Secret::GithubToken, ROTATED_TOKEN);
     dataset.archive(&chat).await.expect("a clean chat archives");

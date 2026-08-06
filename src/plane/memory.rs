@@ -28,6 +28,7 @@ pub struct MemoryPlane {
 struct Spawned {
     container: ContainerRef,
     mounts: Mounts,
+    env: BTreeMap<String, String>,
 }
 
 impl ContainerPlane for MemoryPlane {
@@ -36,7 +37,7 @@ impl ContainerPlane for MemoryPlane {
         chat_id: &str,
         workspace_dir: &Path,
         claude_dir: &Path,
-        _env: &BTreeMap<String, String>,
+        env: &BTreeMap<String, String>,
     ) -> Result<ContainerRef, PlaneError> {
         let spawned = Spawned {
             container: ContainerRef::new(chat_id, format!("in-memory-{chat_id}")),
@@ -44,6 +45,7 @@ impl ContainerPlane for MemoryPlane {
                 workspace: workspace_dir.to_path_buf(),
                 claude: claude_dir.to_path_buf(),
             },
+            env: env.clone(),
         };
         match self.live().entry(chat_id.to_owned()) {
             Entry::Occupied(_) => Err(PlaneError::AlreadyLive {
@@ -75,6 +77,13 @@ impl MemoryPlane {
         self.live()
             .get(chat_id)
             .map(|spawned| spawned.mounts.clone())
+    }
+
+    /// What a live chat's container was spawned with, or nothing if the chat
+    /// holds no container.
+    #[must_use]
+    pub fn env_of(&self, chat_id: &str) -> Option<BTreeMap<String, String>> {
+        self.live().get(chat_id).map(|spawned| spawned.env.clone())
     }
 
     fn live(&self) -> MutexGuard<'_, HashMap<String, Spawned>> {

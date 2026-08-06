@@ -2,6 +2,7 @@
 //! (ADR-0005, ADR-0006).
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -16,6 +17,7 @@ use crate::git::{self, Remotes};
 use crate::plane::{ContainerPlane, container_name};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
+use crate::secrets::{Secret, Secrets, SecretsError};
 use crate::status::{Slot, Status};
 use crate::store::{
     ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, RuntimeStatus,
@@ -197,8 +199,8 @@ pub struct Chats<P, T: AcpTransport> {
     adapter: Adapter<T>,
     connections: Connections<T::Channel>,
     remotes: Remotes,
+    secrets: Arc<Secrets>,
     repos: Vec<String>,
-    anthropic_api_key: Option<String>,
     workspace_image: String,
     warm_pool: usize,
     parking: ParkingLock,
@@ -208,16 +210,23 @@ pub struct Chats<P, T: AcpTransport> {
 
 impl<P, T: AcpTransport + Sync> Chats<P, T> {
     /// Serve the dataset `config` names, over `plane` and the adapters
-    /// `transport` reaches, from the repositories `remotes` holds.
-    pub fn new(config: &Config, plane: P, transport: T, remotes: Remotes) -> Self {
+    /// `transport` reaches, from the repositories `remotes` holds, on the
+    /// credentials `secrets` holds.
+    pub fn new(
+        config: &Config,
+        plane: P,
+        transport: T,
+        remotes: Remotes,
+        secrets: Arc<Secrets>,
+    ) -> Self {
         Self {
             store: ChatStore::mounted(&config.data_dir, &config.host_data_dir),
             plane,
             adapter: Adapter::new(transport),
             connections: Connections::default(),
             remotes,
+            secrets,
             repos: config.repos.clone(),
-            anthropic_api_key: config.anthropic_api_key.clone(),
             workspace_image: config.workspace_image.clone(),
             warm_pool: config.warm_pool,
             parking: ParkingLock::default(),
@@ -431,7 +440,8 @@ where
             return Err(ArchiveError::AlreadyArchived);
         }
         let _turn = self.idle(&chat_id)?;
-        let pushed = match self.push_everything(&manifest).await {
+        let origin = self.origin(&manifest.repo).map_err(unarchived)?;
+        let pushed = match self.push_everything(origin, &manifest).await {
             Ok(pushed) => pushed,
             Err(failure) => {
                 self.note(&chat_id, PUSH_FAILURE, &half_pushed(&failure));
@@ -517,10 +527,21 @@ where
         ))
     }
 
+    /// Where one of this deployment's repositories is reached, over the
+    /// credential as it stands right now: a token rotated since the last
+    /// operation is the one this operation goes out on.
+    fn origin(&self, repo: &str) -> Result<git::Origin, SecretsError> {
+        let token = self.secrets.read(Secret::GithubToken)?;
+        Ok(self.remotes.origin(repo, token.as_deref()))
+    }
+
     /// Get the chat's workspace onto the remote, whole. Git blocks, so it
     /// runs off the runtime.
-    async fn push_everything(&self, manifest: &Manifest) -> Result<git::Pushed, git::PushFailure> {
-        let origin = self.remotes.origin(&manifest.repo);
+    async fn push_everything(
+        &self,
+        origin: git::Origin,
+        manifest: &Manifest,
+    ) -> Result<git::Pushed, git::PushFailure> {
         let workspace = self.store.workspace_dir(&manifest.chat_id);
         let branch = manifest.branch.clone();
         tokio::task::spawn_blocking(move || git::push_for_archive(&origin, &workspace, &branch))
@@ -702,7 +723,7 @@ where
             Ok(standing_at) => standing_at,
             Err(failure) => {
                 self.wipe_the_half_clone(&manifest.chat_id);
-                return Err(failure.into());
+                return Err(failure);
             }
         };
         let revived = Manifest {
@@ -730,14 +751,16 @@ where
 
     /// Clone the chat's branch back into its workspace at `commit`. Git
     /// blocks, so it runs off the runtime.
-    async fn clone_back(&self, manifest: &Manifest, commit: &str) -> Result<String, git::GitError> {
-        let origin = self.remotes.origin(&manifest.repo);
+    async fn clone_back(&self, manifest: &Manifest, commit: &str) -> Result<String> {
+        let origin = self.origin(&manifest.repo)?;
         let workspace = self.store.workspace_dir(&manifest.chat_id);
         let branch = manifest.branch.clone();
         let commit = commit.to_owned();
-        tokio::task::spawn_blocking(move || git::revive_at(&origin, &branch, &commit, &workspace))
-            .await
-            .expect("the git task should not panic")
+        Ok(tokio::task::spawn_blocking(move || {
+            git::revive_at(&origin, &branch, &commit, &workspace)
+        })
+        .await
+        .expect("the git task should not panic")?)
     }
 
     /// The container this chat's adapter is reached in. One that is still up
@@ -853,7 +876,7 @@ where
         wanted: &WantedChat,
         branch: &str,
     ) -> Result<(), CreateError> {
-        let origin = self.remotes.origin(&wanted.repo);
+        let origin = self.origin(&wanted.repo).map_err(broke)?;
         let workspace = self.store.workspace_dir(chat_id);
         let base_branch = wanted.base_branch.clone();
         let to_cut = (!wanted.direct_on_base).then(|| branch.to_owned());
@@ -870,8 +893,8 @@ where
     /// answering with the container's name.
     async fn spawn(&self, chat_id: &str) -> Result<String> {
         let mut env = BTreeMap::new();
-        if let Some(key) = &self.anthropic_api_key {
-            env.insert(API_KEY.to_owned(), key.clone());
+        if let Some(key) = self.secrets.read(Secret::AnthropicKey)? {
+            env.insert(API_KEY.to_owned(), key);
         }
         Ok(self
             .plane

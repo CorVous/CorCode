@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -15,6 +16,7 @@ use cor_code::chats::{Chats, PromptError, WantedChat};
 use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
 use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
+use cor_code::secrets::Secrets;
 use cor_code::store::{ChatStore, RuntimeStatus};
 use cor_code::ui;
 
@@ -465,7 +467,13 @@ impl Dataset {
         ChatStore::new(data_dir.path())
             .prepare()
             .expect("the dataset should prepare, as serving does");
-        let chats = Chats::new(&config, MemoryPlane::default(), adapter.clone(), remotes);
+        let chats = Chats::new(
+            &config,
+            MemoryPlane::default(),
+            adapter.clone(),
+            remotes,
+            Arc::new(Secrets::from_config(&config)),
+        );
         Self {
             chats,
             adapter,
@@ -691,7 +699,7 @@ fn seeded_repository() -> (TempDir, Remotes) {
     says(&work, &["remote", "add", "origin", &spelled(&bare)]);
     says(&work, &["push", "origin", "main"]);
     let served_from = format!("file://{}", spelled(dir.path()));
-    (dir, Remotes::new(served_from, None))
+    (dir, Remotes::new(served_from))
 }
 
 fn spelled(path: &Path) -> String {

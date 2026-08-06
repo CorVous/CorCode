@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use argon2::password_hash::{PasswordHasher as _, SaltString};
@@ -25,6 +26,7 @@ use cor_code::config::{
 };
 use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
+use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::store::ChatStore;
 
@@ -409,7 +411,13 @@ impl TestApp {
         ChatStore::new(data_dir.path())
             .prepare()
             .expect("the dataset should prepare, as serving does");
-        let chats = Chats::new(&config, MemoryPlane::default(), adapter, remotes);
+        let chats = Chats::new(
+            &config,
+            MemoryPlane::default(),
+            adapter,
+            remotes,
+            Arc::new(Secrets::from_config(&config)),
+        );
         let router = server::router(&config, chats).expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {
@@ -616,7 +624,7 @@ fn seeded_repository() -> (TempDir, Remotes) {
     run(&work, &["remote", "add", "origin", &spelled(&bare)]);
     run(&work, &["push", "origin", "main"]);
     let served_from = format!("file://{}", spelled(dir.path()));
-    (dir, Remotes::new(served_from, None))
+    (dir, Remotes::new(served_from))
 }
 
 fn spelled(path: &Path) -> String {

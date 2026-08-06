@@ -29,35 +29,33 @@ const CORE_COMMITTER: (&str, &str) = ("CorCode core", "corcode@local");
 /// What that commit says it is.
 const CHECKPOINT_MESSAGE: &str = "Checkpoint uncommitted work at archive";
 
-/// The site the chats' repositories are cloned from, and the token that
-/// opens the private ones.
+/// The site the chats' repositories are cloned from.
 #[derive(Clone)]
 pub struct Remotes {
     base: String,
-    token: Option<String>,
 }
 
 impl Remotes {
     /// Serve `owner/name` repositories from under `base`, which is
     /// [`GITHUB`] in production and a directory of bare repositories in
     /// tests.
-    pub fn new(base: impl Into<String>, token: Option<String>) -> Self {
-        Self {
-            base: base.into(),
-            token,
-        }
+    pub fn new(base: impl Into<String>) -> Self {
+        Self { base: base.into() }
     }
 
-    /// Where one `owner/name` repository is cloned from. A token is put into
-    /// the URL only for https, so no local or ssh URL can carry one.
+    /// Where one `owner/name` repository is cloned from, over `token` if the
+    /// caller holds one. A token is put into the URL only for https, so no
+    /// local or ssh URL can carry one.
+    ///
+    /// The credential is the caller's to read for each operation rather than
+    /// this site's to keep, so a rotated one is in force for the next clone
+    /// or push (`crate::secrets`).
     #[must_use]
-    pub fn origin(&self, repo: &str) -> Origin {
+    pub fn origin(&self, repo: &str, token: Option<&str>) -> Origin {
         let base = &self.base;
-        let token = self
-            .token
-            .as_ref()
+        let token = token
             .filter(|_| base.starts_with("https://"))
-            .cloned();
+            .map(ToOwned::to_owned);
         let authority = token.as_ref().map_or_else(
             || base.clone(),
             |token| base.replacen("https://", &format!("https://{TOKEN_USER}:{token}@"), 1),
@@ -623,14 +621,14 @@ mod tests {
 
     #[test]
     fn a_clone_url_names_the_repository_on_github() {
-        let origin = Remotes::new(GITHUB, None).origin("CorVous/CorCode");
+        let origin = Remotes::new(GITHUB).origin("CorVous/CorCode", None);
 
         assert_eq!(origin.url(), "https://github.com/CorVous/CorCode.git");
     }
 
     #[test]
     fn a_token_rides_in_the_url_and_nowhere_else() {
-        let origin = Remotes::new(GITHUB, Some(TOKEN.to_owned())).origin("CorVous/CorCode");
+        let origin = Remotes::new(GITHUB).origin("CorVous/CorCode", Some(TOKEN));
 
         assert_eq!(
             origin.url(),
@@ -667,7 +665,7 @@ mod tests {
 
     #[test]
     fn whatever_git_says_comes_back_without_the_token() {
-        let origin = Remotes::new(GITHUB, Some(TOKEN.to_owned())).origin("CorVous/CorCode");
+        let origin = Remotes::new(GITHUB).origin("CorVous/CorCode", Some(TOKEN));
 
         let scrubbed = origin.scrub(&format!(
             "fatal: unable to access 'https://x-access-token:{TOKEN}@github.com/CorVous/CorCode.git/': 404"
@@ -683,7 +681,7 @@ mod tests {
         let into = TempDir::new().expect("clone target should be created");
         let dest = into.path().join("workspace");
 
-        clone_at(&remotes.origin(REPO), "main", &dest).expect("the seeded repo should clone");
+        clone_at(&remotes.origin(REPO, None), "main", &dest).expect("the seeded repo should clone");
 
         assert_eq!(
             git_says(&dest, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -725,7 +723,7 @@ mod tests {
         let into = TempDir::new().expect("clone target should be created");
         let dest = into.path().join("workspace");
 
-        let error = clone_at(&remotes.origin(REPO), "no-such-branch", &dest)
+        let error = clone_at(&remotes.origin(REPO, None), "no-such-branch", &dest)
             .expect_err("cloning a missing branch should fail");
 
         assert!(
@@ -739,7 +737,7 @@ mod tests {
         let (origin_dir, remotes) = seeded_repository();
         let into = TempDir::new().expect("clone target should be created");
         let dest = into.path().join("workspace");
-        clone_at(&remotes.origin(REPO), "main", &dest).expect("the seeded repo should clone");
+        clone_at(&remotes.origin(REPO, None), "main", &dest).expect("the seeded repo should clone");
 
         create_branch(&dest, "chat/2026-08-05-a-slug").expect("the chat branch should be cut");
 
@@ -762,7 +760,7 @@ mod tests {
         let (_origin_dir, remotes) = seeded_repository();
         let into = TempDir::new().expect("clone target should be created");
         let dest = into.path().join("workspace");
-        clone_at(&remotes.origin(REPO), "main", &dest).expect("the seeded repo should clone");
+        clone_at(&remotes.origin(REPO, None), "main", &dest).expect("the seeded repo should clone");
 
         let error =
             create_branch(&dest, "main").expect_err("cutting an existing branch should fail");
@@ -792,10 +790,10 @@ mod tests {
     #[test]
     fn a_clean_workspace_pushes_its_branch_and_cuts_no_checkpoint() {
         let (origin_dir, remotes) = seeded_repository();
-        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
         let semantic = commit_in(&workspace, "third.txt", "the agent's own commit");
 
-        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+        let pushed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
             .expect("a clean workspace should push");
 
         assert_eq!(pushed.checkpoint_branch, None);
@@ -810,13 +808,13 @@ mod tests {
     #[test]
     fn a_dirty_workspace_checkpoints_onto_a_branch_of_its_own() {
         let (origin_dir, remotes) = seeded_repository();
-        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
         let semantic = commit_in(&workspace, "third.txt", "the agent's own commit");
         std::fs::write(workspace.join("scratch.txt"), "work in flight")
             .expect("a dirty file should be writable");
         let bare = origin_dir.path().join(BARE);
 
-        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+        let pushed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
             .expect("a dirty workspace should push");
 
         let checkpoint = pushed
@@ -849,7 +847,7 @@ mod tests {
     #[test]
     fn a_clean_workspace_standing_off_its_chat_branch_is_checkpointed_all_the_same() {
         let (origin_dir, remotes) = seeded_repository();
-        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
         commit_in(&workspace, "third.txt", "the agent's own commit");
         run(&workspace, &["checkout", "--detach"]);
         let stray = commit_in(
@@ -858,7 +856,7 @@ mod tests {
             "a commit the chat branch never saw",
         );
 
-        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+        let pushed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
             .expect("a workspace off its branch should push");
 
         let checkpoint = pushed
@@ -876,12 +874,12 @@ mod tests {
     #[test]
     fn a_gate_that_pushed_everything_leaves_the_workspace_on_the_chat_branch() {
         let (_origin_dir, remotes) = seeded_repository();
-        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
         commit_in(&workspace, "third.txt", "the agent's own commit");
         std::fs::write(workspace.join("scratch.txt"), "work in flight")
             .expect("a dirty file should be writable");
 
-        push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+        push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
             .expect("a dirty workspace should push");
 
         assert_eq!(
@@ -894,13 +892,13 @@ mod tests {
     #[test]
     fn a_push_that_fails_leaves_the_workspace_as_it_was() {
         let (_origin_dir, remotes) = seeded_repository();
-        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
         commit_in(&workspace, "third.txt", "the agent's own commit");
         std::fs::write(workspace.join("scratch.txt"), "work in flight")
             .expect("a dirty file should be writable");
-        let unreachable = Remotes::new("file:///nowhere/at/all", None);
+        let unreachable = Remotes::new("file:///nowhere/at/all");
 
-        let error = push_for_archive(&unreachable.origin(REPO), &workspace, CHAT_BRANCH)
+        let error = push_for_archive(&unreachable.origin(REPO, None), &workspace, CHAT_BRANCH)
             .expect_err("a push to nowhere should fail");
 
         assert!(
@@ -927,15 +925,20 @@ mod tests {
     #[test]
     fn a_revived_workspace_stands_where_the_chat_last_pushed() {
         let (_origin_dir, remotes) = seeded_repository();
-        let (_source, workspace) = chat_workspace(&remotes.origin(REPO));
+        let (_source, workspace) = chat_workspace(&remotes.origin(REPO, None));
         let archived_at = commit_in(&workspace, "third.txt", "the agent's own commit");
         commit_in(&workspace, "fourth.txt", "a commit made after the archive");
         run(&workspace, &["push", "origin", CHAT_BRANCH]);
         let into = TempDir::new().expect("clone target should be created");
         let revived = into.path().join("workspace");
 
-        let standing = revive_at(&remotes.origin(REPO), CHAT_BRANCH, &archived_at, &revived)
-            .expect("an archived chat's branch should come back");
+        let standing = revive_at(
+            &remotes.origin(REPO, None),
+            CHAT_BRANCH,
+            &archived_at,
+            &revived,
+        )
+        .expect("an archived chat's branch should come back");
 
         assert_eq!(standing, archived_at);
         assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), archived_at);
@@ -955,7 +958,7 @@ mod tests {
     #[test]
     fn a_workspace_whose_commit_the_branch_no_longer_carries_comes_back_at_the_tip() {
         let (_origin_dir, remotes) = seeded_repository();
-        let (_source, workspace) = chat_workspace(&remotes.origin(REPO));
+        let (_source, workspace) = chat_workspace(&remotes.origin(REPO, None));
         let tip = commit_in(&workspace, "third.txt", "the agent's own commit");
         run(&workspace, &["push", "origin", CHAT_BRANCH]);
         let rewritten_away = commit_in(&workspace, "fourth.txt", "a commit the remote never saw");
@@ -963,7 +966,7 @@ mod tests {
         let revived = into.path().join("workspace");
 
         let standing = revive_at(
-            &remotes.origin(REPO),
+            &remotes.origin(REPO, None),
             CHAT_BRANCH,
             &rewritten_away,
             &revived,
@@ -1046,7 +1049,7 @@ mod tests {
         let dir = TempDir::new().expect("origin dir should be created");
         seed(dir.path(), &dir.path().join(BARE));
         let served_from = format!("file://{}", spelled(dir.path()));
-        (dir, Remotes::new(served_from, None))
+        (dir, Remotes::new(served_from))
     }
 
     /// A repository whose clone URL carries a credential the way GitHub's
