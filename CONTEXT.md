@@ -24,6 +24,11 @@ Code. Decisions live in `docs/adr/`; this file holds the vocabulary.
 - **Workspace container** — the disposable hardened Docker sibling
   (ADR-0001) running the agent behind the ACP adapter, from the single
   pinned workspace image (ADR-0004).
+- **Host data dir** — the second name of the one dataset root. The core reads
+  it at `CORCODE_DATA_DIR` (`/data`, its own mount); the daemon knows the same
+  bytes as `CORCODE_HOST_DATA_DIR` (`/mnt/tank/corcode`, the host path).
+  Binds for a sibling container are resolved by the daemon, so every mount the
+  core asks for must be spelled the host's way (ADR-0001).
 - **Parked** — an open chat with no live container: workspace retained,
   container torn down. Runtime pool state, reconstructable from `docker ps`,
   never persisted (ADR-0002, ADR-0006).
