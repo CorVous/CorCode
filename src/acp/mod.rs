@@ -472,6 +472,142 @@ mod tests {
         assert_eq!(record[1], recorded("on it"));
     }
 
+    /// One `session/request_permission` request, as the adapter makes it:
+    /// numbered from the adapter's own id space, which overlaps ours.
+    fn permission_ask(id: u64, session_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": session_id,
+                "toolCall": {"toolCallId": "call_1", "title": "git push"},
+                "options": [
+                    {"optionId": "yes", "name": "Allow", "kind": "allow_once"},
+                    {"optionId": "no", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        })
+    }
+
+    #[tokio::test]
+    async fn a_request_of_the_adapters_own_is_not_mistaken_for_the_answer_to_ours() {
+        let adapter = Adapter::new(ScriptedAdapter::asking(
+            SESSION,
+            &[permission_ask(3, SESSION)],
+            &[update(SESSION, "on it")],
+        ));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("a request wearing our id should not end the turn");
+
+        assert_eq!(
+            record.last(),
+            Some(&recorded("on it")),
+            "the turn ended on the adapter's own request: {record:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_permission_ask_is_turned_down_rather_than_left_to_block_the_turn() {
+        let adapter = Adapter::new(ScriptedAdapter::asking(
+            SESSION,
+            &[permission_ask(1, SESSION)],
+            &[],
+        ));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("a permission ask should not hold the turn up");
+
+        assert_eq!(
+            adapter.transport().requests().last(),
+            Some(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"outcome": {"outcome": "selected", "optionId": "no"}},
+            })),
+            "the adapter is still waiting on an answer it will never get"
+        );
+        assert_eq!(
+            record.last().and_then(|line| line["corcode"].as_str()),
+            Some("permission_declined"),
+            "the operator is never told their agent asked: {record:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_that_carries_its_own_fields_is_written_down_whole() {
+        let carried = json!({"sessionId": SESSION, "sessionUpdate": "plan", "entries": []});
+        let adapter = Adapter::new(ScriptedAdapter::answering(SESSION, &[carried.clone()]));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("the scripted turn should end");
+
+        assert_eq!(
+            record.last(),
+            Some(&carried),
+            "an update this build does not know was written down as nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_keeps_speaking_outlives_the_patience_for_silence() {
+        let said: Vec<Value> = (0..8).map(|nth| update(SESSION, &nth.to_string())).collect();
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::dawdling(SESSION, &said, IMPATIENT / 5),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("a turn that never falls silent should not be given up on");
+
+        assert_eq!(
+            record.len(),
+            said.len() + 1,
+            "a steadily streaming turn was cut short: {record:?}"
+        );
+    }
+
     #[tokio::test]
     async fn an_adapter_that_dies_mid_turn_fails_with_what_it_had_already_said_recorded() {
         let adapter = Adapter::new(ScriptedAdapter::dying_mid_turn(

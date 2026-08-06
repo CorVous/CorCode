@@ -36,6 +36,7 @@ enum Stall {
 /// Answers ACP calls from a canned script and remembers what it was asked.
 pub struct ScriptedAdapter {
     answers: Arc<Script>,
+    asks: Arc<Vec<Value>>,
     updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     stall: Stall,
@@ -75,8 +76,19 @@ impl ScriptedAdapter {
         }
     }
 
-    /// An adapter that takes `dawdle` to get round to a prompt, so that a
-    /// second prompt can arrive while the first turn is still in flight.
+    /// An adapter that asks the client for something mid-turn before it
+    /// streams `updates`. Each ask is a whole JSON-RPC message, so a test can
+    /// give one the very id the client is waiting on.
+    #[must_use]
+    pub fn asking(session_id: &str, asks: &[Value], updates: &[Value]) -> Self {
+        Self {
+            asks: Arc::new(asks.to_vec()),
+            ..Self::answering(session_id, updates)
+        }
+    }
+
+    /// An adapter that takes `dawdle` over every line it hands over, so that
+    /// a turn can be caught in flight or drawn out past a client's patience.
     #[must_use]
     pub fn dawdling(session_id: &str, updates: &[Value], dawdle: Duration) -> Self {
         Self {
@@ -146,6 +158,7 @@ impl ScriptedAdapter {
     fn reading(script: Script) -> Self {
         Self {
             answers: Arc::new(script),
+            asks: Arc::new(Vec::new()),
             updates: Arc::new(Vec::new()),
             heard: Arc::new(Mutex::new(Heard::default())),
             stall: Stall::Nowhere,
@@ -193,6 +206,7 @@ impl AcpTransport for ScriptedAdapter {
         }
         Ok(ScriptedChannel {
             answers: Arc::clone(&self.answers),
+            asks: Arc::clone(&self.asks),
             updates: Arc::clone(&self.updates),
             heard: Arc::clone(&self.heard),
             unread: VecDeque::new(),
@@ -206,6 +220,7 @@ impl AcpTransport for ScriptedAdapter {
 /// One scripted conversation.
 pub struct ScriptedChannel {
     answers: Arc<Script>,
+    asks: Arc<Vec<Value>>,
     updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     unread: VecDeque<String>,
@@ -222,15 +237,18 @@ impl AcpChannel for ScriptedChannel {
         let request: Value = serde_json::from_str(message).expect("the client should send JSON");
         let method = request["method"].as_str().unwrap_or_default().to_owned();
         let id = request["id"].clone();
-        if method == "session/prompt" {
-            tokio::time::sleep(self.dawdle).await;
-        }
         let mut heard = self.heard.lock().expect("no holder of the lock panics");
         heard.requests.push(request);
         heard.chattered = true;
         drop(heard);
+        if method.is_empty() {
+            return Ok(());
+        }
         self.unread.push_back(CHATTER.to_owned());
         if method == "session/prompt" {
+            for ask in self.asks.iter() {
+                self.unread.push_back(ask.to_string());
+            }
             for update in self.updates.iter() {
                 self.unread.push_back(
                     json!({"jsonrpc": "2.0", "method": "session/update", "params": update})
@@ -252,6 +270,7 @@ impl AcpChannel for ScriptedChannel {
     }
 
     async fn receive(&mut self) -> Result<String, AcpError> {
+        tokio::time::sleep(self.dawdle).await;
         match self.unread.pop_front() {
             Some(line) => Ok(line),
             None if self.hangs_up => Err(AcpError::Closed),
