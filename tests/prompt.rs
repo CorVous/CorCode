@@ -34,7 +34,11 @@ const SAID: &str = "ship the ladder";
 
 /// Long enough for a request to be in flight when the next one arrives, short
 /// enough that no test waits on it noticeably.
-const DAWDLE: Duration = Duration::from_millis(500);
+const DAWDLE: Duration = Duration::from_millis(200);
+
+/// A way out of `chats/` spelled so that no client normalises it away before
+/// the router sees it: it is one path segment until the server decodes it.
+const TRAVERSAL: &str = "%2e%2e%2f%2e%2e%2fetc%2fpasswd";
 
 /// One `session/update` notification's params, as the adapter sends them.
 fn update(session_id: &str, said: &str) -> Value {
@@ -58,6 +62,12 @@ fn recorded(said: &str) -> Value {
 /// The outbound prompt as ADR-0006 writes it into `events.jsonl`.
 fn recorded_prompt(said: &str) -> Value {
     json!({"sessionId": SESSION, "prompt": [{"type": "text", "text": said}]})
+}
+
+/// A refusal as the core writes it into the chat's own log, so that the next
+/// poll shows the operator why their prompt went nowhere.
+fn recorded_refusal(why: &str) -> Value {
+    json!({"corcode": "refusal", "text": format!("Prompt not sent: {why}.")})
 }
 
 #[tokio::test]
@@ -117,10 +127,18 @@ async fn a_second_prompt_while_the_first_turn_runs_is_refused() {
             .status(),
         StatusCode::OK
     );
-    assert_eq!(
-        app.events(&chat_id),
-        [recorded_prompt(SAID), recorded("on it")],
-        "the refused prompt was written down anyway"
+    let events = app.events(&chat_id);
+    assert!(
+        !events.contains(&recorded_prompt("and again")),
+        "the refused prompt reached the agent anyway: {events:?}"
+    );
+    assert!(
+        events.contains(&recorded_refusal("this chat is still answering the last prompt")),
+        "the operator is never told why their prompt went nowhere: {events:?}"
+    );
+    assert!(
+        events.contains(&recorded_prompt(SAID)) && events.contains(&recorded("on it")),
+        "the turn that was running lost its own record: {events:?}"
     );
     app.stop().await;
 }
@@ -138,9 +156,41 @@ async fn a_prompt_into_a_chat_with_no_live_connection_says_so() {
         body.contains("no live connection"),
         "the refusal does not say what is missing: {body}"
     );
+    assert_eq!(
+        app.events(&chat_id),
+        [recorded_refusal("this chat has no live connection")],
+        "a prompt nobody heard was sent, or its refusal was never written down"
+    );
+    let polled = app.body(&format!("/chats/{chat_id}/events")).await;
     assert!(
-        app.events(&chat_id).is_empty(),
-        "a prompt nobody heard was written down"
+        polled.contains("no live connection"),
+        "the next poll shows the operator nothing: {polled}"
+    );
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_turn_the_dataset_cannot_take_keeps_the_connection_it_was_going_over() {
+    let app = TestApp::start(ScriptedAdapter::answering(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ))
+    .await;
+    let chat_id = app.create_chat().await;
+    app.block_the_event_log(&chat_id);
+
+    let broken = app.prompt(&chat_id, SAID).await;
+
+    assert_eq!(broken.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    app.unblock_the_event_log(&chat_id);
+    assert_eq!(
+        app.prompt(&chat_id, "still there?").await.status(),
+        StatusCode::OK,
+        "a healthy connection was dropped over a write of ours that failed"
+    );
+    assert_eq!(
+        app.events(&chat_id),
+        [recorded_prompt("still there?"), recorded("on it")]
     );
     app.stop().await;
 }
@@ -203,9 +253,9 @@ async fn prompting_is_behind_the_session_gate_and_this_origin() {
 async fn a_chat_id_that_is_not_a_ulid_reaches_no_file() {
     let app = TestApp::start(ScriptedAdapter::answering(SESSION, &[])).await;
 
-    let prompted = app.prompt("not-a-ulid", SAID).await;
+    let prompted = app.prompt(TRAVERSAL, SAID).await;
     let polled = client()
-        .get(app.url("/chats/not-a-ulid/events"))
+        .get(app.url(&format!("/chats/{TRAVERSAL}/events")))
         .header("cookie", &app.cookie)
         .send()
         .await
@@ -213,6 +263,11 @@ async fn a_chat_id_that_is_not_a_ulid_reaches_no_file() {
 
     assert_eq!(prompted.status(), StatusCode::NOT_FOUND);
     assert_eq!(polled.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        polled.text().await.expect("body"),
+        "No such chat.\n",
+        "the router turned this away before the handler could, so nothing is proved"
+    );
     app.stop().await;
 }
 
@@ -325,14 +380,31 @@ impl TestApp {
         response.text().await.expect("body")
     }
 
-    /// The ACP payloads the chat's event log holds, in order.
-    fn events(&self, chat_id: &str) -> Vec<Value> {
-        let path = self
-            .data_dir
+    fn events_path(&self, chat_id: &str) -> PathBuf {
+        self.data_dir
             .path()
             .join("chats")
             .join(chat_id)
-            .join("events.jsonl");
+            .join("events.jsonl")
+    }
+
+    /// The chat's event log made unwritable in a way no user can write past,
+    /// not even one running as root: a directory where the file goes.
+    fn block_the_event_log(&self, chat_id: &str) {
+        let path = self.events_path(chat_id);
+        fs::remove_file(&path).expect("the event log should exist");
+        fs::create_dir(&path).expect("the log's place should be takeable");
+    }
+
+    fn unblock_the_event_log(&self, chat_id: &str) {
+        let path = self.events_path(chat_id);
+        fs::remove_dir(&path).expect("the blockage should be removable");
+        fs::write(&path, "").expect("the event log should be writable again");
+    }
+
+    /// The ACP payloads the chat's event log holds, in order.
+    fn events(&self, chat_id: &str) -> Vec<Value> {
+        let path = self.events_path(chat_id);
         fs::read_to_string(&path)
             .expect("the event log should exist")
             .lines()
