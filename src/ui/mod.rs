@@ -123,7 +123,7 @@ fn last_push(manifest: &Manifest) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use crate::secrets::{Secret, Source};
+    use crate::secrets::{Secret, Source, Standing};
     use crate::status::Status;
 
     use super::*;
@@ -179,8 +179,20 @@ mod tests {
             },
             &["CorVous/CorCode".to_owned()],
             &[
-                (Secret::GithubToken, Source::Environment),
-                (Secret::AnthropicKey, Source::Unset),
+                (
+                    Secret::GithubToken,
+                    Standing {
+                        source: Source::Environment,
+                        kind: None,
+                    },
+                ),
+                (
+                    Secret::AnthropicKey,
+                    Standing {
+                        source: Source::Unset,
+                        kind: None,
+                    },
+                ),
             ],
         ));
     }

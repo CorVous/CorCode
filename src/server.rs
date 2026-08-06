@@ -236,8 +236,8 @@ where
     V: VerifyClient + Send + Sync + 'static,
 {
     let outcome = outcome?;
-    let source = settings.source(secret)?;
-    Ok(ui::secret_settings(secret, source, &outcome))
+    let standing = settings.standing(secret)?;
+    Ok(ui::secret_settings(secret, standing, &outcome))
 }
 
 /// Which secret a per-secret route was asked about: the one its path names.

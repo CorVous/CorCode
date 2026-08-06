@@ -4,7 +4,7 @@
 //! No function here is ever handed a secret's value, which is how none of
 //! them can render one.
 
-use crate::secrets::{Secret, Source};
+use crate::secrets::{Secret, Source, Standing};
 use crate::settings::Outcome;
 use crate::verify::Verified;
 
@@ -17,10 +17,10 @@ const SHORT_OF_REPO_SCOPE: &str =
 
 /// The whole panel, as the console draws it with nothing just done to it.
 #[must_use]
-pub fn settings_panel(secrets: &[(Secret, Source)]) -> String {
+pub fn settings_panel(secrets: &[(Secret, Standing)]) -> String {
     let sections: String = secrets
         .iter()
-        .map(|&(secret, source)| secret_settings(secret, source, &Outcome::Untouched))
+        .map(|&(secret, standing)| secret_settings(secret, standing, &Outcome::Untouched))
         .collect();
     format!("<details id=\"settings\"><summary>Settings</summary>{sections}</details>")
 }
@@ -30,7 +30,7 @@ pub fn settings_panel(secrets: &[(Secret, Source)]) -> String {
 /// Only the section is replaced: the panel around it holds whether the reader
 /// has it open.
 #[must_use]
-pub fn secret_settings(secret: Secret, source: Source, outcome: &Outcome) -> String {
+pub fn secret_settings(secret: Secret, standing: Standing, outcome: &Outcome) -> String {
     let name = secret.name();
     let swap = format!(
         "hx-target=\"#{}\" hx-swap=\"outerHTML\"",
@@ -46,7 +46,7 @@ pub fn secret_settings(secret: Secret, source: Source, outcome: &Outcome) -> Str
          </section>",
         section_id(secret),
         label(secret),
-        reads(source),
+        reads(standing),
         told(outcome),
         secret_path(name),
         secret_clear_path(name),
@@ -68,12 +68,13 @@ const fn label(secret: Secret) -> &'static str {
 }
 
 /// How a secret's status line reads.
-const fn reads(source: Source) -> &'static str {
-    match source {
+fn reads(standing: Standing) -> String {
+    match standing.source {
         Source::Unset => "not set",
         Source::Environment => "set (from environment)",
         Source::Settings => "set (from settings)",
     }
+    .to_owned()
 }
 
 /// What the last action came to, or nothing at all if there has not been one.
@@ -186,8 +187,8 @@ mod tests {
     #[test]
     fn nothing_in_the_panel_checks_a_credential_on_a_clock() {
         let rendered = settings_panel(&[
-            (Secret::GithubToken, Source::Settings),
-            (Secret::AnthropicKey, Source::Environment),
+            (Secret::GithubToken, stands(Source::Settings)),
+            (Secret::AnthropicKey, stands(Source::Environment)),
         ]);
 
         assert!(
@@ -199,8 +200,8 @@ mod tests {
     #[test]
     fn the_panel_holds_every_secret_this_deployment_keeps() {
         let rendered = settings_panel(&[
-            (Secret::GithubToken, Source::Settings),
-            (Secret::AnthropicKey, Source::Unset),
+            (Secret::GithubToken, stands(Source::Settings)),
+            (Secret::AnthropicKey, stands(Source::Unset)),
         ]);
 
         assert!(
@@ -317,11 +318,16 @@ mod tests {
 
     /// One secret's section, with nothing just done to it.
     fn untouched(source: Source) -> String {
-        secret_settings(Secret::GithubToken, source, &Outcome::Untouched)
+        secret_settings(Secret::GithubToken, stands(source), &Outcome::Untouched)
     }
 
     /// One secret's section, reporting what was just done to it.
     fn after(outcome: &Outcome) -> String {
-        secret_settings(Secret::GithubToken, Source::Settings, outcome)
+        secret_settings(Secret::GithubToken, stands(Source::Settings), outcome)
+    }
+
+    /// How a secret that names no kind of credential stands.
+    const fn stands(source: Source) -> Standing {
+        Standing { source, kind: None }
     }
 }

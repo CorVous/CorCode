@@ -23,12 +23,58 @@ const SECRETS_DIR: &str = "secrets";
 /// mid-write cannot leave half a credential behind.
 const PENDING: &str = "tmp";
 
+/// What Anthropic starts a subscription token with, and nothing else.
+const SUBSCRIPTION_PREFIX: &str = "sk-ant-oat";
+
+/// Which of the two things the Anthropic slot takes is in it. The slot is one
+/// slot: a value says which it is by the prefix it carries, and no other part
+/// of it is ever looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnthropicCredential {
+    /// A subscription token, which authenticates as an OAuth bearer.
+    OauthToken,
+    /// A key issued by the console, which authenticates as itself.
+    ApiKey,
+}
+
+impl AnthropicCredential {
+    /// What `value` is, by its prefix.
+    #[must_use]
+    pub fn of(value: &str) -> Self {
+        if value.starts_with(SUBSCRIPTION_PREFIX) {
+            Self::OauthToken
+        } else {
+            Self::ApiKey
+        }
+    }
+
+    /// The variable the agent reads this kind from (ADR-0001). Each kind has
+    /// its own, so a container handed one is never handed the other.
+    #[must_use]
+    pub const fn variable(self) -> &'static str {
+        match self {
+            Self::OauthToken => "CLAUDE_CODE_OAUTH_TOKEN",
+            Self::ApiKey => "ANTHROPIC_API_KEY",
+        }
+    }
+}
+
+/// How one secret stands, as everything that is not allowed the value is told
+/// it: where the value in force came from, and — for a slot that takes more
+/// than one kind of credential — which kind is in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Standing {
+    pub source: Source,
+    pub kind: Option<AnthropicCredential>,
+}
+
 /// One operational secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Secret {
     /// Opens the private repositories a chat is cut from (ADR-0005).
     GithubToken,
-    /// Handed to the agent as `ANTHROPIC_API_KEY` (ADR-0001).
+    /// Handed to the agent under whichever name its kind is read from
+    /// (ADR-0001). One slot takes either an API key or a subscription token.
     AnthropicKey,
 }
 
@@ -120,11 +166,20 @@ impl Secrets {
         Ok(self.in_force(secret)?.map(|(_, value)| value))
     }
 
-    /// What the console says about `secret` without ever saying it.
-    pub fn source(&self, secret: Secret) -> Result<Source, SecretsError> {
-        Ok(self
-            .in_force(secret)?
-            .map_or(Source::Unset, |(source, _)| source))
+    /// What the console says about `secret` without ever saying it. One read
+    /// answers both halves, so a rotation cannot land between them and leave
+    /// the panel describing two different values.
+    pub fn standing(&self, secret: Secret) -> Result<Standing, SecretsError> {
+        let in_force = self.in_force(secret)?;
+        Ok(Standing {
+            source: in_force
+                .as_ref()
+                .map_or(Source::Unset, |&(source, _)| source),
+            kind: match secret {
+                Secret::AnthropicKey => in_force.map(|(_, value)| AnthropicCredential::of(&value)),
+                Secret::GithubToken => None,
+            },
+        })
     }
 
     /// The value in force for `secret` and where it came from: what was last
@@ -298,7 +353,9 @@ mod tests {
     }
 
     fn standing(secrets: &Secrets, secret: Secret) -> Standing {
-        secrets.standing(secret).expect("a secret should be readable")
+        secrets
+            .standing(secret)
+            .expect("a secret should be readable")
     }
 
     #[test]
@@ -628,7 +685,7 @@ mod tests {
     }
 
     fn source(secrets: &Secrets, secret: Secret) -> Source {
-        secrets.source(secret).expect("a secret should be readable")
+        standing(secrets, secret).source
     }
 
     /// Secrets over an empty dataset, with nothing bootstrapped.

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::secrets::{Secret, Secrets, SecretsError, Source};
+use crate::secrets::{Secret, Secrets, SecretsError, Standing};
 use crate::verify::{Verified, VerifyClient};
 
 /// The two operational secrets as the settings panel acts on them: what is on
@@ -21,18 +21,18 @@ impl<V: VerifyClient + Sync> Settings<V> {
         Self { secrets, client }
     }
 
-    /// Every secret this deployment holds and where each one's value comes
-    /// from, in the order the console lists them.
-    pub fn statuses(&self) -> Result<Vec<(Secret, Source)>, SecretsError> {
+    /// Every secret this deployment holds and how each one stands, in the
+    /// order the console lists them.
+    pub fn statuses(&self) -> Result<Vec<(Secret, Standing)>, SecretsError> {
         Secret::ALL
             .into_iter()
-            .map(|secret| Ok((secret, self.source(secret)?)))
+            .map(|secret| Ok((secret, self.standing(secret)?)))
             .collect()
     }
 
-    /// Where the value in force for `secret` comes from.
-    pub fn source(&self, secret: Secret) -> Result<Source, SecretsError> {
-        self.secrets.source(secret)
+    /// How `secret` stands: where its value comes from, and what it is.
+    pub fn standing(&self, secret: Secret) -> Result<Standing, SecretsError> {
+        self.secrets.standing(secret)
     }
 
     /// Put `value` in force for `secret`. A blank box is a no-op: S1 made
@@ -228,8 +228,8 @@ mod tests {
         assert_eq!(
             settings.statuses().expect("the secrets should be readable"),
             vec![
-                (Secret::GithubToken, Source::Environment),
-                (Secret::AnthropicKey, Source::Unset),
+                (Secret::GithubToken, stands(Source::Environment)),
+                (Secret::AnthropicKey, stands(Source::Unset)),
             ]
         );
     }
@@ -255,8 +255,14 @@ mod tests {
 
     fn source(settings: &Settings<ScriptedVerifier>) -> Source {
         settings
-            .source(Secret::GithubToken)
+            .standing(Secret::GithubToken)
             .expect("a secret should be readable")
+            .source
+    }
+
+    /// How a secret that names no kind of credential stands.
+    const fn stands(source: Source) -> Standing {
+        Standing { source, kind: None }
     }
 
     fn kept(dir: &TempDir) -> std::path::PathBuf {
