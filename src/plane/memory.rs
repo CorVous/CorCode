@@ -3,6 +3,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -24,11 +25,24 @@ pub struct MemoryPlane {
     live: Arc<Mutex<HashMap<String, Spawned>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Spawned {
     container: ContainerRef,
     mounts: Mounts,
     env: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for Spawned {
+    /// The environment a container was handed carries the agent's credentials
+    /// (ADR-0001): which variables it holds is the plane's to say, what they
+    /// are worth is not.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Spawned")
+            .field("container", &self.container)
+            .field("mounts", &self.mounts)
+            .field("env", &self.env.keys())
+            .finish()
+    }
 }
 
 impl ContainerPlane for MemoryPlane {
