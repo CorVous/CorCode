@@ -68,7 +68,18 @@ pub const MEMORY_RESET: &str = "Agent memory could not be restored, so the agent
 /// rule 4).
 #[must_use]
 pub fn workspace_reset(branch: &str, standing_at: &str, last_pushed: &str) -> String {
-    panic!("the revival notice is not written yet")
+    let drift = if standing_at == last_pushed {
+        String::new()
+    } else {
+        format!(
+            " The commit this chat last pushed ({last_pushed}) is not on {branch} any more, \
+             so this is the branch tip instead."
+        )
+    };
+    format!(
+        "The workspace was reset to a fresh clone at {branch}@{standing_at}.{drift} \
+         Anything that was never committed — untracked and gitignored files — is gone."
+    )
 }
 
 #[cfg(test)]
