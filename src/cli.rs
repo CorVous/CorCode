@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::{ArgAction, Parser, Subcommand};
 use log::{LevelFilter, error};
 
-use crate::commands::{serve, version};
+use crate::commands::{hash_password, serve, version};
 
 pub const VERSION: &str = env!("GIT_DESCRIBE_VERSION");
 
@@ -28,6 +28,8 @@ pub struct Cli {
 pub enum Command {
     /// Display package version
     Version,
+    /// Hash a password read from stdin, for the deployment's password setting
+    HashPassword,
 }
 
 /// Map a `-v` count to a log level.
@@ -63,6 +65,7 @@ pub fn run() -> ExitCode {
 
     let result = match cli.command {
         Some(Command::Version) => version::run(),
+        Some(Command::HashPassword) => hash_password::run(),
         None => serve::run(),
     };
 

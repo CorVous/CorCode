@@ -1,6 +1,32 @@
 //! `hash-password` subcommand — turn a password into the hash
 //! `CORCODE_PASSWORD_HASH` wants (ADR-0003).
 
+use std::io::{self, BufRead, Write};
+
+use anyhow::{Context as _, Result, bail};
+
+use crate::auth::password::hash_password;
+
+/// Hash the password on stdin, where no shell history and no process listing
+/// can hold it.
+pub fn run() -> Result<()> {
+    hash_stdin(io::stdin().lock(), &mut io::stdout())
+}
+
+fn hash_stdin(input: impl BufRead, output: &mut impl Write) -> Result<()> {
+    let mut typed = String::new();
+    let mut input = input;
+    input
+        .read_line(&mut typed)
+        .context("the password could not be read from stdin")?;
+    let password = typed.trim_end_matches(['\n', '\r']);
+    if password.is_empty() {
+        bail!("no password arrived on stdin");
+    }
+    writeln!(output, "{}", hash_password(password)?)
+        .context("the hash could not be written to stdout")
+}
+
 #[cfg(test)]
 mod tests {
     use crate::auth::password::verify_password;

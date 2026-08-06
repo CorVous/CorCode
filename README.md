@@ -12,8 +12,9 @@ Cassidy's opinionated Rust template
 Usage: cor-code [OPTIONS] [COMMAND]
 
 Commands:
-  version  Display package version
-  help     Print this message or the help of the given subcommand(s)
+  version        Display package version
+  hash-password  Hash a password read from stdin, for the deployment's password setting
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
   -v, --verbose...

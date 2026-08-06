@@ -5,10 +5,10 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use anyhow::Result;
-use argon2::{Argon2, PasswordHash, PasswordVerifier as _};
 use tokio::task::spawn_blocking;
 
 use super::keystore::KeyStore;
+use super::password::verify_password;
 use super::rate_limit::LoginLimiter;
 use super::session::{self, Session};
 use crate::config::Config;
@@ -88,12 +88,3 @@ impl Gate {
 /// The login lock is only ever held across counter arithmetic, which
 /// cannot panic, so it cannot be poisoned.
 const POISONED: &str = "the login lock is never poisoned";
-
-/// Whether `password` is the one behind `hash`, in constant time.
-fn verify_password(hash: &str, password: &str) -> bool {
-    PasswordHash::new(hash).is_ok_and(|expected| {
-        Argon2::default()
-            .verify_password(password.as_bytes(), &expected)
-            .is_ok()
-    })
-}

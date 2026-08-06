@@ -1,6 +1,36 @@
 //! The one argon2 scheme the deployment's single password is kept under
 //! (ADR-0003): what `hash-password` writes and what the gate weighs.
 
+use anyhow::{Context as _, Result, anyhow};
+use argon2::password_hash::{PasswordHasher as _, SaltString};
+use argon2::{Argon2, PasswordHash, PasswordVerifier as _};
+
+/// Bytes of salt per password, the length argon2's own generator picks.
+const SALT_BYTES: usize = 16;
+
+/// Put `password` under a fresh salt, in the form `CORCODE_PASSWORD_HASH`
+/// takes.
+pub fn hash_password(password: &str) -> Result<String> {
+    let mut bytes = [0u8; SALT_BYTES];
+    getrandom::fill(&mut bytes).context("the operating system refused random bytes")?;
+    let salt =
+        SaltString::encode_b64(&bytes).map_err(|failure| anyhow!("unusable salt: {failure}"))?;
+    Ok(Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|failure| anyhow!("the password could not be hashed: {failure}"))?
+        .to_string())
+}
+
+/// Whether `password` is the one behind `hash`, in constant time.
+#[must_use]
+pub fn verify_password(hash: &str, password: &str) -> bool {
+    PasswordHash::new(hash).is_ok_and(|expected| {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &expected)
+            .is_ok()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
