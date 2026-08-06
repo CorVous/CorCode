@@ -17,7 +17,7 @@ use crate::git::{self, Remotes};
 use crate::plane::{ContainerPlane, container_name};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
-use crate::secrets::{Secret, Secrets, SecretsError};
+use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
 use crate::status::{Slot, Status};
 use crate::store::{
     ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, RuntimeStatus,
@@ -25,9 +25,6 @@ use crate::store::{
 };
 use crate::sweep::{self, Sweep, Swept};
 use crate::ui;
-
-/// The variable the agent reads its Anthropic credentials from (ADR-0001).
-const API_KEY: &str = "ANTHROPIC_API_KEY";
 
 /// What the form asks for, before any of it is believed.
 pub struct WantedChat {
@@ -893,8 +890,9 @@ where
     /// answering with the container's name.
     async fn spawn(&self, chat_id: &str) -> Result<String> {
         let mut env = BTreeMap::new();
-        if let Some(key) = self.secrets.read(Secret::AnthropicKey)? {
-            env.insert(API_KEY.to_owned(), key);
+        if let Some(credential) = self.secrets.read(Secret::AnthropicKey)? {
+            let variable = AnthropicCredential::of(&credential).variable();
+            env.insert(variable.to_owned(), credential);
         }
         Ok(self
             .plane
