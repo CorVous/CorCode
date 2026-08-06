@@ -14,7 +14,7 @@ use log::debug;
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
-pub use connections::{Connections, Held, Turn};
+pub use connections::{AlreadyHeld, Connections, Held, Turn};
 pub use docker::{ADAPTER, DockerExec};
 pub use error::AcpError;
 pub use scripted::ScriptedAdapter;
@@ -38,6 +38,11 @@ const TURN_PATIENCE: Duration = Duration::from_secs(600);
 
 /// The notification an adapter streams a turn over.
 const SESSION_UPDATE: &str = "session/update";
+
+/// How long the pipe must stay quiet before a replay is taken to be over. ACP
+/// fixes no order between the replay and the answer that ends the load, so the
+/// tail of one can outlive the other by as much as a scheduling hiccup.
+const REPLAY_TAIL: Duration = Duration::from_millis(100);
 
 /// The cheapest way back into a session: the adapter's own state restored,
 /// with nothing replayed to us (ADR-0007 rung 1). The method is unstable, so
@@ -173,12 +178,14 @@ impl<C: AcpChannel> Greeting<C> {
     /// Rung 2: have the adapter rebuild its memory by replaying the whole
     /// transcript of `session_id`.
     ///
-    /// The replay arrives as `session/update` notifications before the answer
-    /// does, and every one of them is heard and dropped: the chat's log
-    /// already holds those lines, and writing them again would say everything
-    /// twice (ADR-0007 rule 3).
+    /// The replay arrives as `session/update` notifications, every one of
+    /// which is heard and dropped: the chat's log already holds those lines,
+    /// and writing them again would say everything twice (ADR-0007 rule 3).
+    /// Whatever trails the answer is read out here rather than left in the
+    /// pipe for the next turn to mistake for its own.
     pub async fn load(&mut self, session_id: &str) -> Result<(), AcpError> {
-        self.rung(LOAD_SESSION, session_id).await
+        self.rung(LOAD_SESSION, session_id).await?;
+        self.calls.drain(REPLAY_TAIL, LOAD_SESSION).await
     }
 
     /// One rung asked for over the chat's workspace. Whatever the adapter
@@ -394,6 +401,21 @@ impl<C: AcpChannel> Calls<C> {
         self.answer_to(id, method, patience, overhear).await
     }
 
+    /// Read the channel until it has said nothing for `quiet`, answering what
+    /// it asks of us and keeping none of it. A pipe that breaks while it is
+    /// being emptied has nothing left to say and says so.
+    async fn drain(&mut self, quiet: Duration, method: &str) -> Result<(), AcpError> {
+        while let Ok(line) = timeout(quiet, self.channel.receive()).await {
+            let Ok(message) = serde_json::from_str::<Value>(&line?) else {
+                continue;
+            };
+            if let Some(answer) = owed(&message) {
+                self.say(&answer, self.patience, method).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// One message handed over. Handing it over can block as long as
     /// answering can: the adapter's stdin is a pipe.
     async fn say(
@@ -460,12 +482,14 @@ impl<C: AcpChannel> Calls<C> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use serde_json::json;
 
     use super::*;
 
+    const CHAT: &str = "01K1TESTCHATID0000000000";
     const CONTAINER: &str = "corcode-chat-01K1TESTCHATID0000000000";
     const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
 
@@ -725,6 +749,40 @@ mod tests {
                 }),
                 recorded("on it"),
             ]
+        );
+    }
+
+    /// The connection a chat is already holding may have a turn running over
+    /// it, so a second one is turned away and the first left where it is.
+    #[tokio::test]
+    async fn a_second_connection_for_one_chat_is_refused_rather_than_replacing_the_first() {
+        let adapter = Adapter::new(ScriptedAdapter::opening(SESSION));
+        let connections = Connections::default();
+        let first = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let second = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a second session");
+        let held = connections
+            .hold(CHAT, first)
+            .expect("a chat holding nothing should take a connection");
+
+        let refused = connections
+            .hold(CHAT, second)
+            .expect_err("a chat holding a connection should not take another");
+
+        assert!(
+            format!("{refused}").contains(CHAT),
+            "the refusal does not say which chat: {refused}"
+        );
+        assert!(
+            connections
+                .of(CHAT)
+                .is_some_and(|still| Arc::ptr_eq(&still, &held)),
+            "the connection that was already there was replaced anyway"
         );
     }
 

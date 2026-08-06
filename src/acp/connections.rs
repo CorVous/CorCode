@@ -1,8 +1,10 @@
 //! The ACP connections this core holds open, one per chat.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use thiserror::Error;
 use tokio::sync::{Mutex as TurnLock, OwnedMutexGuard};
 
 use super::Connection;
@@ -31,16 +33,34 @@ impl<C> Default for Connections<C> {
     }
 }
 
+/// A second connection offered for a chat that is already holding one. The
+/// first is the one turns may be running over, so the second is turned away
+/// rather than put in its place.
+#[derive(Debug, Error)]
+#[error("{chat_id} is holding a connection already")]
+pub struct AlreadyHeld {
+    pub chat_id: String,
+}
+
 impl<C> Connections<C> {
-    /// Keep `connection` as the one prompts to `chat_id` go over, in place of
-    /// whatever was there before, answering with what is now held.
-    pub fn hold(&self, chat_id: &str, connection: Connection<C>) -> Held<C> {
+    /// Keep `connection` as the one prompts to `chat_id` go over, answering
+    /// with what is now held.
+    pub fn hold(&self, chat_id: &str, connection: Connection<C>) -> Result<Held<C>, AlreadyHeld> {
         let held = Arc::new(TurnLock::new(connection));
-        self.held
+        match self
+            .held
             .lock()
             .expect("no holder of the lock panics")
-            .insert(chat_id.to_owned(), Arc::clone(&held));
-        held
+            .entry(chat_id.to_owned())
+        {
+            Entry::Occupied(_) => Err(AlreadyHeld {
+                chat_id: chat_id.to_owned(),
+            }),
+            Entry::Vacant(slot) => {
+                slot.insert(Arc::clone(&held));
+                Ok(held)
+            }
+        }
     }
 
     /// The connection `chat_id` can be prompted over, if it has one.
