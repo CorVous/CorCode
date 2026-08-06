@@ -77,8 +77,10 @@ pub struct Config {
     /// Bootstraps the GitHub token the private repositories are cloned over,
     /// until one is written through [`crate::secrets::Secrets`].
     pub github_token: Option<String>,
-    /// Bootstraps the key the agent is handed as `ANTHROPIC_API_KEY`
-    /// (ADR-0001), until one is written through [`crate::secrets::Secrets`].
+    /// Bootstraps the credential the agent is handed, under whichever name
+    /// its kind is read from (ADR-0001) — an API key as `ANTHROPIC_API_KEY`,
+    /// an `sk-ant-oat` subscription token as `CLAUDE_CODE_OAUTH_TOKEN` —
+    /// until one is written through [`crate::secrets::Secrets`].
     pub anthropic_api_key: Option<String>,
 }
 

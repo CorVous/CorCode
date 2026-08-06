@@ -34,6 +34,8 @@ services:
       CORCODE_REGISTRY_TOKEN: REPLACE_WITH_A_READ_PACKAGES_TOKEN
       # Clones private repositories and pushes at archive.
       CORCODE_GITHUB_TOKEN: REPLACE_WITH_A_REPO_SCOPED_TOKEN
-      # Reaches the agent as ANTHROPIC_API_KEY; drop it to use a Claude
-      # subscription login held in the chat's own agent memory instead.
-      CORCODE_ANTHROPIC_API_KEY: REPLACE_WITH_AN_ANTHROPIC_KEY
+      # Either an API key, which reaches the agent as ANTHROPIC_API_KEY, or a
+      # Claude subscription token, which reaches it as
+      # CLAUDE_CODE_OAUTH_TOKEN. The settings panel holds one too, and what is
+      # set there is what every spawn after it gets.
+      CORCODE_ANTHROPIC_API_KEY: REPLACE_WITH_AN_ANTHROPIC_CREDENTIAL
