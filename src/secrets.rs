@@ -314,6 +314,89 @@ mod tests {
         );
     }
 
+    /// A secret stored as nothing reads as the environment's, which is a
+    /// rotation quietly undone. Unsetting one is [`Secrets::clear`]'s to do.
+    #[test]
+    fn a_secret_cannot_be_written_as_nothing() {
+        let (dir, secrets) = bootstrapped();
+
+        let refused = secrets
+            .write(Secret::GithubToken, "  \n")
+            .expect_err("writing nothing should be refused");
+
+        assert!(matches!(refused, SecretsError::Empty { .. }));
+        assert!(!dir.path().join("secrets").join("github_token").exists());
+        assert_eq!(
+            read(&secrets, Secret::GithubToken).as_deref(),
+            Some(FROM_ENV)
+        );
+    }
+
+    /// What a read takes off a hand-written file, a write never puts on.
+    #[test]
+    fn a_secret_is_stored_without_the_whitespace_around_it() {
+        let (dir, secrets) = bare();
+
+        secrets
+            .write(Secret::GithubToken, &format!("  {TOKEN}\n"))
+            .expect("a secret should be writable");
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("secrets").join("github_token"))
+                .expect("the token should be on disk"),
+            TOKEN
+        );
+    }
+
+    /// Two writes in flight at once must not stage over each other: half of
+    /// one credential and half of the other is a credential nobody holds.
+    #[test]
+    fn no_two_writes_stage_a_secret_under_the_same_name() {
+        let (_dir, secrets) = bare();
+
+        assert_ne!(
+            secrets.pending(Secret::GithubToken),
+            secrets.pending(Secret::GithubToken)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_secrets_are_kept_where_only_their_owner_can_look() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (dir, secrets) = bare();
+
+        secrets
+            .write(Secret::GithubToken, TOKEN)
+            .expect("a secret should be writable");
+
+        let mode = fs::metadata(dir.path().join("secrets"))
+            .expect("the secrets dir should be on disk")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_that_cannot_be_taken_away_says_so() {
+        let (dir, secrets) = bare();
+        fs::create_dir_all(dir.path().join("secrets").join("github_token"))
+            .expect("a directory should be creatable");
+
+        let failure = secrets
+            .clear(Secret::GithubToken)
+            .expect_err("clearing a directory should fail");
+
+        assert!(matches!(failure, SecretsError::Clear { .. }));
+        let said = format!("{failure}");
+        assert!(
+            said.contains("github_token"),
+            "failure should name the file, got: {said}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_written_secret_is_readable_only_by_its_owner() {
