@@ -148,27 +148,22 @@ async fn a_second_prompt_while_the_first_turn_runs_is_refused() {
 }
 
 #[tokio::test]
-async fn a_prompt_into_a_chat_with_no_live_connection_says_so() {
+async fn a_prompt_into_a_chat_that_cannot_be_woken_says_so_and_can_be_sent_again() {
     let app = TestApp::start(ScriptedAdapter::answering(SESSION, &[])).await;
     let chat_id = app.chat_on_disk_alone();
 
     let response = app.prompt(&chat_id, SAID).await;
 
-    assert_eq!(response.status(), StatusCode::TOO_EARLY);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response.text().await.expect("body");
     assert!(
-        body.contains("no live connection"),
-        "the refusal does not say what is missing: {body}"
-    );
-    assert_eq!(
-        app.events(&chat_id),
-        [recorded_refusal("this chat has no live connection")],
-        "a prompt nobody heard was sent, or its refusal was never written down"
+        body.contains("could not be woken"),
+        "the answer does not say what went wrong: {body}"
     );
     let polled = app.body(&format!("/chats/{chat_id}/events")).await;
     assert!(
-        polled.contains("no live connection"),
-        "the next poll shows the operator nothing: {polled}"
+        polled.contains("no session recorded") && polled.contains("can be sent again"),
+        "the next poll shows the operator nothing to act on: {polled}"
     );
     app.stop().await;
 }
@@ -216,10 +211,12 @@ async fn an_adapter_that_dies_mid_turn_keeps_what_it_said_and_drops_the_connecti
         [recorded_prompt(SAID), recorded("on i")],
         "a broken turn took its own record with it"
     );
-    assert_eq!(
-        app.prompt(&chat_id, "still there?").await.status(),
-        StatusCode::TOO_EARLY,
-        "the dead connection is still being handed out"
+    app.prompt(&chat_id, "still there?").await;
+    assert!(
+        app.events(&chat_id)
+            .iter()
+            .any(|line| line["corcode"] == "reset_notice"),
+        "the next prompt went over the dead connection rather than climbing the ladder"
     );
     app.stop().await;
 }

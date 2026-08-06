@@ -61,7 +61,7 @@ async fn a_chat_beyond_the_pool_gives_up_its_container_and_keeps_its_workspace()
 }
 
 #[tokio::test]
-async fn a_parked_chat_is_no_longer_holding_a_connection() {
+async fn a_prompt_into_a_parked_chat_puts_its_container_back_up() {
     let app = TestApp::start().await;
     let parked = app.create_chat("first").await;
     app.create_chat("second").await;
@@ -69,7 +69,12 @@ async fn a_parked_chat_is_no_longer_holding_a_connection() {
 
     let response = app.prompt(&parked, "still there?").await;
 
-    assert_eq!(response.status(), StatusCode::TOO_EARLY);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        group(&app.body("/").await, &parked),
+        "Live",
+        "the chat took a turn without a container of its own"
+    );
 }
 
 #[tokio::test]

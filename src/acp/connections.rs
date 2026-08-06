@@ -33,12 +33,14 @@ impl<C> Default for Connections<C> {
 
 impl<C> Connections<C> {
     /// Keep `connection` as the one prompts to `chat_id` go over, in place of
-    /// whatever was there before.
-    pub fn hold(&self, chat_id: &str, connection: Connection<C>) {
+    /// whatever was there before, answering with what is now held.
+    pub fn hold(&self, chat_id: &str, connection: Connection<C>) -> Held<C> {
+        let held = Arc::new(TurnLock::new(connection));
         self.held
             .lock()
             .expect("no holder of the lock panics")
-            .insert(chat_id.to_owned(), Arc::new(TurnLock::new(connection)));
+            .insert(chat_id.to_owned(), Arc::clone(&held));
+        held
     }
 
     /// The connection `chat_id` can be prompted over, if it has one.
