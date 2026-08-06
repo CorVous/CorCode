@@ -6,7 +6,7 @@ mod escape;
 
 use crate::store::{Manifest, RuntimeStatus};
 
-pub use chat::chat_page;
+pub use chat::{chat_page, event_log};
 pub use console::{chat_list, console_page};
 
 use escape::text;
@@ -36,6 +36,25 @@ input,select,button{font-size:16px;}";
 
 /// A chat paired with the runtime status it has right now (ADR-0002).
 pub type Chat = (Manifest, RuntimeStatus);
+
+/// One chat's page. The router spells its routes with these too, passing the
+/// path parameter as the id, so no path is written down twice.
+#[must_use]
+pub fn chat_path(chat_id: &str) -> String {
+    format!("{CHATS_PATH}/{chat_id}")
+}
+
+/// One chat's event log on its own, as htmx polls it.
+#[must_use]
+pub fn chat_events_path(chat_id: &str) -> String {
+    format!("{}/events", chat_path(chat_id))
+}
+
+/// Where one chat's prompt box posts.
+#[must_use]
+pub fn chat_prompt_path(chat_id: &str) -> String {
+    format!("{}/prompt", chat_path(chat_id))
+}
 
 /// A semantic HTML document on browser defaults (ADR-0008).
 #[must_use]

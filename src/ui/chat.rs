@@ -4,33 +4,54 @@ use serde_json::Value;
 
 use crate::store::{Event, Manifest, RuntimeStatus};
 
-use super::{last_push, page, status_word, text};
+use super::{HTMX_PATH, chat_events_path, chat_prompt_path, last_push, page, status_word, text};
 
 /// What an event calls itself when it carries no ACP discriminator.
 const UNTYPED: &str = "event";
 
-/// The `corcode` key on a line the core wrote itself rather than relayed.
-const RESET_NOTICE: &str = "reset_notice";
+/// The key on a line the core wrote in its own voice rather than relaying.
+const CORE_LINE: &str = "corcode";
+
+/// How often an open chat asks for the log again. A turn streams for minutes,
+/// so this is what "live" means here: polling, not a second connection.
+const POLL_SECONDS: u32 = 2;
 
 /// One chat, top to bottom: what it is, everything that has happened to it,
 /// and the prompt box waiting at the end.
 #[must_use]
 pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -> String {
-    let log: String = events.iter().map(|event| line(&event.event)).collect();
     page(
         &manifest.title,
         &format!(
             "<p><a href=\"/\">← chats</a></p>\
              <p><small>{} · {} · push {} · {}</small></p>\
-             {log}{}\
-             <form><p><input name=\"prompt\" aria-label=\"Prompt\" placeholder=\"prompt\"> \
-             <button type=\"submit\" disabled>Send</button></p></form>",
+             {}{}\
+             <form hx-post=\"{}\" hx-target=\"#log\" hx-swap=\"outerHTML\">\
+             <p><input name=\"prompt\" aria-label=\"Prompt\" placeholder=\"prompt\"> \
+             <button type=\"submit\">Send</button></p></form>\
+             <script src=\"{HTMX_PATH}\" defer></script>",
             text(&manifest.repo),
             text(&manifest.branch),
             text(last_push(manifest)),
             status_word(status),
+            event_log(&manifest.chat_id, events),
             first_prompt_hint(status),
+            text(&chat_prompt_path(&manifest.chat_id)),
         ),
+    )
+}
+
+/// The event log alone, polling itself for whatever a turn has added since.
+///
+/// It is rendered from `events.jsonl` and never from the connection, so it
+/// reads the same whether the chat is live or was live last week (ADR-0006).
+#[must_use]
+pub fn event_log(chat_id: &str, events: &[Event]) -> String {
+    let lines: String = events.iter().map(|event| line(&event.event)).collect();
+    format!(
+        "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {POLL_SECONDS}s\" \
+         hx-swap=\"outerHTML\">{lines}</section>",
+        text(&chat_events_path(chat_id)),
     )
 }
 
@@ -73,8 +94,8 @@ fn entry(event: &Value) -> Entry<'_> {
     if let Some(said) = event.get("prompt").and_then(blocks_text) {
         return Entry::Prompt(said);
     }
-    if field(event, "corcode") == Some(RESET_NOTICE) {
-        return Entry::Notice(field(event, "text").unwrap_or(RESET_NOTICE));
+    if let Some(kind) = field(event, CORE_LINE) {
+        return Entry::Notice(field(event, "text").unwrap_or(kind));
     }
     let kind = field(event, "sessionUpdate").unwrap_or(UNTYPED);
     match (kind, event.get("content").and_then(blocks_text)) {
@@ -329,12 +350,65 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_box_is_inert() {
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &[]);
+    fn the_prompt_box_posts_the_prompt_and_swaps_the_log_it_lands_in() {
+        let manifest = manifest(RuntimeStatus::Live);
+
+        let rendered = chat_page(&manifest, RuntimeStatus::Live, &[]);
 
         assert!(
-            rendered.contains("<button type=\"submit\" disabled>Send</button>"),
-            "the prompt box would submit somewhere: {rendered}"
+            rendered.contains(&format!(
+                "hx-post=\"{}\"",
+                chat_prompt_path(&manifest.chat_id)
+            )),
+            "the prompt box posts nowhere: {rendered}"
+        );
+        assert!(
+            rendered.contains("hx-target=\"#log\"") && rendered.contains("name=\"prompt\""),
+            "the prompt would not land in the log: {rendered}"
+        );
+        assert!(
+            !rendered.contains("disabled"),
+            "the prompt box is still inert: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_log_polls_itself_while_the_page_is_open() {
+        let manifest = manifest(RuntimeStatus::Live);
+
+        let fragment = event_log(
+            &manifest.chat_id,
+            &log(&[chunk("agent_message_chunk", "on it")]),
+        );
+
+        assert!(
+            fragment.starts_with("<section id=\"log\""),
+            "the log is not a fragment htmx can swap: {fragment}"
+        );
+        assert!(
+            fragment.contains(&format!(
+                "hx-get=\"{}\"",
+                chat_events_path(&manifest.chat_id)
+            )) && fragment.contains("hx-trigger=\"every 2s\""),
+            "the log does not poll itself: {fragment}"
+        );
+        assert!(fragment.contains("<p>on it</p>"));
+    }
+
+    #[test]
+    fn the_chat_page_carries_the_log_and_the_script_that_polls_it() {
+        let manifest = manifest(RuntimeStatus::Live);
+        let events = log(&[chunk("agent_message_chunk", "on it")]);
+
+        let rendered = chat_page(&manifest, RuntimeStatus::Live, &events);
+
+        assert!(
+            rendered.contains(&event_log(&manifest.chat_id, &events)),
+            "the page and the fragment render the log differently: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("src=\"{}\"", crate::ui::HTMX_PATH)),
+            "htmx is not loaded, so nothing polls: {rendered}"
         );
     }
 

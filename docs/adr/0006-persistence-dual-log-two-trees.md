@@ -124,16 +124,30 @@ their own fields instead:
 `sessionUpdate` kinds (`plan`, `available_commands_update`, ...) are written
 through unchanged.
 
+A `session/update` whose params carry their fields directly, with no `update`
+member, is written through whole rather than as the member that is not there:
+a shape the build does not know is still a shape, and a `null` line is not.
+
 Core-injected notices are the one payload that is not ACP. They carry a
-`corcode` key and no `sessionUpdate`, so no reader can mistake one for an
-agent message:
+`corcode` key naming the kind, a `text` the renderer says out loud, and no
+`sessionUpdate`, so no reader can mistake one for an agent message:
 
 ```json
 {"corcode": "reset_notice", "text": "..."}
+{"corcode": "permission_declined", "text": "..."}
+{"corcode": "refusal", "text": "..."}
 ```
 
-ADR-0008 renders these as block quotes: the record says out loud where the
-agent's memory was cut.
+`reset_notice` says where the agent's memory was cut. `permission_declined`
+says the agent asked the operator for something and this client answered no
+on their behalf, which is the only answer it has: the core declares no client
+capabilities, and an unanswered request blocks the agent's whole turn.
+`refusal` says a prompt never went out — no live connection, or a turn still
+running. Refusals belong in the log because the log is the whole of what the
+chat page renders (ADR-0008); a status code the browser swallows tells the
+operator nothing.
+
+ADR-0008 renders every core line as a block quote.
 
 ## Consequences
 

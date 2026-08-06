@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -35,8 +36,12 @@ enum Stall {
 /// Answers ACP calls from a canned script and remembers what it was asked.
 pub struct ScriptedAdapter {
     answers: Arc<Script>,
+    asks: Arc<Vec<Value>>,
+    updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     stall: Stall,
+    hangs_up: bool,
+    dawdle: Duration,
 }
 
 /// Everything the fake was told, for the assertions to read back.
@@ -53,6 +58,54 @@ impl ScriptedAdapter {
     #[must_use]
     pub fn opening(session_id: &str) -> Self {
         Self::reading(working_script(session_id))
+    }
+
+    /// An adapter that streams `updates` at every prompt and then ends the
+    /// turn. Each update is the params of one `session/update` notification,
+    /// so a test can address one at whichever session it likes.
+    #[must_use]
+    pub fn answering(session_id: &str, updates: &[Value]) -> Self {
+        let mut script = working_script(session_id);
+        script.insert(
+            "session/prompt".to_owned(),
+            Answer::Result(json!({"stopReason": "end_turn"})),
+        );
+        Self {
+            updates: Arc::new(updates.to_vec()),
+            ..Self::reading(script)
+        }
+    }
+
+    /// An adapter that asks the client for something mid-turn before it
+    /// streams `updates`. Each ask is a whole JSON-RPC message, so a test can
+    /// give one the very id the client is waiting on.
+    #[must_use]
+    pub fn asking(session_id: &str, asks: &[Value], updates: &[Value]) -> Self {
+        Self {
+            asks: Arc::new(asks.to_vec()),
+            ..Self::answering(session_id, updates)
+        }
+    }
+
+    /// An adapter that takes `dawdle` over every line it hands over, so that
+    /// a turn can be caught in flight or drawn out past a client's patience.
+    #[must_use]
+    pub fn dawdling(session_id: &str, updates: &[Value], dawdle: Duration) -> Self {
+        Self {
+            dawdle,
+            ..Self::answering(session_id, updates)
+        }
+    }
+
+    /// An adapter that streams `updates` and then closes its channel without
+    /// ending the turn, as one whose container was killed does.
+    #[must_use]
+    pub fn dying_mid_turn(session_id: &str, updates: &[Value]) -> Self {
+        Self {
+            updates: Arc::new(updates.to_vec()),
+            hangs_up: true,
+            ..Self::reading(working_script(session_id))
+        }
     }
 
     /// An adapter that turns `method` down.
@@ -105,8 +158,12 @@ impl ScriptedAdapter {
     fn reading(script: Script) -> Self {
         Self {
             answers: Arc::new(script),
+            asks: Arc::new(Vec::new()),
+            updates: Arc::new(Vec::new()),
             heard: Arc::new(Mutex::new(Heard::default())),
             stall: Stall::Nowhere,
+            hangs_up: false,
+            dawdle: Duration::ZERO,
         }
     }
 
@@ -149,9 +206,13 @@ impl AcpTransport for ScriptedAdapter {
         }
         Ok(ScriptedChannel {
             answers: Arc::clone(&self.answers),
+            asks: Arc::clone(&self.asks),
+            updates: Arc::clone(&self.updates),
             heard: Arc::clone(&self.heard),
             unread: VecDeque::new(),
             stall: self.stall,
+            hangs_up: self.hangs_up,
+            dawdle: self.dawdle,
         })
     }
 }
@@ -159,9 +220,13 @@ impl AcpTransport for ScriptedAdapter {
 /// One scripted conversation.
 pub struct ScriptedChannel {
     answers: Arc<Script>,
+    asks: Arc<Vec<Value>>,
+    updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     unread: VecDeque<String>,
     stall: Stall,
+    hangs_up: bool,
+    dawdle: Duration,
 }
 
 impl AcpChannel for ScriptedChannel {
@@ -176,7 +241,21 @@ impl AcpChannel for ScriptedChannel {
         heard.requests.push(request);
         heard.chattered = true;
         drop(heard);
+        if method.is_empty() {
+            return Ok(());
+        }
         self.unread.push_back(CHATTER.to_owned());
+        if method == "session/prompt" {
+            for ask in self.asks.iter() {
+                self.unread.push_back(ask.to_string());
+            }
+            for update in self.updates.iter() {
+                self.unread.push_back(
+                    json!({"jsonrpc": "2.0", "method": "session/update", "params": update})
+                        .to_string(),
+                );
+            }
+        }
         match self.answers.get(&method) {
             Some(Answer::Result(result)) => self
                 .unread
@@ -191,8 +270,10 @@ impl AcpChannel for ScriptedChannel {
     }
 
     async fn receive(&mut self) -> Result<String, AcpError> {
+        tokio::time::sleep(self.dawdle).await;
         match self.unread.pop_front() {
             Some(line) => Ok(line),
+            None if self.hangs_up => Err(AcpError::Closed),
             None => std::future::pending().await,
         }
     }
