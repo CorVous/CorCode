@@ -89,27 +89,69 @@ impl Secrets {
     /// What `secret` is worth right now: what was last written for it, else
     /// what the environment bootstrapped, else nothing.
     pub fn read(&self, secret: Secret) -> Result<Option<String>, SecretsError> {
-        let _ = secret;
-        Ok(None)
+        Ok(self
+            .written(secret)?
+            .or_else(|| self.from_env.get(&secret).cloned()))
     }
 
     /// Put `value` in force for every read after this one.
     pub fn write(&self, secret: Secret, value: &str) -> Result<(), SecretsError> {
-        let _ = (secret, value);
-        Ok(())
+        fs::create_dir_all(&self.dir).map_err(|source| SecretsError::Write {
+            path: self.dir.clone(),
+            source,
+        })?;
+        let path = self.path(secret);
+        let pending = path.with_extension(PENDING);
+        write_owner_only(value, &pending)?;
+        fs::rename(&pending, &path).map_err(|source| SecretsError::Write { path, source })
     }
 
     /// Take the written value away, leaving whatever the environment
     /// bootstrapped in force again. A secret nothing was written for is
     /// already clear.
     pub fn clear(&self, secret: Secret) -> Result<(), SecretsError> {
-        let _ = secret;
-        Ok(())
+        let path = self.path(secret);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(SecretsError::Write { path, source }),
+        }
+    }
+
+    /// What the secret's own file holds, if it holds anything. The whitespace
+    /// around it is not part of it: a file written by hand on the dataset
+    /// ends in the newline whatever wrote it put there.
+    fn written(&self, secret: Secret) -> Result<Option<String>, SecretsError> {
+        let path = self.path(secret);
+        match fs::read_to_string(&path) {
+            Ok(held) => Ok(Some(held.trim().to_owned()).filter(|held| !held.is_empty())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(SecretsError::Read { path, source }),
+        }
     }
 
     fn path(&self, secret: Secret) -> PathBuf {
         self.dir.join(secret.file())
     }
+}
+
+/// Write a secret where only its owner can read it back, and make sure it has
+/// reached the disk.
+fn write_owner_only(value: &str, path: &Path) -> Result<(), SecretsError> {
+    let mut options = File::options();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)
+        .and_then(|mut file| {
+            file.write_all(value.as_bytes())
+                .and_then(|()| file.sync_all())
+        })
+        .map_err(|source| SecretsError::Write {
+            path: path.to_owned(),
+            source,
+        })
 }
 
 impl fmt::Debug for Secrets {
@@ -145,7 +187,10 @@ mod tests {
     fn an_unwritten_secret_is_the_one_the_environment_bootstrapped() {
         let (_dir, secrets) = bootstrapped();
 
-        assert_eq!(read(&secrets, Secret::GithubToken).as_deref(), Some(FROM_ENV));
+        assert_eq!(
+            read(&secrets, Secret::GithubToken).as_deref(),
+            Some(FROM_ENV)
+        );
     }
 
     #[test]
@@ -171,7 +216,10 @@ mod tests {
             .write(Secret::GithubToken, ROTATED)
             .expect("a secret should be rotatable");
 
-        assert_eq!(read(&secrets, Secret::GithubToken).as_deref(), Some(ROTATED));
+        assert_eq!(
+            read(&secrets, Secret::GithubToken).as_deref(),
+            Some(ROTATED)
+        );
     }
 
     #[test]
@@ -185,7 +233,10 @@ mod tests {
             .clear(Secret::GithubToken)
             .expect("a secret should be clearable");
 
-        assert_eq!(read(&secrets, Secret::GithubToken).as_deref(), Some(FROM_ENV));
+        assert_eq!(
+            read(&secrets, Secret::GithubToken).as_deref(),
+            Some(FROM_ENV)
+        );
     }
 
     #[test]
@@ -232,9 +283,15 @@ mod tests {
         let leftovers: Vec<PathBuf> = fs::read_dir(dir.path().join("secrets"))
             .expect("the secrets dir should be readable")
             .map(|entry| entry.expect("entry should be readable").path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == PENDING))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == PENDING)
+            })
             .collect();
-        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
     }
 
     /// These files are the operator's to write by hand on the dataset, and a
@@ -344,10 +401,7 @@ mod tests {
     /// Secrets over an empty dataset, with a token the environment carried in.
     fn bootstrapped() -> (TempDir, Secrets) {
         let dir = tempdir().expect("temp dir should be creatable");
-        let secrets = Secrets::new(
-            dir.path(),
-            [(Secret::GithubToken, FROM_ENV.to_owned())],
-        );
+        let secrets = Secrets::new(dir.path(), [(Secret::GithubToken, FROM_ENV.to_owned())]);
         (dir, secrets)
     }
 
