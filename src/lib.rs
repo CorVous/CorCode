@@ -9,6 +9,7 @@ pub mod config;
 pub mod git;
 pub mod plane;
 pub mod pool;
+pub mod resume;
 pub mod server;
 pub mod store;
 pub mod sweep;
