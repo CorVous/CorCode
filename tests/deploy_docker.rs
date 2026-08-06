@@ -11,6 +11,9 @@ use cor_code::auth::password::{hash_password, verify_password};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
+/// What compose binds too: the core fails fast at boot without a daemon to
+/// spawn its siblings on (ADR-0001).
+const DAEMON_SOCKET: &str = "/var/run/docker.sock:/var/run/docker.sock";
 const IMAGE: &str = "corcode-core:deploy-test";
 const CONTAINER: &str = "corcode-deploy-test";
 const PASSWORD: &str = "correct horse battery staple";
@@ -43,10 +46,10 @@ async fn the_core_image_boots_against_a_fresh_dataset_and_answers() {
     };
     build_image(&docker);
     let dataset = TempDir::new().expect("a dataset dir should be created");
-    let _container = Container::start(&docker, dataset.path());
+    let container = Container::start(&docker, dataset.path());
 
-    let port = published_port(&docker);
-    let health = await_health(port).await;
+    let port = container.published_port();
+    let health = await_health(port, &container).await;
 
     assert_eq!(health, "ok", "the booted core does not answer /health");
     assert!(
@@ -85,7 +88,9 @@ impl Container {
             docker: docker.to_owned(),
         };
         container.remove();
-        let bind = format!("{}:/data", dataset.display());
+        let dataset = dataset.display();
+        let bind = format!("{dataset}:/data");
+        let host_dataset = format!("CORCODE_HOST_DATA_DIR={dataset}");
         let started = run(
             docker,
             &[
@@ -97,8 +102,14 @@ impl Container {
                 "127.0.0.1::8080",
                 "--volume",
                 &bind,
+                "--volume",
+                DAEMON_SOCKET,
                 "--env",
                 "CORCODE_DATA_DIR=/data",
+                "--env",
+                &host_dataset,
+                "--env",
+                "CORCODE_BIND_ADDR=0.0.0.0:8080",
                 "--env",
                 "CORCODE_USERNAME=cassidy",
                 "--env",
@@ -110,6 +121,12 @@ impl Container {
                 "CORCODE_WORKSPACE_IMAGE=ghcr.io/corvous/corcode-workspace:2026-08-05",
                 "--env",
                 "CORCODE_REPOS=CorVous/CorCode",
+                "--env",
+                "CORCODE_WARM_POOL=2",
+                "--env",
+                "CORCODE_CONTAINER_MEMORY_MB=4096",
+                "--env",
+                "CORCODE_CONTAINER_CPUS=2",
                 IMAGE,
             ],
         );
@@ -123,6 +140,33 @@ impl Container {
 
     fn remove(&self) {
         run(&self.docker, &["rm", "--force", CONTAINER]);
+    }
+
+    /// Everything the core said, so a container that died at boot says why
+    /// instead of leaving a blank failure behind.
+    fn logs(&self) -> String {
+        let said = run(&self.docker, &["logs", CONTAINER]);
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&said.stdout),
+            String::from_utf8_lossy(&said.stderr)
+        )
+    }
+
+    fn published_port(&self) -> u16 {
+        let published = run(&self.docker, &["port", CONTAINER, "8080/tcp"]);
+        let mapping = String::from_utf8_lossy(&published.stdout);
+        mapping
+            .lines()
+            .next()
+            .and_then(|line| line.rsplit(':').next())
+            .and_then(|port| port.trim().parse().ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "docker published no port ({mapping:?}), the core having said: {}",
+                    self.logs()
+                )
+            })
     }
 }
 
@@ -151,18 +195,7 @@ fn build_image(docker: &str) {
     );
 }
 
-fn published_port(docker: &str) -> u16 {
-    let published = run(docker, &["port", CONTAINER, "8080/tcp"]);
-    let mapping = String::from_utf8_lossy(&published.stdout);
-    mapping
-        .lines()
-        .next()
-        .and_then(|line| line.rsplit(':').next())
-        .and_then(|port| port.trim().parse().ok())
-        .unwrap_or_else(|| panic!("docker published no port: {mapping}"))
-}
-
-async fn await_health(port: u16) -> String {
+async fn await_health(port: u16, container: &Container) -> String {
     let url = format!("http://127.0.0.1:{port}/health");
     for _ in 0..BOOT_POLLS {
         if let Ok(answer) = reqwest::get(&url).await
@@ -172,7 +205,10 @@ async fn await_health(port: u16) -> String {
         }
         sleep(POLL_INTERVAL).await;
     }
-    panic!("the core never answered {url}");
+    panic!(
+        "the core never answered {url}, having said: {}",
+        container.logs()
+    );
 }
 
 fn run(docker: &str, args: &[&str]) -> std::process::Output {

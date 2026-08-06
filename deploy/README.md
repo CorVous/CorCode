@@ -111,6 +111,19 @@ the internet — and the app's own session gate, which every path but
 `/health` and `/login` goes through (ADR-0003). If the box is exposed
 anywhere wider, fix that first.
 
+The core's own container runs as root, which is how it reads that socket:
+the socket is root-owned, and the group that owns it is a host number no
+image can be built to match. Nothing is gained by dropping privilege in
+front of a socket that hands out root anyway. The hardening that matters is
+on the agent containers, which are the ones running work nobody reviewed
+(ADR-0001). The dataset it writes is root-owned for the same reason; the
+core is the only thing that reads it.
+
+The core will not start without that socket: it fails at boot rather than
+serve a console whose every button would fail. A container that exits
+straight after `up` usually means the bind is missing or the daemon is not
+running — `docker compose --file deploy/compose.yaml logs` says which.
+
 ## 6. First boot
 
 1. Visit `http://<nas>:8080/` — you land on `/login`.
