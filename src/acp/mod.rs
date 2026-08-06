@@ -164,7 +164,7 @@ pub struct Greeting<C> {
 impl<C: AcpChannel> Greeting<C> {
     /// Rung 1: ask for the adapter's own memory of `session_id` back.
     pub async fn resume(&mut self, session_id: &str) -> Result<(), AcpError> {
-        panic!("the first rung is not written yet")
+        self.rung(RESUME_SESSION, session_id).await
     }
 
     /// Rung 2: have the adapter rebuild its memory by replaying the whole
@@ -175,14 +175,33 @@ impl<C: AcpChannel> Greeting<C> {
     /// already holds those lines, and writing them again would say everything
     /// twice (ADR-0007 rule 3).
     pub async fn load(&mut self, session_id: &str) -> Result<(), AcpError> {
-        panic!("the second rung is not written yet")
+        self.rung(LOAD_SESSION, session_id).await
+    }
+
+    /// One rung asked for over the chat's workspace. Whatever the adapter
+    /// says on the way to its answer is read past and kept nowhere.
+    async fn rung(&mut self, method: &str, session_id: &str) -> Result<(), AcpError> {
+        self.calls
+            .call(
+                method,
+                json!({
+                    "sessionId": session_id,
+                    "cwd": WORKSPACE_MOUNT,
+                    "mcpServers": [],
+                }),
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Rung 3: a session that remembers nothing, answering with its new id.
     pub async fn open(&mut self) -> Result<String, AcpError> {
         let session = self
             .calls
-            .call(NEW_SESSION, json!({"cwd": WORKSPACE_MOUNT, "mcpServers": []}))
+            .call(
+                NEW_SESSION,
+                json!({"cwd": WORKSPACE_MOUNT, "mcpServers": []}),
+            )
             .await?;
         session["sessionId"]
             .as_str()
@@ -630,7 +649,10 @@ mod tests {
     async fn a_replayed_transcript_lands_in_nothing_written_afterwards() {
         let adapter = Adapter::new(ScriptedAdapter::loading(
             SESSION,
-            &[update(SESSION, "said before"), update(SESSION, "and before")],
+            &[
+                update(SESSION, "said before"),
+                update(SESSION, "and before"),
+            ],
             &[update(SESSION, "on it")],
         ));
         let mut greeting = adapter
