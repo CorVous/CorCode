@@ -234,6 +234,14 @@ where
         Err(refusal @ PromptError::Busy) => {
             (StatusCode::CONFLICT, format!("{refusal}.\n")).into_response()
         }
+        Err(failure @ PromptError::Unrecorded(_)) => {
+            error!("a turn was lost: {:#}", anyhow::Error::new(failure));
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The turn could not be written down.\n",
+            )
+                .into_response()
+        }
         Err(failure) => {
             error!("a turn broke: {:#}", anyhow::Error::new(failure));
             (StatusCode::BAD_GATEWAY, "The turn broke.\n").into_response()

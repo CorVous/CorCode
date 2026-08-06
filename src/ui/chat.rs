@@ -9,8 +9,8 @@ use super::{HTMX_PATH, chat_events_path, chat_prompt_path, last_push, page, stat
 /// What an event calls itself when it carries no ACP discriminator.
 const UNTYPED: &str = "event";
 
-/// The `corcode` key on a line the core wrote itself rather than relayed.
-const RESET_NOTICE: &str = "reset_notice";
+/// The key on a line the core wrote in its own voice rather than relaying.
+const CORE_LINE: &str = "corcode";
 
 /// How often an open chat asks for the log again. A turn streams for minutes,
 /// so this is what "live" means here: polling, not a second connection.
@@ -94,8 +94,8 @@ fn entry(event: &Value) -> Entry<'_> {
     if let Some(said) = event.get("prompt").and_then(blocks_text) {
         return Entry::Prompt(said);
     }
-    if field(event, "corcode") == Some(RESET_NOTICE) {
-        return Entry::Notice(field(event, "text").unwrap_or(RESET_NOTICE));
+    if let Some(kind) = field(event, CORE_LINE) {
+        return Entry::Notice(field(event, "text").unwrap_or(kind));
     }
     let kind = field(event, "sessionUpdate").unwrap_or(UNTYPED);
     match (kind, event.get("content").and_then(blocks_text)) {

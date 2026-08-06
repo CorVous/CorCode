@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use log::warn;
+use serde_json::json;
 use thiserror::Error;
 use ulid::Ulid;
 
-use crate::acp::{AcpTransport, Adapter, Connections, Held};
+use crate::acp::{AcpError, AcpTransport, Adapter, Connections, Held};
 use crate::config::Config;
 use crate::git::{self, Remotes};
 use crate::plane::ContainerPlane;
@@ -52,17 +53,31 @@ fn broke(failure: impl Into<anyhow::Error>) -> CreateError {
     CreateError::Broke(failure.into())
 }
 
-/// Why a prompt never reached the agent. Neither refusal is the request's
-/// fault, so both say what the chat is doing instead.
+/// Why a prompt never reached the agent, or never finished. Neither refusal is
+/// the request's fault, so both say what the chat is doing instead.
 #[derive(Debug, Error)]
 pub enum PromptError {
     #[error("this chat has no live connection")]
     NotConnected,
     #[error("this chat is still answering the last prompt")]
     Busy,
+    #[error("the turn could not be written down")]
+    Unrecorded(#[source] anyhow::Error),
     #[error("the turn broke")]
     Broke(#[source] anyhow::Error),
 }
+
+impl PromptError {
+    /// Whether the chat was turned away rather than the turn failing. A
+    /// refusal is worth a line in the log; a failure is worth the operator's
+    /// server log.
+    const fn is_refusal(&self) -> bool {
+        matches!(self, Self::NotConnected | Self::Busy)
+    }
+}
+
+/// What a refusal calls itself in a chat's own log (ADR-0006).
+const REFUSAL: &str = "refusal";
 
 /// Every chat in one dataset: who is live, what they hold, and how a new one
 /// comes to exist.
@@ -157,20 +172,49 @@ where
     /// back (ADR-0006). Returns once the agent has ended the turn.
     pub async fn prompt(&self, chat_id: &Ulid, said: &str) -> Result<(), PromptError> {
         let chat_id = chat_id.to_string();
-        let connection = self.connected(&chat_id)?;
+        let outcome = self.turn(&chat_id, said).await;
+        if let Err(refusal) = &outcome {
+            if refusal.is_refusal() {
+                self.note_refusal(&chat_id, refusal);
+            }
+        }
+        outcome
+    }
+
+    async fn turn(&self, chat_id: &str, said: &str) -> Result<(), PromptError> {
+        let connection = self.connected(chat_id)?;
         let turn = {
             let mut agent = connection.try_lock().map_err(|_| PromptError::Busy)?;
             agent
                 .take_turn(said, &mut |payload| {
-                    self.store.append_event(&chat_id, payload)?;
+                    self.store.append_event(chat_id, payload)?;
                     Ok(())
                 })
                 .await
         };
-        turn.map_err(|failure| {
-            self.connections.forget(&chat_id);
+        turn.map_err(|failure| self.ended(chat_id, failure))
+    }
+
+    /// A turn that failed, read for what it says about the connection it went
+    /// over: one the adapter spent is dropped, so the next prompt climbs
+    /// ADR-0007's ladder rather than going over a pipe nobody is holding.
+    fn ended(&self, chat_id: &str, failure: AcpError) -> PromptError {
+        if failure.spent_the_connection() {
+            self.connections.forget(chat_id);
             PromptError::Broke(failure.into())
-        })
+        } else {
+            PromptError::Unrecorded(failure.into())
+        }
+    }
+
+    /// A refusal in the chat's own log. The page renders nothing else, so
+    /// this is the only place the operator can read why their prompt went
+    /// nowhere; the next poll brings it (ADR-0006).
+    fn note_refusal(&self, chat_id: &str, refusal: &PromptError) {
+        let line = json!({"corcode": REFUSAL, "text": format!("Prompt not sent: {refusal}.")});
+        if let Err(failure) = self.store.append_event(chat_id, &line) {
+            warn!("a refusal could not be written down: {failure:#}");
+        }
     }
 
     /// The live connection a prompt goes over. A chat that has none is where

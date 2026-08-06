@@ -133,7 +133,9 @@ async fn a_second_prompt_while_the_first_turn_runs_is_refused() {
         "the refused prompt reached the agent anyway: {events:?}"
     );
     assert!(
-        events.contains(&recorded_refusal("this chat is still answering the last prompt")),
+        events.contains(&recorded_refusal(
+            "this chat is still answering the last prompt"
+        )),
         "the operator is never told why their prompt went nowhere: {events:?}"
     );
     assert!(
