@@ -92,6 +92,61 @@ async fn a_chat_can_opt_out_and_work_directly_on_the_base_branch() {
 }
 
 #[tokio::test]
+async fn the_console_form_submits_the_fields_the_handler_reads() {
+    let app = TestApp::start().await;
+    let console = app.body("/").await;
+    let fields = new_chat_fields(&console);
+
+    let response = app
+        .create(
+            &fields
+                .iter()
+                .map(|field| (field.as_str(), typed_into(field)))
+                .collect::<Vec<_>>(),
+        )
+        .await;
+
+    assert!(
+        console.contains("<input type=\"checkbox\" name=\"direct_on_base\">"),
+        "the opt-out is not a checkbox on the form: {console}"
+    );
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(app.manifest(&chat_id_of(&response))["repo"], REPO);
+    app.stop().await;
+}
+
+/// The field names the console's new-chat form would submit.
+fn new_chat_fields(console: &str) -> Vec<String> {
+    let form = console
+        .split_once("action=\"/chats\"")
+        .expect("the console should carry a new-chat form")
+        .1
+        .split_once("</form>")
+        .expect("the new-chat form should be closed")
+        .0;
+    form.match_indices("name=\"")
+        .map(|(at, marker)| {
+            form[at + marker.len()..]
+                .split_once('"')
+                .expect("an attribute should be quoted")
+                .0
+                .to_owned()
+        })
+        .collect()
+}
+
+/// What a browser would put in each field the form offers.
+fn typed_into(field: &str) -> &'static str {
+    match field {
+        "repo" => REPO,
+        "base_branch" => "main",
+        "slug" => "from the console",
+        "direct_on_base" => "on",
+        other => panic!("the form offers {other}, which the handler was never shown"),
+    }
+}
+
+#[tokio::test]
 async fn a_slug_that_names_nothing_is_refused_before_anything_is_built() {
     let app = TestApp::start().await;
 
