@@ -406,7 +406,6 @@ async fn a_wake_brings_the_pool_back_inside_its_cap_whatever_the_turn_does() {
         .await
         .expect_err("this adapter dies mid turn");
 
-    assert_eq!(dataset.status(&woken).await, RuntimeStatus::Live);
     assert_eq!(
         dataset.live_count().await,
         1,

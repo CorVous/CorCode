@@ -242,7 +242,7 @@ where
             )
                 .into_response()
         }
-        Err(refusal @ PromptError::Busy) => {
+        Err(refusal @ (PromptError::Busy | PromptError::Waking)) => {
             (StatusCode::CONFLICT, format!("{refusal}.\n")).into_response()
         }
         Err(failure @ PromptError::Unrecorded(_)) => {

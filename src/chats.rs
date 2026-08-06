@@ -67,6 +67,8 @@ pub enum PromptError {
     Unwoken(#[source] anyhow::Error),
     #[error("this chat is still answering the last prompt")]
     Busy,
+    #[error("this chat is being woken for another prompt")]
+    Waking,
     #[error("the turn could not be written down")]
     Unrecorded(#[source] anyhow::Error),
     #[error("the turn broke")]
@@ -79,7 +81,7 @@ impl PromptError {
     /// server log. A chat that could not be woken is told in its own log by
     /// whoever tried, which is the only place the reason is known.
     const fn is_refusal(&self) -> bool {
-        matches!(self, Self::Busy)
+        matches!(self, Self::Busy | Self::Waking)
     }
 }
 
@@ -146,6 +148,34 @@ const WAKE_FAILURE: &str = "wake_failure";
 /// time.
 type ParkingLock = tokio::sync::Mutex<()>;
 
+/// The chats being woken right now. Waking clones a workspace, starts a
+/// container and climbs a ladder, none of which two prompts may do at once for
+/// one chat, and none of which a sweep or a capping may cut across.
+type Waking = std::sync::Mutex<HashSet<String>>;
+
+/// One chat's wake, given to whoever asked for it first and given back when
+/// the wake is over however it ends.
+struct Claim<'a> {
+    waking: &'a Waking,
+    chat_id: String,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.waking
+            .lock()
+            .expect("no holder of the lock panics")
+            .remove(&self.chat_id);
+    }
+}
+
+/// Where a wake found its agent: a container that was already up, or one this
+/// wake started and is therefore this wake's to give back.
+struct Housing {
+    container: String,
+    spawned: bool,
+}
+
 /// What a climb up ADR-0007's ladder came to: a connection to prompt over, and
 /// whether the agent on the other end of it remembers this chat.
 struct Climbed<C> {
@@ -166,6 +196,7 @@ pub struct Chats<P, T: AcpTransport> {
     workspace_image: String,
     warm_pool: usize,
     parking: ParkingLock,
+    waking: Waking,
 }
 
 impl<P, T: AcpTransport + Sync> Chats<P, T> {
@@ -183,6 +214,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
             workspace_image: config.workspace_image.clone(),
             warm_pool: config.warm_pool,
             parking: ParkingLock::default(),
+            waking: Waking::default(),
         }
     }
 }
@@ -258,13 +290,11 @@ where
         let chat_id = chat_id.to_string();
         let outcome = self.turn(&chat_id, said).await;
         match &outcome {
-            Ok(()) => {
-                self.touch(&chat_id);
-                self.cap_the_pool().await;
-            }
+            Ok(()) => self.touch(&chat_id),
             Err(refusal) if refusal.is_refusal() => self.note_refusal(&chat_id, refusal),
             Err(_) => {}
         }
+        self.cap_the_pool().await;
         outcome
     }
 
@@ -285,7 +315,7 @@ where
 
     /// Bring the pool back inside its cap. A pool that cannot be read is the
     /// operator's to hear about, not this request's to fail on: the turn or
-    /// the chat it followed is already done.
+    /// the chat it followed is already done, whichever way it went.
     ///
     /// One capping at a time: two that weigh the same pool before either of
     /// them parks anything would each pick the same victims and cut the pool
@@ -309,9 +339,25 @@ where
         Ok(pool::beyond_the_pool(
             &chats,
             &live,
-            &self.connections.busy_chat_ids(),
+            &self.occupied(),
             self.warm_pool,
         ))
+    }
+
+    /// The chats no capping may take a container from: the ones taking a turn,
+    /// and the ones a wake is starting a container for.
+    fn occupied(&self) -> HashSet<String> {
+        let mut occupied = self.connections.busy_chat_ids();
+        occupied.extend(self.claimed());
+        occupied
+    }
+
+    /// The chats being woken right now.
+    fn claimed(&self) -> HashSet<String> {
+        self.waking
+            .lock()
+            .expect("no holder of the lock panics")
+            .clone()
     }
 
     /// Park one chat: the container goes, the workspace and the agent's
@@ -420,7 +466,12 @@ where
             .map(|manifest| manifest.chat_id)
             .collect();
         let live = self.plane.live_chat_ids().await?;
-        Ok(sweep::reconcile(&self.store.workspace_ids()?, &open, &live))
+        Ok(sweep::reconcile(
+            &self.store.workspace_ids()?,
+            &open,
+            &live,
+            &self.claimed(),
+        ))
     }
 
     /// Get the chat's workspace onto the remote, whole. Git blocks, so it
@@ -484,7 +535,11 @@ where
     ///
     /// A wake that fails leaves the chat as it was — nothing is repaired on a
     /// guess (rule 5) — so the prompt can simply be put again.
+    ///
+    /// One wake at a time: a second prompt arriving mid-wake is turned away
+    /// rather than left to clone over the first one's workspace.
     async fn wake(&self, chat_id: &str) -> Result<Held<T::Channel>, PromptError> {
+        let _claim = self.claim_the_wake(chat_id)?;
         match self.woken(chat_id).await {
             Ok(held) => Ok(held),
             Err(failure) => {
@@ -498,23 +553,44 @@ where
         }
     }
 
+    /// The wake of `chat_id`, for as long as the caller keeps it. A chat
+    /// already being woken has nothing left to give.
+    fn claim_the_wake(&self, chat_id: &str) -> Result<Claim<'_>, PromptError> {
+        if self
+            .waking
+            .lock()
+            .expect("no holder of the lock panics")
+            .insert(chat_id.to_owned())
+        {
+            Ok(Claim {
+                waking: &self.waking,
+                chat_id: chat_id.to_owned(),
+            })
+        } else {
+            Err(PromptError::Waking)
+        }
+    }
+
     /// A chat with a workspace, a container and an agent that has been asked
     /// for its memory back, in that order (ADR-0007). Whatever the waking cost
     /// the chat is in its log by the time a prompt goes out.
+    ///
+    /// Nothing is cloned, started or written for a chat that could not be
+    /// prompted anyway: the manifest is read for everything the wake needs
+    /// before the wake touches anything.
     async fn woken(&self, chat_id: &str) -> Result<Held<T::Channel>> {
         let manifest = self.store.read_manifest(chat_id)?;
+        let remembered = manifest
+            .acp_session_id
+            .clone()
+            .context("this chat has no session recorded to come back to")?;
         let manifest = if manifest.state == ChatState::Archived {
             self.revive(manifest).await?
         } else {
             self.still_has_its_workspace(chat_id)?;
             manifest
         };
-        let remembered = manifest
-            .acp_session_id
-            .clone()
-            .context("this chat has no session recorded to come back to")?;
-        let container = self.container_for(chat_id).await?;
-        let climbed = self.climb(&container, &remembered).await?;
+        let climbed = self.climbed_in_a_container(chat_id, &remembered).await?;
         if climbed.forgot_everything {
             self.store.write_manifest(&Manifest {
                 acp_session_id: Some(climbed.connection.session_id().to_owned()),
@@ -522,7 +598,28 @@ where
             })?;
             self.note(chat_id, RESET_NOTICE, resume::MEMORY_RESET);
         }
-        Ok(self.connections.hold(chat_id, climbed.connection))
+        Ok(self.connections.hold(chat_id, climbed.connection)?)
+    }
+
+    /// Climb ADR-0007's ladder in the chat's container, starting one if the
+    /// chat is not holding one. A climb that gets nowhere hands back a
+    /// container it started: the chat is parked again, exactly as the prompt
+    /// found it.
+    async fn climbed_in_a_container(
+        &self,
+        chat_id: &str,
+        remembered: &str,
+    ) -> Result<Climbed<T::Channel>> {
+        let housing = self.container_for(chat_id).await?;
+        match self.climb(&housing.container, remembered).await {
+            Ok(climbed) => Ok(climbed),
+            Err(failure) => {
+                if housing.spawned {
+                    self.release(chat_id, "woken but out of reach").await;
+                }
+                Err(failure.into())
+            }
+        }
     }
 
     /// An open chat has a working tree, always (ADR-0002 rule 1). One that
@@ -543,12 +640,21 @@ where
     ///
     /// The clone is the whole of the revival: one that fails takes its own
     /// half-written workspace with it and leaves the chat archived and
-    /// readable, to be tried again once whatever is missing is back.
+    /// readable, to be tried again once whatever is missing is back. What was
+    /// on disk before the revival began is nobody's to clone over or to
+    /// delete, so a workspace already there stops the revival dead: an
+    /// archived chat is one with no working tree (ADR-0002 rule 1).
     async fn revive(&self, manifest: Manifest) -> Result<Manifest> {
         let last_pushed = manifest
             .last_pushed_commit
             .clone()
             .context("this chat was archived without a commit to come back to")?;
+        let workspace = self.store.workspace_dir(&manifest.chat_id);
+        anyhow::ensure!(
+            !workspace.exists(),
+            "this chat is archived but something is already in its workspace at {}",
+            workspace.display()
+        );
         let standing_at = match self.clone_back(&manifest, &last_pushed).await {
             Ok(standing_at) => standing_at,
             Err(failure) => {
@@ -569,10 +675,10 @@ where
         Ok(revived)
     }
 
-    /// Take away whatever a revival that failed got as far as writing, so the
-    /// chat is left archived with nothing on disk, exactly as it was. A tree
-    /// that will not go is the operator's to hear about: the chat is already
-    /// as safe as it can be made.
+    /// Take away what this revival got as far as writing — there was nothing
+    /// there before it started — so the chat is left archived with nothing on
+    /// disk, exactly as it was. A tree that will not go is the operator's to
+    /// hear about: the chat is already as safe as it can be made.
     fn wipe_the_half_clone(&self, chat_id: &str) {
         if let Err(stubborn) = self.store.remove_workspace(chat_id) {
             warn!("{chat_id} left half a clone that will not go: {stubborn:#}");
@@ -594,11 +700,17 @@ where
     /// The container this chat's adapter is reached in. One that is still up
     /// is connected to again rather than replaced: the agent's memory is
     /// inside it, and that is the whole of what rung 1 asks for.
-    async fn container_for(&self, chat_id: &str) -> Result<String> {
+    async fn container_for(&self, chat_id: &str) -> Result<Housing> {
         if self.plane.live_chat_ids().await?.contains(chat_id) {
-            return Ok(container_name(chat_id));
+            return Ok(Housing {
+                container: container_name(chat_id),
+                spawned: false,
+            });
         }
-        self.spawn(chat_id).await
+        Ok(Housing {
+            container: self.spawn(chat_id).await?,
+            spawned: true,
+        })
     }
 
     /// Climb ADR-0007's ladder in `container` until a rung answers: the
@@ -741,7 +853,9 @@ where
         let connection = self.adapter.open_session(container).await.map_err(broke)?;
         manifest.acp_session_id = Some(connection.session_id().to_owned());
         self.store.write_manifest(&manifest).map_err(broke)?;
-        self.connections.hold(&manifest.chat_id, connection);
+        self.connections
+            .hold(&manifest.chat_id, connection)
+            .map_err(broke)?;
         Ok(())
     }
 }
