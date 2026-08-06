@@ -36,6 +36,10 @@ enum Stall {
 }
 
 /// Answers ACP calls from a canned script and remembers what it was asked.
+///
+/// A clone is the same adapter, not another one: a test that has handed its
+/// fake to the thing under test keeps a copy to read what it heard.
+#[derive(Clone)]
 pub struct ScriptedAdapter {
     answers: Arc<Script>,
     asks: Arc<Vec<Value>>,
