@@ -88,6 +88,7 @@ async fn a_saved_secret_reads_as_set_from_the_settings() {
 #[tokio::test]
 async fn a_blank_save_changes_nothing_and_says_so() {
     let app = TestApp::bootstrapped().await;
+    app.save("github_token", SENTINEL).await;
 
     let fragment = app.save("github_token", "   ").await;
 
@@ -95,6 +96,23 @@ async fn a_blank_save_changes_nothing_and_says_so() {
         fragment.contains("nothing given, nothing changed"),
         "a blank save reads as something having happened: {fragment}"
     );
+    assert!(
+        app.secret_file("github_token").exists(),
+        "a blank save took the set value away"
+    );
+    assert!(
+        fragment.contains("set (from settings)"),
+        "a blank save unset the secret: {fragment}"
+    );
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_blank_save_over_a_secret_nothing_holds_writes_nothing() {
+    let app = TestApp::bootstrapped().await;
+
+    let fragment = app.save("github_token", "   ").await;
+
     assert!(
         !app.secret_file("github_token").exists(),
         "a blank save reached the disk"

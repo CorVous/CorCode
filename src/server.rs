@@ -220,12 +220,24 @@ fn answer<V>(
 where
     V: VerifyClient + Send + Sync + 'static,
 {
-    match outcome.and_then(|outcome| Ok((settings.source(secret)?, outcome))) {
-        Ok((source, outcome)) => {
-            Html(ui::secret_settings(secret, source, &outcome)).into_response()
-        }
+    match section(settings, secret, outcome) {
+        Ok(section) => Html(section).into_response(),
         Err(failure) => broken_invariant(&anyhow::Error::new(failure)),
     }
+}
+
+/// The section's markup, or whatever went wrong reading the secret's state.
+fn section<V>(
+    settings: &Settings<V>,
+    secret: Secret,
+    outcome: Result<Outcome, SecretsError>,
+) -> Result<String, SecretsError>
+where
+    V: VerifyClient + Send + Sync + 'static,
+{
+    let outcome = outcome?;
+    let source = settings.source(secret)?;
+    Ok(ui::secret_settings(secret, source, &outcome))
 }
 
 /// Which secret a per-secret route was asked about: the one its path names.

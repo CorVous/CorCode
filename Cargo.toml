@@ -50,8 +50,9 @@ thiserror = "2.0.19"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "signal", "net", "io-util", "time"] }
 ulid = "3.0.0"
 # Blocking, so a check runs on a blocking task; in exchange the TLS is rustls
-# over ring with the Mozilla roots compiled in, which needs neither a C
-# toolchain to build nor a cert bundle in the runtime image.
+# over ring with the Mozilla roots compiled in: no system OpenSSL, no
+# libssl-dev or pkg-config to build against, and no cert bundle to keep in the
+# runtime image.
 ureq = { version = "=3.3.0", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]

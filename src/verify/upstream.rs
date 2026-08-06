@@ -199,6 +199,24 @@ mod tests {
         String::from_utf8(value.as_bytes().to_vec()).expect("a header this app wrote")
     }
 
+    /// Left to itself ureq waits forever, and a check that waits forever holds
+    /// a blocking thread with nothing to show for it.
+    #[test]
+    fn a_service_that_never_answers_is_given_up_on() {
+        let agent = UpstreamVerifier::new().agent;
+
+        assert_eq!(agent.config().timeouts().global, Some(PATIENCE));
+    }
+
+    /// Being turned away is what a check is for, so it must come back as a
+    /// status and not as a failure to reach anyone.
+    #[test]
+    fn a_refusal_comes_back_as_an_answer() {
+        let agent = UpstreamVerifier::new().agent;
+
+        assert!(!agent.config().http_status_as_error());
+    }
+
     #[test]
     fn the_github_check_asks_the_api_who_the_token_belongs_to() {
         let request = asked(Secret::GithubToken);

@@ -104,6 +104,20 @@ mod tests {
     #[tokio::test]
     async fn a_blank_save_changes_nothing_and_says_so() {
         let (dir, settings, _) = bootstrapped();
+        save(&settings, TOKEN);
+
+        assert_eq!(save(&settings, "   \n"), Outcome::NothingGiven);
+
+        assert!(
+            kept(&dir).join("github_token").exists(),
+            "a blank save took the set value away"
+        );
+        assert_eq!(source(&settings), Source::Settings);
+    }
+
+    #[tokio::test]
+    async fn a_blank_save_over_a_secret_nothing_holds_writes_nothing() {
+        let (dir, settings, _) = bootstrapped();
 
         assert_eq!(save(&settings, "   \n"), Outcome::NothingGiven);
 
