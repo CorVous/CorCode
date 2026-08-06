@@ -15,6 +15,17 @@ pub struct Sweep {
     pub held: Vec<String>,
 }
 
+/// What one pass came to, once the deletions it planned have been tried.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Swept {
+    /// Working trees that are gone.
+    pub removed: Vec<String>,
+    /// Working trees the sweep meant to delete and could not.
+    pub stubborn: Vec<String>,
+    /// Orphans left alone because a container still holds them.
+    pub held: Vec<String>,
+}
+
 /// Read `workspaces` against the chats that claim one.
 ///
 /// The trees `claimed` names are being built right now and are left alone: a

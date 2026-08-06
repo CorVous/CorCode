@@ -108,12 +108,12 @@ async fn the_status_fragment_comes_back_without_the_page_around_it() {
     let body = app.body("/status").await;
 
     assert!(
-        body.starts_with("<section id=\"status\""),
-        "the fragment is not a bare section: {body}"
+        body.starts_with("<summary>pool"),
+        "the fragment is not the inside of the status line: {body}"
     );
     assert!(
-        !body.contains("<html"),
-        "the fragment carries a whole page: {body}"
+        !body.contains("<html") && !body.contains("<details"),
+        "the fragment carries more than the picture: {body}"
     );
     assert!(
         body.contains("pool 0/2 · parked 1"),

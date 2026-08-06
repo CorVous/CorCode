@@ -125,7 +125,7 @@ where
     T: AcpTransport + Send + Sync + 'static,
 {
     match chats.status(Utc::now()).await {
-        Ok(status) => Html(ui::status_line(&status)).into_response(),
+        Ok(status) => Html(ui::status_picture(&status)).into_response(),
         Err(failure) => broken_invariant(&failure),
     }
 }

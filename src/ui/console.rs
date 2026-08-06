@@ -7,7 +7,7 @@ use chrono::TimeDelta;
 use crate::git::chat_branch;
 use crate::status::{Slot, Status};
 use crate::store::RuntimeStatus;
-use crate::sweep::Sweep;
+use crate::sweep::Swept;
 
 use super::{
     CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, STATUS_PATH, last_push, page, status_word, text,
@@ -67,10 +67,22 @@ pub fn chat_list(chats: &[Chat]) -> String {
     list
 }
 
-/// The container picture in one line, expanding in place and polling itself
-/// so it stays true while the console is open (ADR-0008).
+/// The container picture, expanding in place and polling itself (ADR-0008).
+///
+/// Only the inside is swapped: the `<details>` holds whether the reader has
+/// it open, and a poll landing mid-read must not close it.
 #[must_use]
 pub fn status_line(status: &Status) -> String {
+    format!(
+        "<details id=\"status\" hx-get=\"{STATUS_PATH}\" hx-trigger=\"every {POLL_SECONDS}s\" \
+         hx-target=\"this\" hx-swap=\"innerHTML\">{}</details>",
+        status_picture(status),
+    )
+}
+
+/// The inside of the status line, which is all a poll replaces.
+#[must_use]
+pub fn status_picture(status: &Status) -> String {
     let Status {
         pool,
         warm_pool,
@@ -80,13 +92,11 @@ pub fn status_line(status: &Status) -> String {
     } = status;
     let live = pool.len();
     format!(
-        "<section id=\"status\" hx-get=\"{STATUS_PATH}\" hx-trigger=\"every {POLL_SECONDS}s\" \
-         hx-swap=\"outerHTML\"><details>\
-         <summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {}</summary>\
+        "<summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {}</summary>\
          <dl><dt>Pool</dt><dd>{}</dd>\
          <dt>Parked</dt><dd>{parked} chats — workspace kept, container torn down</dd>\
          <dt>Image</dt><dd>{}</dd>\
-         <dt>Sweep</dt><dd>{}</dd></dl></details></section>",
+         <dt>Sweep</dt><dd>{}</dd></dl>",
         text(image_tag(image)),
         swept_in_a_word(sweep.as_ref()),
         slots(pool),
@@ -128,37 +138,42 @@ fn idle_for(idle: TimeDelta) -> String {
 }
 
 /// What the last sweep came to, short enough for the summary line
-/// (ADR-0002 rule 4).
-fn swept_in_a_word(sweep: Option<&Sweep>) -> String {
+/// (ADR-0002 rule 4). A working tree that would not go is the news, and it
+/// outranks the ones that went.
+fn swept_in_a_word(sweep: Option<&Swept>) -> String {
     let Some(sweep) = sweep else {
         return "not yet run".to_owned();
     };
-    if sweep.orphaned.is_empty() {
+    if !sweep.stubborn.is_empty() {
+        format!("failed to remove {}", sweep.stubborn.len())
+    } else if sweep.removed.is_empty() {
         "ok".to_owned()
     } else {
-        format!("removed {}", sweep.orphaned.len())
+        format!("removed {}", sweep.removed.len())
     }
 }
 
 /// The same sweep with the chat ids spelled out, for the expanded picture.
 /// A working tree an orphan's container is still holding was left alone, and
 /// only this line says which (ADR-0002 rule 4).
-fn swept_in_full(sweep: Option<&Sweep>) -> String {
+fn swept_in_full(sweep: Option<&Swept>) -> String {
     let Some(sweep) = sweep else {
         return "not yet run".to_owned();
     };
     let mut told = swept_in_a_word(Some(sweep));
-    if !sweep.orphaned.is_empty() {
-        write!(told, " ({})", text(&sweep.orphaned.join(", ")))
+    for (chat_ids, what_became_of_them) in [
+        (&sweep.stubborn, "would not go"),
+        (&sweep.removed, "removed"),
+        (&sweep.held, "left alone while their containers are up"),
+    ] {
+        if !chat_ids.is_empty() {
+            write!(
+                told,
+                ", {what_became_of_them} ({})",
+                text(&chat_ids.join(", "))
+            )
             .expect("writing to a string cannot fail");
-    }
-    if !sweep.held.is_empty() {
-        write!(
-            told,
-            ", left alone while their containers are up ({})",
-            text(&sweep.held.join(", ")),
-        )
-        .expect("writing to a string cannot fail");
+        }
     }
     told
 }
@@ -368,27 +383,31 @@ mod tests {
             "the status line does not read as ADR-0008 asks: {rendered}"
         );
         assert!(
-            rendered.contains("<details><summary>pool"),
+            rendered.contains("<summary>pool"),
             "the status line does not expand in place: {rendered}"
         );
     }
 
     #[test]
     fn the_status_line_polls_itself_while_the_console_is_open() {
-        let fragment = status_line(&status());
+        let rendered = status_line(&status());
 
         assert!(
-            fragment.starts_with("<section id=\"status\""),
-            "the status line is not a fragment htmx can swap: {fragment}"
+            rendered.starts_with("<details id=\"status\""),
+            "the status line is not one element htmx can poll: {rendered}"
         );
         assert!(
-            fragment.contains(&format!("hx-get=\"{STATUS_PATH}\""))
-                && fragment.contains("hx-trigger=\"every 5s\""),
-            "the status line does not poll itself: {fragment}"
+            rendered.contains(&format!("hx-get=\"{STATUS_PATH}\""))
+                && rendered.contains("hx-trigger=\"every 5s\""),
+            "the status line does not poll itself: {rendered}"
         );
         assert!(
-            console_page(&every_state(), &status(), &repos()).contains(&fragment),
-            "the console and the fragment render the status differently"
+            rendered.contains(&status_picture(&status())),
+            "the console and the polled fragment render the status differently"
+        );
+        assert!(
+            console_page(&every_state(), &status(), &repos()).contains(&rendered),
+            "the console renders a status line of its own"
         );
     }
 
@@ -399,9 +418,9 @@ mod tests {
                 slot("running", TimeDelta::minutes(3)),
                 slot("waiting", TimeDelta::hours(2)),
             ],
-            sweep: Some(Sweep {
-                orphaned: vec!["01K1ORPHAN".to_owned()],
-                held: Vec::new(),
+            sweep: Some(Swept {
+                removed: vec!["01K1ORPHAN".to_owned()],
+                ..Swept::default()
             }),
             ..status()
         });
@@ -417,6 +436,47 @@ mod tests {
         assert!(
             fragment.contains("01K1ORPHAN"),
             "the sweep does not name what it removed: {fragment}"
+        );
+    }
+
+    /// A poll lands every few seconds, and one landing while the picture is
+    /// open must not close it: the element the reader opened is the one thing
+    /// the swap leaves alone.
+    #[test]
+    fn an_expanded_picture_survives_the_poll_that_lands_while_it_is_read() {
+        let rendered = status_line(&status());
+
+        assert!(
+            rendered.contains("hx-target=\"this\"") && rendered.contains("hx-swap=\"innerHTML\""),
+            "the poll replaces the element holding the open state: {rendered}"
+        );
+        assert!(
+            !status_picture(&status()).contains("<details"),
+            "the polled fragment brings its own details element, closed"
+        );
+    }
+
+    /// A workspace the sweep meant to delete and could not is not a sweep
+    /// that went fine, and the operator has to be able to tell them apart.
+    #[test]
+    fn a_workspace_that_would_not_go_reads_apart_from_one_that_went() {
+        let fragment = status_line(&Status {
+            sweep: Some(Swept {
+                removed: vec!["01K1GONE".to_owned()],
+                stubborn: vec!["01K1STUCK".to_owned()],
+                held: Vec::new(),
+            }),
+            ..status()
+        });
+
+        assert!(
+            fragment.contains("sweep failed to remove 1"),
+            "a failed removal reads as a clean sweep: {fragment}"
+        );
+        assert!(
+            fragment.contains("would not go (01K1STUCK)")
+                && fragment.contains("removed (01K1GONE)"),
+            "the expanded picture does not say which was which: {fragment}"
         );
     }
 
@@ -466,7 +526,7 @@ mod tests {
             warm_pool: POOL,
             parked: 1,
             image: IMAGE.to_owned(),
-            sweep: Some(Sweep::default()),
+            sweep: Some(Swept::default()),
         }
     }
 

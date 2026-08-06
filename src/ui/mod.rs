@@ -7,7 +7,7 @@ mod escape;
 use crate::store::{Manifest, RuntimeStatus};
 
 pub use chat::{chat_page, event_log};
-pub use console::{chat_list, console_page, status_line};
+pub use console::{chat_list, console_page, status_line, status_picture};
 
 use escape::text;
 
@@ -17,6 +17,10 @@ pub const CHATS_PATH: &str = "/chats";
 
 /// The status line, both as the head of the console and as the fragment htmx
 /// polls to keep it true (ADR-0008).
+///
+/// Every poll costs one scan of `chats/` and one liveness call to the daemon,
+/// per console tab left open. At a household's handful of chats and tabs that
+/// is nothing; it is the reason the interval is seconds rather than sub-second.
 pub const STATUS_PATH: &str = "/status";
 
 /// Where the vendored htmx bundle is served from; nothing reaches a CDN.

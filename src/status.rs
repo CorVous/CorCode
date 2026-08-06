@@ -2,7 +2,7 @@
 
 use chrono::TimeDelta;
 
-use crate::sweep::Sweep;
+use crate::sweep::Swept;
 
 /// A warm-pool slot: whose chat holds the container, and how long since that
 /// chat last took a turn — the ordering the pool is capped by (ADR-0002).
@@ -22,5 +22,5 @@ pub struct Status {
     /// The pinned image every chat runs (ADR-0004).
     pub image: String,
     /// What the last orphan sweep found, or nothing if none has run yet.
-    pub sweep: Option<Sweep>,
+    pub sweep: Option<Swept>,
 }

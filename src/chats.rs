@@ -21,7 +21,7 @@ use crate::store::{
     ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, RuntimeStatus,
     runtime_status,
 };
-use crate::sweep::{self, Sweep};
+use crate::sweep::{self, Sweep, Swept};
 use crate::ui;
 
 /// The variable the agent reads its Anthropic credentials from (ADR-0001).
@@ -155,9 +155,9 @@ type ParkingLock = tokio::sync::Mutex<()>;
 /// one chat, and none of which a sweep or a capping may cut across.
 type Waking = std::sync::Mutex<HashSet<String>>;
 
-/// What the last orphan sweep found, kept for the status line to read
+/// What the last orphan sweep came to, kept for the status line to read
 /// (ADR-0008). Nothing until one has run.
-type LastSweep = std::sync::Mutex<Option<Sweep>>;
+type LastSweep = std::sync::Mutex<Option<Swept>>;
 
 /// One chat's wake, given to whoever asked for it first and given back when
 /// the wake is over however it ends.
@@ -473,19 +473,29 @@ where
             Ok(swept) => swept,
             Err(failure) => return warn!("workspaces/ could not be read: {failure:#}"),
         };
-        *self
-            .last_sweep
-            .lock()
-            .expect("no holder of the lock panics") = Some(swept.clone());
         for chat_id in &swept.held {
             error!("{chat_id} is not open but its container is up: its workspace is left alone");
         }
-        for chat_id in &swept.orphaned {
-            match self.store.remove_workspace(chat_id) {
-                Ok(()) => info!("{chat_id} left a workspace no chat claims: removed"),
-                Err(stubborn) => warn!("{chat_id} left a workspace that will not go: {stubborn:#}"),
+        let mut outcome = Swept {
+            held: swept.held,
+            ..Swept::default()
+        };
+        for chat_id in swept.orphaned {
+            match self.store.remove_workspace(&chat_id) {
+                Ok(()) => {
+                    info!("{chat_id} left a workspace no chat claims: removed");
+                    outcome.removed.push(chat_id);
+                }
+                Err(stubborn) => {
+                    warn!("{chat_id} left a workspace that will not go: {stubborn:#}");
+                    outcome.stubborn.push(chat_id);
+                }
             }
         }
+        *self
+            .last_sweep
+            .lock()
+            .expect("no holder of the lock panics") = Some(outcome);
     }
 
     /// Which working trees on disk no open chat claims, and which of those a
