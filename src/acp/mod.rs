@@ -24,17 +24,30 @@ use crate::plane::WORKSPACE_MOUNT;
 /// The ACP version this client speaks.
 const PROTOCOL_VERSION: u32 = 1;
 
+/// The JSON-RPC this client speaks.
+const JSONRPC: &str = "2.0";
+
 /// How long any one call may take. The adapter boots Node and the agent SDK
 /// on the first one, so this is patience, not a deadline anyone should meet.
 const PATIENCE: Duration = Duration::from_secs(120);
 
-/// How long one turn may take. An agent reads, edits and runs tests inside a
-/// single prompt, so the only thing this catches is an adapter that has
-/// stopped speaking altogether.
+/// How long a turn may go silent. An agent reads, edits and runs tests inside
+/// a single prompt, and every line it streams meanwhile starts the wait over,
+/// so what this catches is an adapter that has stopped speaking altogether.
 const TURN_PATIENCE: Duration = Duration::from_secs(600);
 
 /// The notification an adapter streams a turn over.
 const SESSION_UPDATE: &str = "session/update";
+
+/// The one thing an adapter asks a client that declares no capabilities for.
+const PERMISSION_ASK: &str = "session/request_permission";
+
+/// What a permission ask leaves in the log, since the operator is the one who
+/// would have granted it (ADR-0006).
+const PERMISSION_DECLINED: &str = "permission_declined";
+
+/// JSON-RPC's code for a method the receiver does not implement.
+const NO_SUCH_METHOD: i64 = -32601;
 
 /// Where a turn's payloads go as they happen: the prompt on its way out, then
 /// each update on its way in. Recording is what makes them real (ADR-0006),
@@ -161,8 +174,8 @@ impl<C: AcpChannel> Connection<C> {
     }
 
     /// Take one turn: `said` goes into `record` before it goes on the wire,
-    /// then every update the adapter streams back until it ends the turn.
-    /// Updates belonging to another session are the adapter's own business.
+    /// then everything the adapter says about this session until it ends the
+    /// turn. Another session's traffic is the adapter's own business.
     pub async fn take_turn(&mut self, said: &str, record: &mut Record<'_>) -> Result<(), AcpError> {
         let params = json!({
             "sessionId": self.session_id,
@@ -176,8 +189,8 @@ impl<C: AcpChannel> Connection<C> {
                 "session/prompt",
                 params.clone(),
                 &mut |message| {
-                    streamed_update(message, &session_id)
-                        .map_or_else(|| Ok(()), |update| keep(record, update))
+                    worth_recording(message, &session_id)
+                        .map_or_else(|| Ok(()), |payload| keep(record, &payload))
                 },
             )
             .await
@@ -185,16 +198,94 @@ impl<C: AcpChannel> Connection<C> {
     }
 }
 
-/// The update inside a `session/update` notification for `session_id`, if
-/// that is what this message is.
-fn streamed_update<'a>(message: &'a Value, session_id: &str) -> Option<&'a Value> {
-    (message["method"].as_str() == Some(SESSION_UPDATE)
-        && message["params"]["sessionId"].as_str() == Some(session_id))
-    .then(|| &message["params"]["update"])
+/// What one thing the adapter says mid-turn leaves in this chat's log: the
+/// update it streamed, or a line saying its permission ask was turned down.
+fn worth_recording(message: &Value, session_id: &str) -> Option<Value> {
+    if message["params"]["sessionId"].as_str() != Some(session_id) {
+        return None;
+    }
+    match message["method"].as_str()? {
+        SESSION_UPDATE => Some(streamed(&message["params"])),
+        PERMISSION_ASK => Some(declined(&message["params"])),
+        _ => None,
+    }
+}
+
+/// The update inside a notification, or the whole notification when the
+/// adapter carries the fields itself: a shape this build does not know passes
+/// through unchanged rather than being written down as nothing (ADR-0006).
+fn streamed(params: &Value) -> Value {
+    params.get("update").unwrap_or(params).clone()
+}
+
+/// The core's own line for a permission ask (ADR-0006).
+fn declined(params: &Value) -> Value {
+    let asked_for = params["toolCall"]["title"]
+        .as_str()
+        .unwrap_or("a tool call");
+    json!({
+        "corcode": PERMISSION_DECLINED,
+        "text": format!("Declined a permission request: {asked_for}."),
+    })
+}
+
+/// The answer we owe something the adapter said. A notification is owed
+/// nothing; a request is owed a response even when we cannot do what it asks,
+/// or the adapter waits on us for the rest of the turn. We declared no
+/// capabilities, so the one ask we can meet is a permission ask, and the
+/// answer to that is no: nothing outside the container is ours to grant
+/// (ADR-0001).
+fn owed(message: &Value) -> Option<Value> {
+    let id = message.get("id").filter(|id| !id.is_null())?;
+    Some(if message["method"] == PERMISSION_ASK {
+        json!({
+            "jsonrpc": JSONRPC,
+            "id": id,
+            "result": {"outcome": no_permission(&message["params"]["options"])},
+        })
+    } else {
+        json!({
+            "jsonrpc": JSONRPC,
+            "id": id,
+            "error": {
+                "code": NO_SUCH_METHOD,
+                "message": format!(
+                    "{} is not one this client answers",
+                    message["method"].as_str().unwrap_or("that"),
+                ),
+            },
+        })
+    })
+}
+
+/// A permission ask turned down: the adapter's own reject option where it
+/// offered one, and a cancelled outcome where it offered none.
+fn no_permission(options: &Value) -> Value {
+    options
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|option| {
+            option["kind"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("reject"))
+        })
+        .and_then(|option| option["optionId"].as_str())
+        .map_or_else(
+            || json!({"outcome": "cancelled"}),
+            |chosen| json!({"outcome": "selected", "optionId": chosen}),
+        )
 }
 
 fn keep(record: &mut Record<'_>, payload: &Value) -> Result<(), AcpError> {
     record(payload).map_err(|source| AcpError::Unrecorded { source })
+}
+
+fn silent(method: &str, patience: Duration) -> AcpError {
+    AcpError::Silent {
+        method: method.to_owned(),
+        patience,
+    }
 }
 
 /// A look at every message that answers no request of ours, so a caller can
@@ -214,8 +305,8 @@ impl<C: AcpChannel> Calls<C> {
             .await
     }
 
-    /// One request, answered inside `patience`, with everything the adapter
-    /// says meanwhile offered to `overhear`.
+    /// One request, with `patience` for each thing the adapter says or fails
+    /// to say, and everything it says meanwhile offered to `overhear`.
     async fn call_within(
         &mut self,
         patience: Duration,
@@ -225,39 +316,43 @@ impl<C: AcpChannel> Calls<C> {
     ) -> Result<Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
-        let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        timeout(patience, self.exchange(&request, id, method, overhear))
-            .await
-            .map_err(|_| AcpError::Silent {
-                method: method.to_owned(),
-                patience,
-            })?
+        let request = json!({"jsonrpc": JSONRPC, "id": id, "method": method, "params": params});
+        self.say(&request, patience, method).await?;
+        self.answer_to(id, method, patience, overhear).await
     }
 
-    /// One request handed over and its answer waited for. Handing it over can
-    /// block as long as answering can: the adapter's stdin is a pipe.
-    async fn exchange(
+    /// One message handed over. Handing it over can block as long as
+    /// answering can: the adapter's stdin is a pipe.
+    async fn say(
         &mut self,
-        request: &Value,
-        id: u64,
+        message: &Value,
+        patience: Duration,
         method: &str,
-        overhear: &mut Overhear<'_>,
-    ) -> Result<Value, AcpError> {
-        self.channel.send(&request.to_string()).await?;
-        self.answer_to(id, method, overhear).await
+    ) -> Result<(), AcpError> {
+        timeout(patience, self.channel.send(&message.to_string()))
+            .await
+            .map_err(|_| silent(method, patience))?
     }
 
-    /// The answer to request `id`. Everything else on the channel is the
-    /// adapter talking about its own business: `overhear` gets a look at it,
-    /// and then it is read past.
+    /// The answer to request `id`. Nothing carrying a `method` is that answer,
+    /// whatever id it wears: JSON-RPC numbers each direction separately, and
+    /// the adapter counts from one as well. So a message of the adapter's own
+    /// is offered to `overhear` and answered where it asks something of us,
+    /// and any other answer than ours is read past.
+    ///
+    /// The channel is only read while a call is outstanding: anything the
+    /// adapter volunteers between turns waits in the pipe for the next one.
     async fn answer_to(
         &mut self,
         id: u64,
         method: &str,
+        patience: Duration,
         overhear: &mut Overhear<'_>,
     ) -> Result<Value, AcpError> {
         loop {
-            let line = self.channel.receive().await?;
+            let line = timeout(patience, self.channel.receive())
+                .await
+                .map_err(|_| silent(method, patience))??;
             let message: Value = match serde_json::from_str(&line) {
                 Ok(message) => message,
                 Err(nonsense) => {
@@ -265,8 +360,15 @@ impl<C: AcpChannel> Calls<C> {
                     continue;
                 }
             };
-            if message["id"].as_u64() != Some(id) {
+            if message.get("method").is_some() {
                 overhear(&message)?;
+                if let Some(answer) = owed(&message) {
+                    self.say(&answer, patience, method).await?;
+                }
+                continue;
+            }
+            if message["id"].as_u64() != Some(id) {
+                debug!("adapter answered a request that is not ours: {message}");
                 continue;
             }
             if let Some(refusal) = message.get("error") {
@@ -558,7 +660,10 @@ mod tests {
     #[tokio::test]
     async fn an_update_that_carries_its_own_fields_is_written_down_whole() {
         let carried = json!({"sessionId": SESSION, "sessionUpdate": "plan", "entries": []});
-        let adapter = Adapter::new(ScriptedAdapter::answering(SESSION, &[carried.clone()]));
+        let adapter = Adapter::new(ScriptedAdapter::answering(
+            SESSION,
+            std::slice::from_ref(&carried),
+        ));
         let mut connection = adapter
             .open_session(CONTAINER)
             .await
@@ -582,7 +687,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_turn_that_keeps_speaking_outlives_the_patience_for_silence() {
-        let said: Vec<Value> = (0..8).map(|nth| update(SESSION, &nth.to_string())).collect();
+        let said: Vec<Value> = (0..8)
+            .map(|nth| update(SESSION, &nth.to_string()))
+            .collect();
         let adapter = Adapter::waiting(
             ScriptedAdapter::dawdling(SESSION, &said, IMPATIENT / 5),
             IMPATIENT,
