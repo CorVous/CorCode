@@ -51,12 +51,22 @@ fn cli_version_subcommand() {
 
 #[test]
 fn cli_hash_password_subcommand_reads_the_password_off_stdin() {
-    cli()
+    const PASSWORD: &str = "correct horse battery staple";
+
+    let printed = cli()
         .arg("hash-password")
-        .write_stdin("correct horse battery staple\n")
+        .write_stdin(format!("{PASSWORD}\n"))
         .assert()
         .success()
-        .stdout(predicate::str::starts_with("$argon2id$"));
+        .get_output()
+        .stdout
+        .clone();
+
+    let printed = String::from_utf8(printed).expect("the hash should be text");
+    assert!(
+        cor_code::auth::password::verify_password(printed.trim_end(), PASSWORD),
+        "the gate would refuse the hash the CLI printed: {printed}"
+    );
 }
 
 #[test]
