@@ -49,7 +49,8 @@ async fn a_chat_beyond_the_pool_gives_up_its_container_and_keeps_its_workspace()
         "parking took the workspace with it"
     );
     assert_eq!(
-        app.manifest(&first)["state"], "open",
+        app.manifest(&first)["state"],
+        "open",
         "parking is not a state on disk (ADR-0002)"
     );
 }
@@ -94,12 +95,11 @@ fn group(console: &str, chat_id: &str) -> String {
         .unwrap_or_else(|| panic!("{chat_id} is not on the console: {console}"));
     ["Live", "Parked", "Archived"]
         .into_iter()
-        .filter(|heading| {
+        .rfind(|heading| {
             console
                 .find(&format!("<h2>{heading}</h2>"))
                 .is_some_and(|found| found < at)
         })
-        .next_back()
         .expect("every chat sits under a heading")
         .to_owned()
 }

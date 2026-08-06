@@ -4,7 +4,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use log::warn;
+use chrono::Utc;
+use log::{info, warn};
 use serde_json::json;
 use thiserror::Error;
 use ulid::Ulid;
@@ -13,6 +14,7 @@ use crate::acp::{AcpError, AcpTransport, Adapter, Connections, Held};
 use crate::config::Config;
 use crate::git::{self, Remotes};
 use crate::plane::ContainerPlane;
+use crate::pool;
 use crate::store::{ChatStore, ContainerLiveness, Event, Manifest, NewChat, runtime_status};
 use crate::ui;
 
@@ -90,6 +92,7 @@ pub struct Chats<P, T: AcpTransport> {
     repos: Vec<String>,
     anthropic_api_key: Option<String>,
     workspace_image: String,
+    warm_pool: usize,
 }
 
 impl<P, T: AcpTransport + Sync> Chats<P, T> {
@@ -105,6 +108,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
             repos: config.repos.clone(),
             anthropic_api_key: config.anthropic_api_key.clone(),
             workspace_image: config.workspace_image.clone(),
+            warm_pool: config.warm_pool,
         }
     }
 }
@@ -173,12 +177,64 @@ where
     pub async fn prompt(&self, chat_id: &Ulid, said: &str) -> Result<(), PromptError> {
         let chat_id = chat_id.to_string();
         let outcome = self.turn(&chat_id, said).await;
-        if let Err(refusal) = &outcome {
-            if refusal.is_refusal() {
-                self.note_refusal(&chat_id, refusal);
+        match &outcome {
+            Ok(()) => {
+                self.touch(&chat_id);
+                self.cap_the_pool().await;
             }
+            Err(refusal) if refusal.is_refusal() => self.note_refusal(&chat_id, refusal),
+            Err(_) => {}
         }
         outcome
+    }
+
+    /// Say that a chat was just active. This is the whole of the warm pool's
+    /// order, written once per completed turn rather than per event
+    /// (ADR-0006).
+    fn touch(&self, chat_id: &str) {
+        let touched = self.store.read_manifest(chat_id).and_then(|manifest| {
+            self.store.write_manifest(&Manifest {
+                last_active_at: Utc::now(),
+                ..manifest
+            })
+        });
+        if let Err(failure) = touched {
+            warn!("{chat_id} took a turn that could not be dated: {failure:#}");
+        }
+    }
+
+    /// Bring the pool back inside its cap. A pool that cannot be read is the
+    /// operator's to hear about, not this request's to fail on: the turn or
+    /// the chat it followed is already done.
+    async fn cap_the_pool(&self) {
+        match self.overflowing().await {
+            Ok(overflowing) => {
+                for chat_id in overflowing {
+                    self.park(&chat_id).await;
+                }
+            }
+            Err(failure) => warn!("the warm pool could not be weighed: {failure:#}"),
+        }
+    }
+
+    /// The chats holding a container the pool has no room for (ADR-0002).
+    async fn overflowing(&self) -> Result<Vec<String>> {
+        let chats = self.store.scan()?;
+        let live = self.plane.live_chat_ids().await?;
+        Ok(pool::beyond_the_pool(&chats, &live, self.warm_pool))
+    }
+
+    /// Park one chat: the container goes, the workspace and the agent's
+    /// memory stay where they are, and nothing at all is committed
+    /// (ADR-0002 rule 2, ADR-0005).
+    async fn park(&self, chat_id: &str) {
+        match self.plane.teardown(chat_id).await {
+            Ok(()) => {
+                self.connections.forget(chat_id);
+                info!("{chat_id} parked: workspace kept, container torn down");
+            }
+            Err(stubborn) => warn!("{chat_id} is past the pool and would not stop: {stubborn}"),
+        }
     }
 
     async fn turn(&self, chat_id: &str, said: &str) -> Result<(), PromptError> {
@@ -262,7 +318,10 @@ where
         self.check_out(&chat_id, &wanted, &branch).await?;
         let container = self.spawn(&chat_id).await?;
         match self.record_session(manifest, &container).await {
-            Ok(()) => Ok(chat_id),
+            Ok(()) => {
+                self.cap_the_pool().await;
+                Ok(chat_id)
+            }
             Err(failure) => {
                 if let Err(stubborn) = self.plane.teardown(&chat_id).await {
                     warn!("{chat_id} never opened a session and would not stop: {stubborn}");

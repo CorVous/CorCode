@@ -1,6 +1,7 @@
 //! The warm pool: which chats keep a container and which give one up
 //! (ADR-0002 rule 2).
 
+use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::hash::BuildHasher;
 
@@ -22,7 +23,7 @@ pub fn beyond_the_pool<S: BuildHasher>(
         .iter()
         .filter(|manifest| live.contains(&manifest.chat_id))
         .collect();
-    holders.sort_by(|left, right| right.last_active_at.cmp(&left.last_active_at));
+    holders.sort_by_key(|manifest| Reverse(manifest.last_active_at));
     let mut kept = 0;
     holders
         .into_iter()
@@ -57,7 +58,8 @@ mod tests {
         manifest
     }
 
-    fn live(chats: &[&Manifest]) -> HashSet<String> {
+    /// The chats holding a container right now.
+    fn live(chats: &[Manifest]) -> HashSet<String> {
         chats
             .iter()
             .map(|manifest| manifest.chat_id.clone())
@@ -66,28 +68,26 @@ mod tests {
 
     #[test]
     fn the_least_recently_active_container_is_the_one_that_goes() {
-        let (fresh, middling, stale) = (chat("fresh", 1), chat("middling", 10), chat("stale", 60));
-        let all = [stale.clone(), fresh.clone(), middling.clone()];
+        let pool = [chat("stale", 60), chat("fresh", 1), chat("middling", 10)];
+        let stale = pool[0].chat_id.clone();
 
-        let parking = beyond_the_pool(&all, &live(&[&fresh, &middling, &stale]), 2);
+        let parking = beyond_the_pool(&pool, &live(&pool), 2);
 
-        assert_eq!(parking, [stale.chat_id]);
+        assert_eq!(parking, [stale]);
     }
 
     #[test]
     fn a_pool_inside_its_cap_parks_nothing() {
-        let (fresh, stale) = (chat("fresh", 1), chat("stale", 60));
-        let all = [fresh.clone(), stale.clone()];
+        let pool = [chat("fresh", 1), chat("stale", 60)];
 
-        assert!(beyond_the_pool(&all, &live(&[&fresh, &stale]), 2).is_empty());
+        assert!(beyond_the_pool(&pool, &live(&pool), 2).is_empty());
     }
 
     #[test]
     fn a_chat_that_holds_no_container_is_never_parked_again() {
-        let (fresh, middling, stale) = (chat("fresh", 1), chat("middling", 10), chat("stale", 60));
-        let all = [fresh.clone(), middling.clone(), stale.clone()];
+        let pool = [chat("fresh", 1), chat("middling", 10), chat("stale", 60)];
 
-        let parking = beyond_the_pool(&all, &live(&[&stale]), 2);
+        let parking = beyond_the_pool(&pool, &live(&pool[2..]), 2);
 
         assert!(
             parking.is_empty(),
@@ -97,13 +97,12 @@ mod tests {
 
     #[test]
     fn an_archived_chat_that_still_holds_a_container_gives_it_up_and_holds_no_slot() {
-        let (fresh, middling) = (chat("fresh", 1), chat("middling", 10));
-        let mut archived = chat("archived", 0);
-        archived.state = ChatState::Archived;
-        let all = [archived.clone(), fresh.clone(), middling.clone()];
+        let mut pool = [chat("archived", 0), chat("fresh", 1), chat("middling", 10)];
+        pool[0].state = ChatState::Archived;
+        let archived = pool[0].chat_id.clone();
 
-        let parking = beyond_the_pool(&all, &live(&[&archived, &fresh, &middling]), 2);
+        let parking = beyond_the_pool(&pool, &live(&pool), 2);
 
-        assert_eq!(parking, [archived.chat_id]);
+        assert_eq!(parking, [archived]);
     }
 }
