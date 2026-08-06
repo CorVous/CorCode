@@ -244,6 +244,62 @@ mod tests {
     const TOKEN: &str = "ghs-clone-secret";
     const ROTATED: &str = "ghs-rotated-secret";
     const FROM_ENV: &str = "ghs-bootstrapped";
+    const SUBSCRIPTION: &str = "sk-ant-oat01-subscription-secret";
+
+    /// Anthropic issues subscription tokens under a prefix of their own, and
+    /// what opens the service with one is not what opens it with a key.
+    #[test]
+    fn an_anthropic_credential_is_whatever_its_prefix_says_it_is() {
+        assert_eq!(
+            AnthropicCredential::of(SUBSCRIPTION),
+            AnthropicCredential::OauthToken
+        );
+        assert_eq!(
+            AnthropicCredential::of("sk-ant-api03-key"),
+            AnthropicCredential::ApiKey
+        );
+        assert_eq!(AnthropicCredential::of(""), AnthropicCredential::ApiKey);
+    }
+
+    /// The agent reads each kind from a name of its own, so a container that
+    /// is handed one is never handed the other (ADR-0001).
+    #[test]
+    fn each_kind_of_anthropic_credential_is_read_from_a_name_of_its_own() {
+        assert_eq!(
+            AnthropicCredential::OauthToken.variable(),
+            "CLAUDE_CODE_OAUTH_TOKEN"
+        );
+        assert_eq!(AnthropicCredential::ApiKey.variable(), "ANTHROPIC_API_KEY");
+    }
+
+    /// The Anthropic slot takes either kind, and which one is in it is the
+    /// only thing about the value anything else is told.
+    #[test]
+    fn only_the_anthropic_slot_stands_for_a_kind_of_credential() {
+        let (_dir, secrets) = bootstrapped();
+        secrets
+            .write(Secret::AnthropicKey, SUBSCRIPTION)
+            .expect("a secret should be writable");
+
+        assert_eq!(
+            standing(&secrets, Secret::AnthropicKey),
+            Standing {
+                source: Source::Settings,
+                kind: Some(AnthropicCredential::OauthToken),
+            }
+        );
+        assert_eq!(
+            standing(&secrets, Secret::GithubToken),
+            Standing {
+                source: Source::Environment,
+                kind: None,
+            }
+        );
+    }
+
+    fn standing(secrets: &Secrets, secret: Secret) -> Standing {
+        secrets.standing(secret).expect("a secret should be readable")
+    }
 
     #[test]
     fn a_secret_says_whether_it_is_set_and_what_set_it() {
