@@ -12,6 +12,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
+use ulid::Ulid;
 
 use crate::config::Config;
 
@@ -49,6 +50,10 @@ pub enum SecretsError {
     Read { path: PathBuf, source: io::Error },
     #[error("{} could not be written", path.display())]
     Write { path: PathBuf, source: io::Error },
+    #[error("{} could not be taken away", path.display())]
+    Clear { path: PathBuf, source: io::Error },
+    #[error("{} cannot be set to nothing: clear it instead", path.display())]
+    Empty { path: PathBuf },
 }
 
 /// The operational secrets of one deployment: what is on disk, over what the
@@ -94,14 +99,17 @@ impl Secrets {
             .or_else(|| self.from_env.get(&secret).cloned()))
     }
 
-    /// Put `value` in force for every read after this one.
+    /// Put `value` in force for every read after this one, without the
+    /// whitespace around it. A value that is nothing but whitespace is
+    /// refused: a secret is unset by [`Secrets::clear`], not by emptying it.
     pub fn write(&self, secret: Secret, value: &str) -> Result<(), SecretsError> {
-        fs::create_dir_all(&self.dir).map_err(|source| SecretsError::Write {
-            path: self.dir.clone(),
-            source,
-        })?;
         let path = self.path(secret);
-        let pending = path.with_extension(PENDING);
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(SecretsError::Empty { path });
+        }
+        self.make_dir()?;
+        let pending = self.pending(secret);
         write_owner_only(value, &pending)?;
         fs::rename(&pending, &path).map_err(|source| SecretsError::Write { path, source })
     }
@@ -114,7 +122,7 @@ impl Secrets {
         match fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(SecretsError::Write { path, source }),
+            Err(source) => Err(SecretsError::Clear { path, source }),
         }
     }
 
@@ -132,6 +140,28 @@ impl Secrets {
 
     fn path(&self, secret: Secret) -> PathBuf {
         self.dir.join(secret.file())
+    }
+
+    /// Where one write stages its secret: a name of its own, so two writes at
+    /// once cannot publish half of each other.
+    fn pending(&self, secret: Secret) -> PathBuf {
+        self.dir
+            .join(format!("{}.{}.{PENDING}", secret.file(), Ulid::generate()))
+    }
+
+    /// The secrets directory, made if it is not there yet, open to nobody but
+    /// the account the core runs as.
+    fn make_dir(&self) -> Result<(), SecretsError> {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+            .create(&self.dir)
+            .map_err(|source| SecretsError::Write {
+                path: self.dir.clone(),
+                source,
+            })
     }
 }
 
