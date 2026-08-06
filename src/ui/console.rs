@@ -580,6 +580,23 @@ mod tests {
         );
     }
 
+    /// The secrets are set from the one screen, one level down like every
+    /// other detail on it (ADR-0008).
+    #[test]
+    fn the_console_carries_the_settings_panel() {
+        let secrets = [
+            (Secret::GithubToken, Source::Environment),
+            (Secret::AnthropicKey, Source::Unset),
+        ];
+
+        let rendered = console_page(&[], &status(), &repos(), &secrets);
+
+        assert!(
+            rendered.contains(&settings_panel(&secrets)),
+            "the console renders a settings panel of its own: {rendered}"
+        );
+    }
+
     #[test]
     fn the_chat_list_refreshes_itself_through_htmx() {
         let rendered = console_page(&[], &status(), &repos());
