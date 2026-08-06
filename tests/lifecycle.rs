@@ -60,6 +60,25 @@ async fn a_chat_beyond_the_pool_gives_up_its_container_and_keeps_its_workspace()
     );
 }
 
+/// Opening a chat is a read (ADR-0007 rule 1): the page is the event log off
+/// disk, and looking at a parked chat must not start anything.
+#[tokio::test]
+async fn opening_a_parked_chat_leaves_it_parked() {
+    let app = TestApp::start().await;
+    let parked = app.create_chat("first").await;
+    app.create_chat("second").await;
+    app.create_chat("third").await;
+
+    app.body(&format!("/chats/{parked}")).await;
+    app.body(&format!("/chats/{parked}/events")).await;
+
+    assert_eq!(
+        group(&app.body("/").await, &parked),
+        "Parked",
+        "reading a chat woke it"
+    );
+}
+
 #[tokio::test]
 async fn a_prompt_into_a_parked_chat_puts_its_container_back_up() {
     let app = TestApp::start().await;

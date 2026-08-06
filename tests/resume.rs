@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use ulid::Ulid;
 
 use cor_code::acp::ScriptedAdapter;
-use cor_code::chats::{Chats, WantedChat};
+use cor_code::chats::{Chats, PromptError, WantedChat};
 use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
 use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
@@ -241,6 +241,179 @@ async fn an_archived_chat_whose_branch_is_gone_stays_archived_and_can_be_tried_a
     assert_eq!(dataset.manifest(&chat)["state"], "open");
 }
 
+/// A workspace where an archived chat's should not be is somebody else's, or
+/// the last revival's, and either way it is not this one's to clone over or to
+/// delete (ADR-0007 rule 5).
+#[tokio::test]
+async fn an_archived_chat_whose_workspace_is_already_on_disk_is_left_untouched() {
+    let dataset = Dataset::of(ScriptedAdapter::resuming(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ));
+    let chat = dataset.create("leftover").await;
+    dataset.commit_in_workspace(&chat, "the agent's own commit");
+    dataset.archive(&chat).await;
+    let leftover = dataset.workspace(&chat).join("not-ours.txt");
+    fs::create_dir_all(dataset.workspace(&chat)).expect("a workspace should be creatable");
+    fs::write(&leftover, "somebody else's work").expect("a file should be writable");
+
+    dataset
+        .prompt(&chat, SAID)
+        .await
+        .expect_err("a chat cannot be revived over a workspace that is already there");
+
+    assert!(
+        leftover.is_file(),
+        "a revival deleted a workspace it did not create"
+    );
+    assert_eq!(dataset.manifest(&chat)["state"], "archived");
+    assert!(
+        dataset
+            .events(&chat)
+            .last()
+            .and_then(|line| line["text"].as_str())
+            .is_some_and(|text| text.contains("workspace")),
+        "the operator is told nothing about the workspace in the way"
+    );
+}
+
+/// Rule 5 before anything else: a chat whose manifest cannot say what to come
+/// back to is not worth cloning for, so nothing is cloned and nothing is said
+/// about a reset that never happened.
+#[tokio::test]
+async fn an_archived_chat_with_no_session_recorded_fails_before_it_clones_anything() {
+    let dataset = Dataset::of(ScriptedAdapter::resuming(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ));
+    let chat = dataset.create("sessionless").await;
+    dataset.commit_in_workspace(&chat, "the agent's own commit");
+    dataset.archive(&chat).await;
+    dataset.forget_there_was_a_session(&chat);
+
+    dataset
+        .prompt(&chat, SAID)
+        .await
+        .expect_err("a chat with no session recorded cannot be woken");
+
+    assert_eq!(dataset.manifest(&chat)["state"], "archived");
+    assert!(
+        !dataset.workspace(&chat).exists(),
+        "a chat that could never be woken was cloned back anyway"
+    );
+    let told = dataset.events(&chat);
+    assert!(
+        told.iter().all(|line| line["corcode"] != "reset_notice"),
+        "a chat was told its workspace came back when it never did: {told:?}"
+    );
+    assert_eq!(
+        told.len(),
+        1,
+        "one failed wake should leave one line: {told:?}"
+    );
+}
+
+/// Waking is a clone, a container and a ladder, none of which two prompts may
+/// do at once. The loser is told rather than left to race.
+#[tokio::test]
+async fn two_prompts_racing_to_wake_one_chat_leave_one_of_them_turned_away() {
+    let dataset = Dataset::of(ScriptedAdapter::resuming(
+        SESSION,
+        &[update(FORGOTTEN, "on it")],
+    ));
+    let chat = dataset.create("raced").await;
+    dataset.forget_the_session(&chat);
+    dataset.park(&chat).await;
+
+    let (first, second) = tokio::join!(
+        dataset.prompt(&chat, SAID),
+        dataset.prompt(&chat, "and again")
+    );
+
+    assert_eq!(
+        [first.is_ok(), second.is_ok()]
+            .into_iter()
+            .filter(|won| *won)
+            .count(),
+        1,
+        "two prompts woke one chat: {first:?} and {second:?}"
+    );
+    assert_eq!(dataset.status(&chat).await, RuntimeStatus::Live);
+    assert_eq!(
+        dataset.asked_to(RESUME_SESSION),
+        [FORGOTTEN],
+        "the ladder was climbed twice over one chat"
+    );
+    let told = dataset.events(&chat);
+    assert_eq!(
+        told.iter()
+            .filter(|line| line["corcode"] == "refusal")
+            .count(),
+        1,
+        "the prompt that was turned away was never told so: {told:?}"
+    );
+}
+
+/// A wake that started a container and then could not reach an agent in it
+/// gives the container back: the chat is parked, as it was before the prompt.
+#[tokio::test]
+async fn a_wake_whose_adapter_never_answers_leaves_no_container_behind() {
+    let dataset = Dataset::of(ScriptedAdapter::resuming(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ));
+    let chat = dataset.create("unreachable").await;
+    dataset.park(&chat).await;
+    dataset.adapter.dies();
+
+    let refused = dataset
+        .prompt(&chat, SAID)
+        .await
+        .expect_err("a chat whose adapter is dead cannot be woken");
+
+    assert!(
+        matches!(refused, PromptError::Unwoken(_)),
+        "a dead adapter mid ladder was not reported as a failed wake: {refused:?}"
+    );
+    assert_eq!(
+        dataset.status(&chat).await,
+        RuntimeStatus::Parked,
+        "a wake that failed kept the container it started"
+    );
+    assert!(
+        dataset
+            .events(&chat)
+            .last()
+            .and_then(|line| line["corcode"].as_str())
+            .is_some_and(|kind| kind == "wake_failure"),
+        "the operator is never told the wake failed"
+    );
+}
+
+/// The container a wake starts counts against the pool like any other, even
+/// when the turn it was started for breaks (ADR-0002 rule 2).
+#[tokio::test]
+async fn a_wake_brings_the_pool_back_inside_its_cap_whatever_the_turn_does() {
+    let dataset = Dataset::of(ScriptedAdapter::dying_mid_turn(
+        SESSION,
+        &[update(SESSION, "on i")],
+    ));
+    let woken = dataset.create("woken").await;
+    dataset.park(&woken).await;
+
+    dataset
+        .prompt(&woken, SAID)
+        .await
+        .expect_err("this adapter dies mid turn");
+
+    assert_eq!(dataset.status(&woken).await, RuntimeStatus::Live);
+    assert_eq!(
+        dataset.live_count().await,
+        1,
+        "the woken chat's container was never counted against the pool"
+    );
+}
+
 /// A workspace that is not there can mean a dataset that is not mounted, so
 /// nothing is rebuilt and nothing is started (ADR-0007 rule 5).
 #[tokio::test]
@@ -314,7 +487,7 @@ impl Dataset {
             .expect("a chat should be cut")
     }
 
-    async fn prompt(&self, chat_id: &str, said: &str) -> Result<(), cor_code::chats::PromptError> {
+    async fn prompt(&self, chat_id: &str, said: &str) -> Result<(), PromptError> {
         self.chats.prompt(&ulid(chat_id), said).await
     }
 
@@ -350,10 +523,31 @@ impl Dataset {
     /// Leave the chat remembering a session its adapter does not, as a core
     /// that restarted leaves every chat it was holding.
     fn forget_the_session(&self, chat_id: &str) {
+        self.rewrite_manifest(chat_id, json!(FORGOTTEN));
+    }
+
+    /// Leave the chat remembering no session at all, as one whose creation
+    /// stopped half way does.
+    fn forget_there_was_a_session(&self, chat_id: &str) {
+        self.rewrite_manifest(chat_id, Value::Null);
+    }
+
+    fn rewrite_manifest(&self, chat_id: &str, acp_session_id: Value) {
         let path = self.chat_dir(chat_id).join("manifest.json");
         let mut manifest = self.manifest(chat_id);
-        manifest["acp_session_id"] = json!(FORGOTTEN);
+        manifest["acp_session_id"] = acp_session_id;
         fs::write(&path, manifest.to_string()).expect("the manifest should be rewritable");
+    }
+
+    /// How many chats in the dataset are holding a container.
+    async fn live_count(&self) -> usize {
+        self.chats
+            .survey()
+            .await
+            .expect("the dataset should survey")
+            .into_iter()
+            .filter(|(_, status)| *status == RuntimeStatus::Live)
+            .count()
     }
 
     /// The session ids the adapter was asked about at one rung, in order.

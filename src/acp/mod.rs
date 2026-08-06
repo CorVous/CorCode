@@ -51,6 +51,9 @@ const LOAD_SESSION: &str = "session/load";
 /// A session that remembers nothing, under an id of its own (rung 3).
 const NEW_SESSION: &str = "session/new";
 
+/// One turn: everything the agent says until it answers this.
+const PROMPT: &str = "session/prompt";
+
 /// The one thing an adapter asks a client that declares no capabilities for.
 const PERMISSION_ASK: &str = "session/request_permission";
 
@@ -259,15 +262,10 @@ impl<C: AcpChannel> Connection<C> {
         keep(record, &params)?;
         let session_id = self.session_id.clone();
         self.calls
-            .call_within(
-                self.turn_patience,
-                "session/prompt",
-                params.clone(),
-                &mut |message| {
-                    worth_recording(message, &session_id)
-                        .map_or_else(|| Ok(()), |payload| keep(record, &payload))
-                },
-            )
+            .call_within(self.turn_patience, PROMPT, params.clone(), &mut |message| {
+                worth_recording(message, &session_id)
+                    .map_or_else(|| Ok(()), |payload| keep(record, &payload))
+            })
             .await
             .map(|_| ())
     }
@@ -648,6 +646,50 @@ mod tests {
     #[tokio::test]
     async fn a_replayed_transcript_lands_in_nothing_written_afterwards() {
         let adapter = Adapter::new(ScriptedAdapter::loading(
+            SESSION,
+            &[
+                update(SESSION, "said before"),
+                update(SESSION, "and before"),
+            ],
+            &[update(SESSION, "on it")],
+        ));
+        let mut greeting = adapter
+            .greet(CONTAINER)
+            .await
+            .expect("the scripted adapter should say hello");
+        greeting
+            .load(SESSION)
+            .await
+            .expect("the scripted adapter should load the session it was given");
+        let mut connection = greeting.over(SESSION.to_owned());
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("the scripted turn should end");
+
+        assert_eq!(
+            record,
+            [
+                json!({
+                    "sessionId": SESSION,
+                    "prompt": [{"type": "text", "text": "ship the ladder"}],
+                }),
+                recorded("on it"),
+            ]
+        );
+    }
+
+    /// An adapter free to replay from a task of its own answers the load first
+    /// and streams afterwards. Nothing about rule 3 depends on which order it
+    /// picks: the tail is read out before the connection is handed on.
+    #[tokio::test]
+    async fn a_replay_that_trails_its_own_answer_is_still_kept_out_of_the_next_turn() {
+        let adapter = Adapter::new(ScriptedAdapter::loading_late(
             SESSION,
             &[
                 update(SESSION, "said before"),

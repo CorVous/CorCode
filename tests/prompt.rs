@@ -72,6 +72,19 @@ fn recorded_refusal(why: &str) -> Value {
     json!({"corcode": "refusal", "text": format!("Prompt not sent: {why}.")})
 }
 
+/// A wake that could not finish, as the core writes it into the chat's log.
+fn recorded_wake_failure(why: &str) -> Value {
+    json!({
+        "corcode": "wake_failure",
+        "text": format!("The prompt was not sent: {why}. It can be sent again."),
+    })
+}
+
+/// What waking a chat cost it, as the core writes it into the chat's log.
+fn recorded_reset_notice(text: &str) -> Value {
+    json!({"corcode": "reset_notice", "text": text})
+}
+
 #[tokio::test]
 async fn a_prompt_lands_on_disk_and_in_the_log_the_browser_reads() {
     let app = TestApp::start(ScriptedAdapter::answering(
@@ -148,7 +161,7 @@ async fn a_second_prompt_while_the_first_turn_runs_is_refused() {
 }
 
 #[tokio::test]
-async fn a_prompt_into_a_chat_that_cannot_be_woken_says_so_and_can_be_sent_again() {
+async fn a_prompt_into_a_chat_that_cannot_be_woken_says_so_and_sends_nothing() {
     let app = TestApp::start(ScriptedAdapter::answering(SESSION, &[])).await;
     let chat_id = app.chat_on_disk_alone();
 
@@ -159,6 +172,18 @@ async fn a_prompt_into_a_chat_that_cannot_be_woken_says_so_and_can_be_sent_again
     assert!(
         body.contains("could not be woken"),
         "the answer does not say what went wrong: {body}"
+    );
+    assert_eq!(
+        app.events(&chat_id),
+        [recorded_wake_failure(
+            "this chat has no session recorded to come back to"
+        )],
+        "a wake that never happened left more than the one line saying so"
+    );
+    assert!(
+        app.adapter.requests().is_empty(),
+        "a chat that could not be woken was spoken to anyway: {:?}",
+        app.adapter.requests()
     );
     let polled = app.body(&format!("/chats/{chat_id}/events")).await;
     assert!(
@@ -195,8 +220,8 @@ async fn a_turn_the_dataset_cannot_take_keeps_the_connection_it_was_going_over()
 }
 
 #[tokio::test]
-async fn an_adapter_that_dies_mid_turn_keeps_what_it_said_and_drops_the_connection() {
-    let app = TestApp::start(ScriptedAdapter::dying_mid_turn(
+async fn an_adapter_that_dies_mid_turn_keeps_what_it_said_and_the_next_prompt_climbs_back() {
+    let app = TestApp::start(ScriptedAdapter::dying_once(
         SESSION,
         &[update(SESSION, "on i")],
     ))
@@ -211,12 +236,20 @@ async fn an_adapter_that_dies_mid_turn_keeps_what_it_said_and_drops_the_connecti
         [recorded_prompt(SAID), recorded("on i")],
         "a broken turn took its own record with it"
     );
-    app.prompt(&chat_id, "still there?").await;
-    assert!(
-        app.events(&chat_id)
-            .iter()
-            .any(|line| line["corcode"] == "reset_notice"),
-        "the next prompt went over the dead connection rather than climbing the ladder"
+    assert_eq!(
+        app.prompt(&chat_id, "still there?").await.status(),
+        StatusCode::OK,
+        "the dead connection is still being handed out"
+    );
+    assert_eq!(
+        app.events(&chat_id),
+        [
+            recorded_prompt(SAID),
+            recorded("on i"),
+            recorded_reset_notice(cor_code::resume::MEMORY_RESET),
+            recorded_prompt("still there?"),
+            recorded("on i"),
+        ]
     );
     app.stop().await;
 }
@@ -278,6 +311,7 @@ struct TestApp {
     shutdown: oneshot::Sender<()>,
     server: JoinHandle<anyhow::Result<()>>,
     data_dir: TempDir,
+    adapter: ScriptedAdapter,
     _origin: TempDir,
 }
 
@@ -293,7 +327,7 @@ impl TestApp {
         ChatStore::new(data_dir.path())
             .prepare()
             .expect("the dataset should prepare, as serving does");
-        let chats = Chats::new(&config, MemoryPlane::default(), transport, remotes);
+        let chats = Chats::new(&config, MemoryPlane::default(), transport.clone(), remotes);
         let router = server::router(&config, chats).expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {
@@ -306,6 +340,7 @@ impl TestApp {
             shutdown,
             server,
             data_dir,
+            adapter: transport,
             _origin: origin,
         }
     }
