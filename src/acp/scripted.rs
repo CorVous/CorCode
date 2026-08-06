@@ -35,8 +35,10 @@ enum Stall {
 /// Answers ACP calls from a canned script and remembers what it was asked.
 pub struct ScriptedAdapter {
     answers: Arc<Script>,
+    updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     stall: Stall,
+    hangs_up: bool,
 }
 
 /// Everything the fake was told, for the assertions to read back.
@@ -53,6 +55,33 @@ impl ScriptedAdapter {
     #[must_use]
     pub fn opening(session_id: &str) -> Self {
         Self::reading(working_script(session_id))
+    }
+
+    /// An adapter that streams `updates` at every prompt and then ends the
+    /// turn. Each update is the params of one `session/update` notification,
+    /// so a test can address one at whichever session it likes.
+    #[must_use]
+    pub fn answering(session_id: &str, updates: &[Value]) -> Self {
+        let mut script = working_script(session_id);
+        script.insert(
+            "session/prompt".to_owned(),
+            Answer::Result(json!({"stopReason": "end_turn"})),
+        );
+        Self {
+            updates: Arc::new(updates.to_vec()),
+            ..Self::reading(script)
+        }
+    }
+
+    /// An adapter that streams `updates` and then closes its channel without
+    /// ending the turn, as one whose container was killed does.
+    #[must_use]
+    pub fn dying_mid_turn(session_id: &str, updates: &[Value]) -> Self {
+        Self {
+            updates: Arc::new(updates.to_vec()),
+            hangs_up: true,
+            ..Self::reading(working_script(session_id))
+        }
     }
 
     /// An adapter that turns `method` down.
@@ -105,8 +134,10 @@ impl ScriptedAdapter {
     fn reading(script: Script) -> Self {
         Self {
             answers: Arc::new(script),
+            updates: Arc::new(Vec::new()),
             heard: Arc::new(Mutex::new(Heard::default())),
             stall: Stall::Nowhere,
+            hangs_up: false,
         }
     }
 
@@ -149,9 +180,11 @@ impl AcpTransport for ScriptedAdapter {
         }
         Ok(ScriptedChannel {
             answers: Arc::clone(&self.answers),
+            updates: Arc::clone(&self.updates),
             heard: Arc::clone(&self.heard),
             unread: VecDeque::new(),
             stall: self.stall,
+            hangs_up: self.hangs_up,
         })
     }
 }
@@ -159,9 +192,11 @@ impl AcpTransport for ScriptedAdapter {
 /// One scripted conversation.
 pub struct ScriptedChannel {
     answers: Arc<Script>,
+    updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     unread: VecDeque<String>,
     stall: Stall,
+    hangs_up: bool,
 }
 
 impl AcpChannel for ScriptedChannel {
@@ -177,6 +212,14 @@ impl AcpChannel for ScriptedChannel {
         heard.chattered = true;
         drop(heard);
         self.unread.push_back(CHATTER.to_owned());
+        if method == "session/prompt" {
+            for update in self.updates.iter() {
+                self.unread.push_back(
+                    json!({"jsonrpc": "2.0", "method": "session/update", "params": update})
+                        .to_string(),
+                );
+            }
+        }
         match self.answers.get(&method) {
             Some(Answer::Result(result)) => self
                 .unread
@@ -193,6 +236,7 @@ impl AcpChannel for ScriptedChannel {
     async fn receive(&mut self) -> Result<String, AcpError> {
         match self.unread.pop_front() {
             Some(line) => Ok(line),
+            None if self.hangs_up => Err(AcpError::Closed),
             None => std::future::pending().await,
         }
     }

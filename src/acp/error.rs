@@ -28,4 +28,9 @@ pub enum AcpError {
     Refused { method: String, complaint: String },
     #[error("the adapter answered {method} with something unreadable: {answer}")]
     Unreadable { method: String, answer: String },
+    #[error("the turn could not be written down")]
+    Unrecorded {
+        #[source]
+        source: anyhow::Error,
+    },
 }

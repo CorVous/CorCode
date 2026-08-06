@@ -5,6 +5,7 @@ mod docker;
 mod error;
 mod scripted;
 
+use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
 use std::time::Duration;
 
@@ -24,6 +25,19 @@ const PROTOCOL_VERSION: u32 = 1;
 /// How long any one call may take. The adapter boots Node and the agent SDK
 /// on the first one, so this is patience, not a deadline anyone should meet.
 const PATIENCE: Duration = Duration::from_secs(120);
+
+/// How long one turn may take. An agent reads, edits and runs tests inside a
+/// single prompt, so the only thing this catches is an adapter that has
+/// stopped speaking altogether.
+const TURN_PATIENCE: Duration = Duration::from_secs(600);
+
+/// The notification an adapter streams a turn over.
+const SESSION_UPDATE: &str = "session/update";
+
+/// Where a turn's payloads go as they happen: the prompt on its way out, then
+/// each update on its way in. Recording is what makes them real (ADR-0006),
+/// so a record that cannot be written ends the turn.
+pub type Record<'a> = dyn FnMut(&Value) -> anyhow::Result<()> + Send + 'a;
 
 /// A way to reach the ACP adapter of one chat's container.
 pub trait AcpTransport {
@@ -46,6 +60,7 @@ pub trait AcpChannel {
 pub struct Adapter<T> {
     transport: T,
     patience: Duration,
+    turn_patience: Duration,
 }
 
 impl<T: AcpTransport + Sync> Adapter<T> {
@@ -53,6 +68,7 @@ impl<T: AcpTransport + Sync> Adapter<T> {
         Self {
             transport,
             patience: PATIENCE,
+            turn_patience: TURN_PATIENCE,
         }
     }
 
@@ -62,6 +78,7 @@ impl<T: AcpTransport + Sync> Adapter<T> {
         Self {
             transport,
             patience,
+            turn_patience: patience,
         }
     }
 
@@ -70,8 +87,9 @@ impl<T: AcpTransport + Sync> Adapter<T> {
     }
 
     /// Hand shake with the adapter and open a fresh session over the chat's
-    /// workspace, answering with the session id ADR-0006 stores.
-    pub async fn open_session(&self, container: &str) -> Result<String, AcpError> {
+    /// workspace, answering with the connection every later turn is taken
+    /// over.
+    pub async fn open_session(&self, container: &str) -> Result<Connection<T::Channel>, AcpError> {
         let channel = timeout(self.patience, self.transport.open(container))
             .await
             .map_err(|_| AcpError::Unstarted {
@@ -101,15 +119,85 @@ impl<T: AcpTransport + Sync> Adapter<T> {
                 json!({"cwd": WORKSPACE_MOUNT, "mcpServers": []}),
             )
             .await?;
-        session["sessionId"]
+        let session_id = session["sessionId"]
             .as_str()
             .map(ToOwned::to_owned)
             .ok_or_else(|| AcpError::Unreadable {
                 method: "session/new".to_owned(),
                 answer: session.to_string(),
-            })
+            })?;
+        Ok(Connection {
+            calls,
+            session_id,
+            turn_patience: self.turn_patience,
+        })
     }
 }
+
+/// One chat's open conversation with its adapter, held across turns.
+pub struct Connection<C> {
+    calls: Calls<C>,
+    session_id: String,
+    turn_patience: Duration,
+}
+
+/// A connection is its session; the pipe underneath has nothing to say.
+impl<C> Debug for Connection<C> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Connection")
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<C: AcpChannel> Connection<C> {
+    /// The session the adapter opened, as ADR-0006 stores it.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Take one turn: `said` goes into `record` before it goes on the wire,
+    /// then every update the adapter streams back until it ends the turn.
+    /// Updates belonging to another session are the adapter's own business.
+    pub async fn take_turn(&mut self, said: &str, record: &mut Record<'_>) -> Result<(), AcpError> {
+        let params = json!({
+            "sessionId": self.session_id,
+            "prompt": [{"type": "text", "text": said}],
+        });
+        keep(record, &params)?;
+        let session_id = self.session_id.clone();
+        self.calls
+            .call_within(
+                self.turn_patience,
+                "session/prompt",
+                params.clone(),
+                &mut |message| {
+                    streamed_update(message, &session_id)
+                        .map_or_else(|| Ok(()), |update| keep(record, update))
+                },
+            )
+            .await
+            .map(|_| ())
+    }
+}
+
+/// The update inside a `session/update` notification for `session_id`, if
+/// that is what this message is.
+fn streamed_update<'a>(message: &'a Value, session_id: &str) -> Option<&'a Value> {
+    (message["method"].as_str() == Some(SESSION_UPDATE)
+        && message["params"]["sessionId"].as_str() == Some(session_id))
+    .then(|| &message["params"]["update"])
+}
+
+fn keep(record: &mut Record<'_>, payload: &Value) -> Result<(), AcpError> {
+    record(payload).map_err(|source| AcpError::Unrecorded { source })
+}
+
+/// A look at every message that answers no request of ours, so a caller can
+/// pick its own out of the stream.
+type Overhear<'a> = dyn FnMut(&Value) -> Result<(), AcpError> + Send + 'a;
 
 /// One channel's numbered requests, each waited on for an answer of its own.
 struct Calls<C> {
@@ -120,14 +208,27 @@ struct Calls<C> {
 
 impl<C: AcpChannel> Calls<C> {
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, AcpError> {
+        self.call_within(self.patience, method, params, &mut |_| Ok(()))
+            .await
+    }
+
+    /// One request, answered inside `patience`, with everything the adapter
+    /// says meanwhile offered to `overhear`.
+    async fn call_within(
+        &mut self,
+        patience: Duration,
+        method: &str,
+        params: Value,
+        overhear: &mut Overhear<'_>,
+    ) -> Result<Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
         let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        timeout(self.patience, self.exchange(&request, id, method))
+        timeout(patience, self.exchange(&request, id, method, overhear))
             .await
             .map_err(|_| AcpError::Silent {
                 method: method.to_owned(),
-                patience: self.patience,
+                patience,
             })?
     }
 
@@ -138,14 +239,21 @@ impl<C: AcpChannel> Calls<C> {
         request: &Value,
         id: u64,
         method: &str,
+        overhear: &mut Overhear<'_>,
     ) -> Result<Value, AcpError> {
         self.channel.send(&request.to_string()).await?;
-        self.answer_to(id, method).await
+        self.answer_to(id, method, overhear).await
     }
 
-    /// The answer to request `id`. Notifications and answers to anything else
-    /// are the adapter talking about its own business; they are read past.
-    async fn answer_to(&mut self, id: u64, method: &str) -> Result<Value, AcpError> {
+    /// The answer to request `id`. Everything else on the channel is the
+    /// adapter talking about its own business: `overhear` gets a look at it,
+    /// and then it is read past.
+    async fn answer_to(
+        &mut self,
+        id: u64,
+        method: &str,
+        overhear: &mut Overhear<'_>,
+    ) -> Result<Value, AcpError> {
         loop {
             let line = self.channel.receive().await?;
             let message: Value = match serde_json::from_str(&line) {
@@ -156,6 +264,7 @@ impl<C: AcpChannel> Calls<C> {
                 }
             };
             if message["id"].as_u64() != Some(id) {
+                overhear(&message)?;
                 continue;
             }
             if let Some(refusal) = message.get("error") {
@@ -385,13 +494,16 @@ mod tests {
             matches!(error, AcpError::Closed),
             "a broken pipe should read as one, got: {error}"
         );
-        assert_eq!(record, [
-            json!({
-                "sessionId": SESSION,
-                "prompt": [{"type": "text", "text": "ship the ladder"}],
-            }),
-            recorded("on i"),
-        ]);
+        assert_eq!(
+            record,
+            [
+                json!({
+                    "sessionId": SESSION,
+                    "prompt": [{"type": "text", "text": "ship the ladder"}],
+                }),
+                recorded("on i"),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -428,9 +540,10 @@ mod tests {
             .await
             .expect_err("a turn that cannot be recorded should fail");
 
+        let logged = format!("{:#}", anyhow::Error::new(error));
         assert!(
-            format!("{error:#}").contains("the dataset is not mounted"),
-            "error should carry why the record failed, got: {error:#}"
+            logged.contains("the dataset is not mounted"),
+            "error should carry why the record failed, got: {logged}"
         );
         assert_eq!(
             adapter.transport().requests().len(),

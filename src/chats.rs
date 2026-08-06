@@ -220,8 +220,8 @@ where
         mut manifest: Manifest,
         container: &str,
     ) -> Result<(), CreateError> {
-        let session_id = self.adapter.open_session(container).await.map_err(broke)?;
-        manifest.acp_session_id = Some(session_id);
+        let connection = self.adapter.open_session(container).await.map_err(broke)?;
+        manifest.acp_session_id = Some(connection.session_id().to_owned());
         self.store.write_manifest(&manifest).map_err(broke)
     }
 }
