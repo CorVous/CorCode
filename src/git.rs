@@ -199,6 +199,22 @@ pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), G
     .map(drop)
 }
 
+/// Clone `origin`'s `branch` into `dest` and stand it where the chat left
+/// off, answering with the commit it ended up on (ADR-0002 rule 5).
+///
+/// A branch the remote no longer carries `commit` on is left standing at its
+/// tip: the remote is the truth, and the caller is the one who tells the chat
+/// (ADR-0007 rule 4). A branch that is gone altogether fails, and nothing is
+/// recreated.
+pub fn revive_at(
+    origin: &Origin,
+    branch: &str,
+    commit: &str,
+    dest: &Path,
+) -> Result<String, GitError> {
+    panic!("reviving a workspace is not written yet")
+}
+
 /// Cut `branch` off whatever `workspace` has checked out and stand on it.
 /// Nothing is pushed: the branch reaches the remote with its first commit
 /// (ADR-0005).
@@ -818,6 +834,59 @@ mod tests {
             "",
             "an unpushed checkpoint branch was left where the next try will not find it"
         );
+    }
+
+    #[test]
+    fn a_revived_workspace_stands_where_the_chat_last_pushed() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_source, workspace) = chat_workspace(&remotes.origin(REPO));
+        let archived_at = commit_in(&workspace, "third.txt", "the agent's own commit");
+        commit_in(&workspace, "fourth.txt", "a commit made after the archive");
+        run(&workspace, &["push", "origin", CHAT_BRANCH]);
+        let into = TempDir::new().expect("clone target should be created");
+        let revived = into.path().join("workspace");
+
+        let standing = revive_at(&remotes.origin(REPO), CHAT_BRANCH, &archived_at, &revived)
+            .expect("an archived chat's branch should come back");
+
+        assert_eq!(standing, archived_at);
+        assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), archived_at);
+        assert_eq!(
+            git_says(&revived, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            CHAT_BRANCH,
+            "the revived workspace is not standing on the chat's branch"
+        );
+        assert!(
+            !revived.join("fourth.txt").exists(),
+            "the revived workspace carries work the chat never archived"
+        );
+    }
+
+    /// The commit the manifest names can be force-pushed away between the
+    /// archive and the revival. The remote is the truth (ADR-0007 rule 4).
+    #[test]
+    fn a_workspace_whose_commit_the_branch_no_longer_carries_comes_back_at_the_tip() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_source, workspace) = chat_workspace(&remotes.origin(REPO));
+        let tip = commit_in(&workspace, "third.txt", "the agent's own commit");
+        run(&workspace, &["push", "origin", CHAT_BRANCH]);
+        let rewritten_away = commit_in(&workspace, "fourth.txt", "a commit the remote never saw");
+        let into = TempDir::new().expect("clone target should be created");
+        let revived = into.path().join("workspace");
+
+        let standing = revive_at(
+            &remotes.origin(REPO),
+            CHAT_BRANCH,
+            &rewritten_away,
+            &revived,
+        )
+        .expect("a branch that drifted should still come back");
+
+        assert_eq!(
+            standing, tip,
+            "a commit the branch has lost should leave the workspace at the tip"
+        );
+        assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), tip);
     }
 
     #[test]
