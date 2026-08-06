@@ -328,6 +328,16 @@ mod tests {
     }
 
     #[test]
+    fn the_warm_pool_defaults_to_the_cap_the_adr_set_and_can_be_tuned() {
+        let defaulted =
+            Config::from_vars(required_vars()).expect("defaulted environment should load");
+        let tuned = with(&[("CORCODE_WARM_POOL", "3")]).expect("a tuned pool should load");
+
+        assert_eq!(defaulted.warm_pool, DEFAULT_WARM_POOL);
+        assert_eq!(tuned.warm_pool, 3);
+    }
+
+    #[test]
     fn container_limits_default_when_unset() {
         let config = Config::from_vars(required_vars()).expect("defaulted environment should load");
 

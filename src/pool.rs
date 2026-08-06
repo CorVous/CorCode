@@ -1,6 +1,40 @@
 //! The warm pool: which chats keep a container and which give one up
 //! (ADR-0002 rule 2).
 
+use std::collections::HashSet;
+use std::hash::BuildHasher;
+
+use crate::store::{ChatState, Manifest};
+
+/// The live chats that must give their container up for the pool to hold
+/// `cap` of them: the least recently active first out, and every archived
+/// chat that somehow still holds one.
+///
+/// Order among `chats` is not read; `last_active_at` is the whole of the
+/// order (ADR-0006).
+#[must_use]
+pub fn beyond_the_pool<S: BuildHasher>(
+    chats: &[Manifest],
+    live: &HashSet<String, S>,
+    cap: usize,
+) -> Vec<String> {
+    let mut holders: Vec<&Manifest> = chats
+        .iter()
+        .filter(|manifest| live.contains(&manifest.chat_id))
+        .collect();
+    holders.sort_by(|left, right| right.last_active_at.cmp(&left.last_active_at));
+    let mut kept = 0;
+    holders
+        .into_iter()
+        .filter(|manifest| {
+            let keeps = manifest.state == ChatState::Open && kept < cap;
+            kept += usize::from(keeps);
+            !keeps
+        })
+        .map(|manifest| manifest.chat_id.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
