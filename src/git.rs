@@ -588,6 +588,7 @@ mod tests {
     use super::*;
 
     const TOKEN: &str = "ghs-clone-secret";
+    const ROTATED: &str = "ghs-rotated-secret";
 
     #[test]
     fn a_typed_title_becomes_a_slug_a_branch_can_carry() {
@@ -644,6 +645,24 @@ mod tests {
             "https://github.com/CorVous/CorCode.git",
             "what the workspace is left pointing at should still be fetchable"
         );
+    }
+
+    /// The credential is the caller's to read afresh for every operation, so
+    /// a token rotated a moment ago is in the very next URL.
+    #[test]
+    fn every_url_carries_the_token_it_was_handed() {
+        let remotes = Remotes::new(GITHUB);
+
+        let first = remotes.origin("CorVous/CorCode", Some(TOKEN));
+        let rotated = remotes.origin("CorVous/CorCode", Some(ROTATED));
+
+        assert!(first.url().contains(TOKEN));
+        assert!(rotated.url().contains(ROTATED));
+        assert!(
+            !rotated.url().contains(TOKEN),
+            "the rotated URL still carries the token it replaced: {rotated:?}"
+        );
+        assert_eq!(rotated.tokenless(), first.tokenless());
     }
 
     #[test]
@@ -975,6 +994,29 @@ mod tests {
         );
     }
 
+    /// A token rotated while a chat is open reaches the push it is rotated
+    /// for, and the workspace git already scrubbed gets no credential back.
+    #[test]
+    fn a_push_over_a_rotated_token_leaves_no_credential_behind() {
+        let (_origin_dir, origin) = credentialed_repository();
+        let (_into, workspace) = chat_workspace(&origin);
+        let (_rotated_dir, rotated) = credentialed_repository_over(ROTATED);
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+
+        push_for_archive(&rotated, &workspace, CHAT_BRANCH)
+            .expect("a push over a rotated token should go");
+
+        let config = std::fs::read_to_string(workspace.join(".git").join("config"))
+            .expect("a clone writes a config");
+        for credential in [TOKEN, ROTATED] {
+            assert!(
+                !config.contains(credential),
+                "a credential was left where the agent can read it: {config}"
+            );
+        }
+    }
+
     /// A cloned workspace standing on its chat branch, ready to commit as the
     /// agent would.
     fn chat_workspace(origin: &Origin) -> (TempDir, PathBuf) {
@@ -1011,15 +1053,21 @@ mod tests {
     /// does. The credential is spelled into a path a real clone can reach, so
     /// what git writes into the workspace is the real thing.
     fn credentialed_repository() -> (TempDir, Origin) {
+        credentialed_repository_over(TOKEN)
+    }
+
+    /// The same, reachable only over `token`: a repository under another
+    /// credential's path is one this origin cannot push to.
+    fn credentialed_repository_over(token: &str) -> (TempDir, Origin) {
         let dir = TempDir::new().expect("origin dir should be created");
         let bare = dir
             .path()
-            .join(format!("{TOKEN_USER}:{TOKEN}@github.com"))
+            .join(format!("{TOKEN_USER}:{token}@github.com"))
             .join(BARE);
         seed(dir.path(), &bare);
         let origin = Origin {
             url: format!("file://{}", spelled(&bare)),
-            token: Some(TOKEN.to_owned()),
+            token: Some(token.to_owned()),
         };
         (dir, origin)
     }

@@ -124,6 +124,25 @@ mod tests {
         );
     }
 
+    /// What a container is handed at spawn is the whole of what the agent in
+    /// it can read (ADR-0001), so a test of the credentials it runs on has
+    /// nowhere else to look.
+    #[tokio::test]
+    async fn a_spawn_records_the_environment_it_was_handed() {
+        let plane = MemoryPlane::default();
+
+        spawn(&plane, "01K1TESTCHATID0000000000").await;
+
+        assert_eq!(
+            plane.env_of("01K1TESTCHATID0000000000"),
+            Some(BTreeMap::from([(
+                "ANTHROPIC_API_KEY".to_owned(),
+                "secret".to_owned()
+            )]))
+        );
+        assert_eq!(plane.env_of("01K1NOSUCHCHAT0000000000"), None);
+    }
+
     #[tokio::test]
     async fn teardown_leaves_the_other_chats_live() {
         let plane = MemoryPlane::default();
