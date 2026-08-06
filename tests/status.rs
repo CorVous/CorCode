@@ -34,7 +34,9 @@ async fn the_status_line_reads_the_pool_the_parked_count_and_the_tag_off_live_st
     let fragment = ui::status_line(&chats.status(now).await.expect("status should read"));
 
     assert!(
-        fragment.contains("<summary>pool 1/2 · parked 1 · img 2026-08-05 · sweep not yet run</summary>"),
+        fragment.contains(
+            "<summary>pool 1/2 · parked 1 · img 2026-08-05 · sweep not yet run</summary>"
+        ),
         "the status line does not read as ADR-0008 asks: {fragment}"
     );
     assert!(
@@ -60,7 +62,10 @@ async fn every_slot_carries_its_own_idle_time() {
         fragment.contains("Fresh · 4s") && fragment.contains("Stale · 1d"),
         "the slots do not each carry their own idle time: {fragment}"
     );
-    assert!(fragment.contains("pool 2/2"), "the slots are miscounted: {fragment}");
+    assert!(
+        fragment.contains("pool 2/2"),
+        "the slots are miscounted: {fragment}"
+    );
 }
 
 #[tokio::test]

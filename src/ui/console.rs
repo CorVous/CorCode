@@ -2,16 +2,24 @@
 
 use std::fmt::Write as _;
 
-use crate::git::chat_branch;
-use crate::store::RuntimeStatus;
+use chrono::TimeDelta;
 
-use super::{CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, last_push, page, status_word, text};
+use crate::git::chat_branch;
+use crate::status::{Slot, Status};
+use crate::store::RuntimeStatus;
+use crate::sweep::Sweep;
+
+use super::{
+    CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, STATUS_PATH, last_push, page, status_word, text,
+};
 
 /// The branch a chat is cut from when the operator says nothing else.
 const DEFAULT_BASE_BRANCH: &str = "main";
 
-/// Orphan-sweep result, held here until a sweep actually runs (ADR-0008).
-const SWEEP: &str = "ok";
+/// How often the console asks for the container picture again. Slots and
+/// idle times move with the turns other pages are taking, so the line has to
+/// be polled to stay true; nothing here is worth the chat log's cadence.
+const POLL_SECONDS: u32 = 5;
 
 /// The groups the chat list is stacked in, top to bottom (ADR-0002).
 const GROUPS: [RuntimeStatus; 3] = [
@@ -23,12 +31,7 @@ const GROUPS: [RuntimeStatus; 3] = [
 /// The whole console: status line, the collapsed new-chat form over the
 /// repositories this deployment offers, and the grouped chat list.
 #[must_use]
-pub fn console_page(
-    chats: &[Chat],
-    workspace_image: &str,
-    repos: &[String],
-    warm_pool: usize,
-) -> String {
+pub fn console_page(chats: &[Chat], status: &Status, repos: &[String]) -> String {
     page(
         "CorCode",
         &format!(
@@ -36,7 +39,7 @@ pub fn console_page(
              <form method=\"post\" action=\"{LOGOUT_PATH}\">\
              <p><button type=\"submit\">Log out everywhere</button></p></form>\
              <script src=\"{HTMX_PATH}\" defer></script>",
-            status_line(chats, workspace_image, warm_pool),
+            status_line(status),
             new_chat_form(repos),
             chat_list(chats),
         ),
@@ -64,21 +67,100 @@ pub fn chat_list(chats: &[Chat]) -> String {
     list
 }
 
-/// The container picture in one line, expanding in place (ADR-0008).
-fn status_line(chats: &[Chat], workspace_image: &str, warm_pool: usize) -> String {
-    let live = count(chats, RuntimeStatus::Live);
-    let parked = count(chats, RuntimeStatus::Parked);
+/// The container picture in one line, expanding in place and polling itself
+/// so it stays true while the console is open (ADR-0008).
+#[must_use]
+pub fn status_line(status: &Status) -> String {
+    let Status {
+        pool,
+        warm_pool,
+        parked,
+        image,
+        sweep,
+    } = status;
+    let live = pool.len();
     format!(
-        "<details>\
-         <summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {SWEEP}</summary>\
+        "<section id=\"status\" hx-get=\"{STATUS_PATH}\" hx-trigger=\"every {POLL_SECONDS}s\" \
+         hx-swap=\"outerHTML\"><details>\
+         <summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {}</summary>\
          <dl><dt>Pool</dt><dd>{}</dd>\
          <dt>Parked</dt><dd>{parked} chats — workspace kept, container torn down</dd>\
          <dt>Image</dt><dd>{}</dd>\
-         <dt>Sweep</dt><dd>{SWEEP}</dd></dl></details>",
-        text(image_tag(workspace_image)),
-        pool(chats),
-        text(workspace_image),
+         <dt>Sweep</dt><dd>{}</dd></dl></details></section>",
+        text(image_tag(image)),
+        swept_in_a_word(sweep.as_ref()),
+        slots(pool),
+        text(image),
+        swept_in_full(sweep.as_ref()),
     )
+}
+
+/// Who holds a warm-pool slot right now, and how long since each of them
+/// last took a turn.
+fn slots(pool: &[Slot]) -> String {
+    if pool.is_empty() {
+        return "no containers running".to_owned();
+    }
+    pool.iter()
+        .map(|slot| format!("{} · {}", text(&slot.title), idle_for(slot.idle)))
+        .collect::<Vec<String>>()
+        .join("<br>")
+}
+
+/// How long a chat has been quiet, in the largest unit it fills. A clock
+/// that slipped backwards reads as no time at all rather than as a chat from
+/// the future.
+fn idle_for(idle: TimeDelta) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+
+    let seconds = idle.num_seconds().max(0);
+    if seconds < MINUTE {
+        format!("{seconds}s")
+    } else if seconds < HOUR {
+        format!("{}m", seconds / MINUTE)
+    } else if seconds < DAY {
+        format!("{}h", seconds / HOUR)
+    } else {
+        format!("{}d", seconds / DAY)
+    }
+}
+
+/// What the last sweep came to, short enough for the summary line
+/// (ADR-0002 rule 4).
+fn swept_in_a_word(sweep: Option<&Sweep>) -> String {
+    let Some(sweep) = sweep else {
+        return "not yet run".to_owned();
+    };
+    if sweep.orphaned.is_empty() {
+        "ok".to_owned()
+    } else {
+        format!("removed {}", sweep.orphaned.len())
+    }
+}
+
+/// The same sweep with the chat ids spelled out, for the expanded picture.
+/// A working tree an orphan's container is still holding was left alone, and
+/// only this line says which (ADR-0002 rule 4).
+fn swept_in_full(sweep: Option<&Sweep>) -> String {
+    let Some(sweep) = sweep else {
+        return "not yet run".to_owned();
+    };
+    let mut told = swept_in_a_word(Some(sweep));
+    if !sweep.orphaned.is_empty() {
+        write!(told, " ({})", text(&sweep.orphaned.join(", ")))
+            .expect("writing to a string cannot fail");
+    }
+    if !sweep.held.is_empty() {
+        write!(
+            told,
+            ", left alone while their containers are up ({})",
+            text(&sweep.held.join(", ")),
+        )
+        .expect("writing to a string cannot fail");
+    }
+    told
 }
 
 /// The new chat this form cuts. The preview slugifies as you type so it reads
@@ -140,22 +222,6 @@ fn row((manifest, _): &Chat) -> String {
         text(&manifest.branch),
         text(last_push(manifest)),
     )
-}
-
-fn count(chats: &[Chat], status: RuntimeStatus) -> usize {
-    in_group(chats, status).count()
-}
-
-/// Who holds a warm-pool slot right now.
-fn pool(chats: &[Chat]) -> String {
-    let holders: Vec<String> = in_group(chats, RuntimeStatus::Live)
-        .map(|(manifest, _)| text(&manifest.title).to_string())
-        .collect();
-    if holders.is_empty() {
-        "no containers running".to_owned()
-    } else {
-        holders.join("<br>")
-    }
 }
 
 /// The dated half of a pinned image reference (ADR-0004).
@@ -344,7 +410,10 @@ mod tests {
             fragment.contains("running · 3m") && fragment.contains("waiting · 2h"),
             "the slots do not carry their idle times: {fragment}"
         );
-        assert!(fragment.contains(IMAGE), "the pinned image is missing: {fragment}");
+        assert!(
+            fragment.contains(IMAGE),
+            "the pinned image is missing: {fragment}"
+        );
         assert!(
             fragment.contains("01K1ORPHAN"),
             "the sweep does not name what it removed: {fragment}"

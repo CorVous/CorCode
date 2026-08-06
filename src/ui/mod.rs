@@ -7,13 +7,17 @@ mod escape;
 use crate::store::{Manifest, RuntimeStatus};
 
 pub use chat::{chat_page, event_log};
-pub use console::{chat_list, console_page};
+pub use console::{chat_list, console_page, status_line};
 
 use escape::text;
 
 /// The chat list, both as a section of the console and as a fragment htmx
 /// swaps in on its own.
 pub const CHATS_PATH: &str = "/chats";
+
+/// The status line, both as the head of the console and as the fragment htmx
+/// polls to keep it true (ADR-0008).
+pub const STATUS_PATH: &str = "/status";
 
 /// Where the vendored htmx bundle is served from; nothing reaches a CDN.
 pub const HTMX_PATH: &str = "/assets/htmx.js";
@@ -90,6 +94,8 @@ fn last_push(manifest: &Manifest) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use crate::status::Status;
+
     use super::*;
 
     /// ADR-0008 budgets styling at "on the order of a dozen lines". Past this

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::hash::BuildHasher;
 
 /// What one pass over `workspaces/` found.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Sweep {
     /// Working trees no open chat claims, which are the sweep's to delete.
     pub orphaned: Vec<String>,

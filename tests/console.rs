@@ -102,6 +102,27 @@ async fn the_chat_list_fragment_comes_back_without_the_page_around_it() {
 }
 
 #[tokio::test]
+async fn the_status_fragment_comes_back_without_the_page_around_it() {
+    let app = TestApp::start(with_fixture_chat()).await;
+
+    let body = app.body("/status").await;
+
+    assert!(
+        body.starts_with("<section id=\"status\""),
+        "the fragment is not a bare section: {body}"
+    );
+    assert!(
+        !body.contains("<html"),
+        "the fragment carries a whole page: {body}"
+    );
+    assert!(
+        body.contains("pool 0/2 · parked 1"),
+        "the fragment does not read the dataset: {body}"
+    );
+    app.stop().await;
+}
+
+#[tokio::test]
 async fn htmx_is_served_by_the_app_itself() {
     let app = TestApp::start(TempDir::new().expect("temp dir")).await;
 
@@ -117,7 +138,7 @@ async fn htmx_is_served_by_the_app_itself() {
 async fn the_console_is_still_behind_the_session_gate() {
     let app = TestApp::start(with_fixture_chat()).await;
 
-    for path in ["/", "/chats", "/assets/htmx.js"] {
+    for path in ["/", "/chats", "/status", "/assets/htmx.js"] {
         let response = client().get(app.url(path)).send().await.expect("request");
         assert_eq!(
             response.status(),
