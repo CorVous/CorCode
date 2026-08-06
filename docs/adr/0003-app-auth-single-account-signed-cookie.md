@@ -1,7 +1,8 @@
 # ADR-0003: App auth is a single config-held account with a signed session cookie
 
 Date: 2026-08-05
-Status: Accepted
+Status: Accepted, amended 2026-08-06 (operational secrets are settable at
+runtime; the login account is not)
 Wayfinder: [decision #4](https://github.com/CorVous/CorCode/issues/4)
 
 ## Context
@@ -31,6 +32,13 @@ require HTTPS the deployment doesn't have.
 - **30-day sliding expiry**: each authenticated request refreshes the window.
 - **Revocation = key rotation**: a "log out everywhere" action rotates the
   signing key, doubling as the lost-phone kill switch. No per-device sessions.
+- **Operational secrets are not the account** _(amended 2026-08-06)_: the
+  GitHub token and the Anthropic API key the core runs chats on are read from
+  `secrets/<name>` files on the dataset when present, over the env vars that
+  bootstrapped them, so either can be rotated from the running app. Each file
+  is the owner's alone (0600 in a 0700 directory). The login account —
+  `username` and the argon2 hash — stays env-only: who may log in changes at
+  deploy, never at runtime.
 - **Hardening**: constant-time credential comparison, Origin-header check on
   mutating requests (htmx sends none cross-origin without CORS consent), and
   an in-memory rate limit with backoff on the login endpoint.
