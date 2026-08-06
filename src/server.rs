@@ -21,7 +21,7 @@ use ulid::Ulid;
 use crate::acp::AcpTransport;
 use crate::auth::gate::{Gate, SignIn};
 use crate::auth::session;
-use crate::chats::{Chats, WantedChat};
+use crate::chats::{Chats, PromptError, WantedChat};
 use crate::config::Config;
 use crate::plane::ContainerPlane;
 use crate::store::ContainerLiveness;
@@ -35,6 +35,9 @@ const LOGIN_PATH: &str = "/login";
 
 /// The unauthenticated liveness probe (ADR-0003).
 const HEALTH_PATH: &str = "/health";
+
+/// The path parameter every per-chat route is spelled with.
+const CHAT_ID: &str = "{chat_id}";
 
 /// Build the application's routes. Every route is gated except the handful
 /// [`is_public`] names, so a route added here is protected by default
@@ -61,7 +64,9 @@ where
     Router::new()
         .route("/", get(console))
         .route(ui::CHATS_PATH, get(chat_list).post(create_chat))
-        .route(&format!("{}/{{chat_id}}", ui::CHATS_PATH), get(chat_view))
+        .route(&ui::chat_path(CHAT_ID), get(chat_view))
+        .route(&ui::chat_events_path(CHAT_ID), get(chat_events))
+        .route(&ui::chat_prompt_path(CHAT_ID), post(prompt_chat))
         .route(ui::HTMX_PATH, get(htmx))
         .with_state(chats)
 }
@@ -185,6 +190,71 @@ where
         Ok(Some(((manifest, status), events))) => {
             Html(ui::chat_page(&manifest, status, &events)).into_response()
         }
+        Ok(None) => no_such_chat(),
+        Err(failure) => broken_invariant(&failure),
+    }
+}
+
+/// One chat's event log on its own, for htmx to poll while the page is open
+/// (ADR-0006: the log is read from disk, never from the connection).
+async fn chat_events<P, T>(
+    State(chats): State<Arc<Chats<P, T>>>,
+    Path(chat_id): Path<String>,
+) -> Response
+where
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
+{
+    let Ok(chat_id) = chat_id.parse::<Ulid>() else {
+        return no_such_chat();
+    };
+    rendered_log(&chats, &chat_id)
+}
+
+/// Put one prompt to a chat's agent and answer with the log it landed in, so
+/// the page never navigates. The turn is awaited whole: the poll is what
+/// shows it arriving.
+async fn prompt_chat<P, T>(
+    State(chats): State<Arc<Chats<P, T>>>,
+    Path(chat_id): Path<String>,
+    Form(form): Form<PromptForm>,
+) -> Response
+where
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
+{
+    let Ok(chat_id) = chat_id.parse::<Ulid>() else {
+        return no_such_chat();
+    };
+    match chats.prompt(&chat_id, &form.prompt).await {
+        Ok(()) => rendered_log(&chats, &chat_id),
+        Err(refusal @ PromptError::NotConnected) => {
+            (StatusCode::TOO_EARLY, format!("{refusal}.\n")).into_response()
+        }
+        Err(refusal @ PromptError::Busy) => {
+            (StatusCode::CONFLICT, format!("{refusal}.\n")).into_response()
+        }
+        Err(failure) => {
+            error!("a turn broke: {:#}", anyhow::Error::new(failure));
+            (StatusCode::BAD_GATEWAY, "The turn broke.\n").into_response()
+        }
+    }
+}
+
+/// What the prompt box submits.
+#[derive(Deserialize)]
+struct PromptForm {
+    prompt: String,
+}
+
+/// The chat's log as it stands on disk right now.
+fn rendered_log<P, T>(chats: &Chats<P, T>, chat_id: &Ulid) -> Response
+where
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
+{
+    match chats.events(chat_id) {
+        Ok(Some(events)) => Html(ui::event_log(&chat_id.to_string(), &events)).into_response(),
         Ok(None) => no_such_chat(),
         Err(failure) => broken_invariant(&failure),
     }

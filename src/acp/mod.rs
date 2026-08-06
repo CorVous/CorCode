@@ -1,6 +1,7 @@
 //! The ACP client: newline-delimited JSON-RPC to the adapter inside a chat's
 //! container (ADR-0001, ADR-0006).
 
+mod connections;
 mod docker;
 mod error;
 mod scripted;
@@ -13,6 +14,7 @@ use log::debug;
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
+pub use connections::{Connections, Held};
 pub use docker::{ADAPTER, DockerExec};
 pub use error::AcpError;
 pub use scripted::ScriptedAdapter;

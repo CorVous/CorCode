@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -39,6 +40,7 @@ pub struct ScriptedAdapter {
     heard: Arc<Mutex<Heard>>,
     stall: Stall,
     hangs_up: bool,
+    dawdle: Duration,
 }
 
 /// Everything the fake was told, for the assertions to read back.
@@ -70,6 +72,16 @@ impl ScriptedAdapter {
         Self {
             updates: Arc::new(updates.to_vec()),
             ..Self::reading(script)
+        }
+    }
+
+    /// An adapter that takes `dawdle` to get round to a prompt, so that a
+    /// second prompt can arrive while the first turn is still in flight.
+    #[must_use]
+    pub fn dawdling(session_id: &str, updates: &[Value], dawdle: Duration) -> Self {
+        Self {
+            dawdle,
+            ..Self::answering(session_id, updates)
         }
     }
 
@@ -138,6 +150,7 @@ impl ScriptedAdapter {
             heard: Arc::new(Mutex::new(Heard::default())),
             stall: Stall::Nowhere,
             hangs_up: false,
+            dawdle: Duration::ZERO,
         }
     }
 
@@ -185,6 +198,7 @@ impl AcpTransport for ScriptedAdapter {
             unread: VecDeque::new(),
             stall: self.stall,
             hangs_up: self.hangs_up,
+            dawdle: self.dawdle,
         })
     }
 }
@@ -197,6 +211,7 @@ pub struct ScriptedChannel {
     unread: VecDeque<String>,
     stall: Stall,
     hangs_up: bool,
+    dawdle: Duration,
 }
 
 impl AcpChannel for ScriptedChannel {
@@ -207,6 +222,9 @@ impl AcpChannel for ScriptedChannel {
         let request: Value = serde_json::from_str(message).expect("the client should send JSON");
         let method = request["method"].as_str().unwrap_or_default().to_owned();
         let id = request["id"].clone();
+        if method == "session/prompt" {
+            tokio::time::sleep(self.dawdle).await;
+        }
         let mut heard = self.heard.lock().expect("no holder of the lock panics");
         heard.requests.push(request);
         heard.chattered = true;

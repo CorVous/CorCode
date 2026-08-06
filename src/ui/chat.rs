@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::store::{Event, Manifest, RuntimeStatus};
 
-use super::{last_push, page, status_word, text};
+use super::{HTMX_PATH, chat_events_path, chat_prompt_path, last_push, page, status_word, text};
 
 /// What an event calls itself when it carries no ACP discriminator.
 const UNTYPED: &str = "event";
@@ -12,25 +12,46 @@ const UNTYPED: &str = "event";
 /// The `corcode` key on a line the core wrote itself rather than relayed.
 const RESET_NOTICE: &str = "reset_notice";
 
+/// How often an open chat asks for the log again. A turn streams for minutes,
+/// so this is what "live" means here: polling, not a second connection.
+const POLL_SECONDS: u32 = 2;
+
 /// One chat, top to bottom: what it is, everything that has happened to it,
 /// and the prompt box waiting at the end.
 #[must_use]
 pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -> String {
-    let log: String = events.iter().map(|event| line(&event.event)).collect();
     page(
         &manifest.title,
         &format!(
             "<p><a href=\"/\">← chats</a></p>\
              <p><small>{} · {} · push {} · {}</small></p>\
-             {log}{}\
-             <form><p><input name=\"prompt\" aria-label=\"Prompt\" placeholder=\"prompt\"> \
-             <button type=\"submit\" disabled>Send</button></p></form>",
+             {}{}\
+             <form hx-post=\"{}\" hx-target=\"#log\" hx-swap=\"outerHTML\">\
+             <p><input name=\"prompt\" aria-label=\"Prompt\" placeholder=\"prompt\"> \
+             <button type=\"submit\">Send</button></p></form>\
+             <script src=\"{HTMX_PATH}\" defer></script>",
             text(&manifest.repo),
             text(&manifest.branch),
             text(last_push(manifest)),
             status_word(status),
+            event_log(&manifest.chat_id, events),
             first_prompt_hint(status),
+            text(&chat_prompt_path(&manifest.chat_id)),
         ),
+    )
+}
+
+/// The event log alone, polling itself for whatever a turn has added since.
+///
+/// It is rendered from `events.jsonl` and never from the connection, so it
+/// reads the same whether the chat is live or was live last week (ADR-0006).
+#[must_use]
+pub fn event_log(chat_id: &str, events: &[Event]) -> String {
+    let lines: String = events.iter().map(|event| line(&event.event)).collect();
+    format!(
+        "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {POLL_SECONDS}s\" \
+         hx-swap=\"outerHTML\">{lines}</section>",
+        text(&chat_events_path(chat_id)),
     )
 }
 

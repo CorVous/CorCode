@@ -8,7 +8,7 @@ use log::warn;
 use thiserror::Error;
 use ulid::Ulid;
 
-use crate::acp::{AcpTransport, Adapter};
+use crate::acp::{AcpTransport, Adapter, Connections, Held};
 use crate::config::Config;
 use crate::git::{self, Remotes};
 use crate::plane::ContainerPlane;
@@ -52,12 +52,25 @@ fn broke(failure: impl Into<anyhow::Error>) -> CreateError {
     CreateError::Broke(failure.into())
 }
 
+/// Why a prompt never reached the agent. Neither refusal is the request's
+/// fault, so both say what the chat is doing instead.
+#[derive(Debug, Error)]
+pub enum PromptError {
+    #[error("this chat has no live connection")]
+    NotConnected,
+    #[error("this chat is still answering the last prompt")]
+    Busy,
+    #[error("the turn broke")]
+    Broke(#[source] anyhow::Error),
+}
+
 /// Every chat in one dataset: who is live, what they hold, and how a new one
 /// comes to exist.
-pub struct Chats<P, T> {
+pub struct Chats<P, T: AcpTransport> {
     store: ChatStore,
     plane: P,
     adapter: Adapter<T>,
+    connections: Connections<T::Channel>,
     remotes: Remotes,
     repos: Vec<String>,
     anthropic_api_key: Option<String>,
@@ -72,6 +85,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
             store: ChatStore::new(&config.data_dir),
             plane,
             adapter: Adapter::new(transport),
+            connections: Connections::default(),
             remotes,
             repos: config.repos.clone(),
             anthropic_api_key: config.anthropic_api_key.clone(),
@@ -125,6 +139,47 @@ where
         let live = self.plane.live_chat_ids().await?;
         let status = runtime_status(&manifest, &live);
         Ok(Some(((manifest, status), events)))
+    }
+
+    /// One chat's event log, or nothing if the dataset holds no such chat.
+    /// The whole of what the UI renders, and cheap enough to poll: a file
+    /// read, no container, no connection (ADR-0006).
+    pub fn events(&self, chat_id: &Ulid) -> Result<Option<Vec<Event>>> {
+        match self.store.read_events(&chat_id.to_string()) {
+            Ok(events) => Ok(Some(events)),
+            Err(failure) if failure.is_missing() => Ok(None),
+            Err(failure) => Err(failure.into()),
+        }
+    }
+
+    /// Put one prompt to a chat's agent, writing the turn down as it happens:
+    /// the prompt before it goes out, then every update the agent streams
+    /// back (ADR-0006). Returns once the agent has ended the turn.
+    pub async fn prompt(&self, chat_id: &Ulid, said: &str) -> Result<(), PromptError> {
+        let chat_id = chat_id.to_string();
+        let connection = self.connected(&chat_id)?;
+        let turn = {
+            let mut agent = connection.try_lock().map_err(|_| PromptError::Busy)?;
+            agent
+                .take_turn(said, &mut |payload| {
+                    self.store.append_event(&chat_id, payload)?;
+                    Ok(())
+                })
+                .await
+        };
+        turn.map_err(|failure| {
+            self.connections.forget(&chat_id);
+            PromptError::Broke(failure.into())
+        })
+    }
+
+    /// The live connection a prompt goes over. A chat that has none is where
+    /// ADR-0007's ladder — spawn, then resume — will land; until it exists,
+    /// a prompt into such a chat wakes nothing and says so.
+    fn connected(&self, chat_id: &str) -> Result<Held<T::Channel>, PromptError> {
+        self.connections
+            .of(chat_id)
+            .ok_or(PromptError::NotConnected)
     }
 
     /// Cut a new chat whole: both trees, a clone of the repository at its
@@ -213,8 +268,9 @@ where
             .map_err(broke)
     }
 
-    /// Open the ACP session and write its id into the manifest, which is the
-    /// only trace a new session leaves: it is not an event (ADR-0006).
+    /// Open the ACP session, write its id into the manifest — the only trace
+    /// a new session leaves, since it is not an event (ADR-0006) — and keep
+    /// the connection for the prompts that follow.
     async fn record_session(
         &self,
         mut manifest: Manifest,
@@ -222,6 +278,8 @@ where
     ) -> Result<(), CreateError> {
         let connection = self.adapter.open_session(container).await.map_err(broke)?;
         manifest.acp_session_id = Some(connection.session_id().to_owned());
-        self.store.write_manifest(&manifest).map_err(broke)
+        self.store.write_manifest(&manifest).map_err(broke)?;
+        self.connections.hold(&manifest.chat_id, connection);
+        Ok(())
     }
 }
