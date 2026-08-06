@@ -9,6 +9,7 @@ use crate::store::{Manifest, RuntimeStatus};
 
 pub use chat::{chat_page, event_log};
 pub use console::{chat_list, console_page, status_line, status_picture};
+pub use settings::{SecretStatus, secret_settings, settings_panel};
 
 use escape::text;
 
@@ -29,6 +30,9 @@ pub const HTMX_PATH: &str = "/assets/htmx.js";
 
 /// Where the key-rotating sign-out posts (ADR-0003).
 pub const LOGOUT_PATH: &str = "/logout-all";
+
+/// Under which every settings action on every secret is spelled.
+pub const SETTINGS_PATH: &str = "/settings";
 
 /// The exact htmx build compiled into the binary.
 pub const HTMX: &str = include_str!("../../assets/htmx-2.0.10.min.js");
@@ -69,6 +73,26 @@ pub fn chat_prompt_path(chat_id: &str) -> String {
 #[must_use]
 pub fn chat_archive_path(chat_id: &str) -> String {
     format!("{}/archive", chat_path(chat_id))
+}
+
+/// Where one secret's Save posts. The router spells its routes with these
+/// too, passing the path parameter as the name, so no path is written down
+/// twice.
+#[must_use]
+pub fn secret_path(secret: &str) -> String {
+    format!("{SETTINGS_PATH}/{secret}")
+}
+
+/// Where one secret's Clear posts.
+#[must_use]
+pub fn secret_clear_path(secret: &str) -> String {
+    format!("{}/clear", secret_path(secret))
+}
+
+/// Where one secret's Verify posts.
+#[must_use]
+pub fn secret_verify_path(secret: &str) -> String {
+    format!("{}/verify", secret_path(secret))
 }
 
 /// A semantic HTML document on browser defaults (ADR-0008).

@@ -1,5 +1,134 @@
 //! The settings panel: the two operational secrets, set and checked from the
 //! one screen (ADR-0008).
+//!
+//! No function here is ever handed a secret's value, which is how none of
+//! them can render one.
+
+use crate::secrets::{Secret, Source};
+use crate::settings::Outcome;
+use crate::verify::Verified;
+
+use super::{secret_clear_path, secret_path, secret_verify_path, text};
+
+/// A classic token that authenticates perfectly well and cannot clone the
+/// private repositories a chat is cut from (ADR-0005).
+const SHORT_OF_REPO_SCOPE: &str =
+    "<p role=\"alert\">This token has no repo scope: private repositories are closed to it.</p>";
+
+/// One secret paired with where its value comes from right now.
+pub type SecretStatus = (Secret, Source);
+
+/// The whole panel, as the console draws it with nothing just done to it.
+#[must_use]
+pub fn settings_panel(secrets: &[SecretStatus]) -> String {
+    let sections: String = secrets
+        .iter()
+        .map(|&(secret, source)| secret_settings(secret, source, &Outcome::Untouched))
+        .collect();
+    format!("<details id=\"settings\"><summary>Settings</summary>{sections}</details>")
+}
+
+/// One secret's section, which is also what every action on it swaps back in.
+///
+/// Only the section is replaced: the panel around it holds whether the reader
+/// has it open.
+#[must_use]
+pub fn secret_settings(secret: Secret, source: Source, outcome: &Outcome) -> String {
+    let name = secret.name();
+    let swap = format!(
+        "hx-target=\"#{}\" hx-swap=\"outerHTML\"",
+        section_id(secret)
+    );
+    format!(
+        "<section id=\"{}\"><h3>{}</h3><p>{}</p>{}\
+         <form hx-post=\"{}\" {swap}><p><label>New value \
+         <input type=\"password\" name=\"value\" autocomplete=\"off\"></label> \
+         <button type=\"submit\">Save</button></p></form>\
+         <form hx-post=\"{}\" {swap}><p><button type=\"submit\">Clear</button></p></form>\
+         <form hx-post=\"{}\" {swap}><p><button type=\"submit\">Verify</button></p></form>\
+         </section>",
+        section_id(secret),
+        label(secret),
+        reads(source),
+        told(outcome),
+        secret_path(name),
+        secret_clear_path(name),
+        secret_verify_path(name),
+    )
+}
+
+/// The element every action on one secret targets.
+fn section_id(secret: Secret) -> String {
+    format!("secret-{}", secret.name())
+}
+
+/// What the panel calls each secret out loud.
+const fn label(secret: Secret) -> &'static str {
+    match secret {
+        Secret::GithubToken => "GitHub token",
+        Secret::AnthropicKey => "Anthropic API key",
+    }
+}
+
+/// How a secret's status line reads.
+const fn reads(source: Source) -> &'static str {
+    match source {
+        Source::Unset => "not set",
+        Source::Environment => "set (from environment)",
+        Source::Settings => "set (from settings)",
+    }
+}
+
+/// What the last action came to, or nothing at all if there has not been one.
+fn told(outcome: &Outcome) -> String {
+    match outcome {
+        Outcome::Untouched => String::new(),
+        Outcome::Saved => said("saved"),
+        Outcome::NothingGiven => said("nothing given, nothing changed"),
+        Outcome::Cleared => said("cleared"),
+        Outcome::NothingToVerify => said("not set: nothing to check"),
+        Outcome::Verified(verified) => verdict(verified),
+    }
+}
+
+fn said(what: &str) -> String {
+    format!("<p role=\"status\">{what}</p>")
+}
+
+/// What the service made of the credential, in the app's own words: a status
+/// and a generic reason, never a line the upstream wrote.
+fn verdict(verified: &Verified) -> String {
+    match verified {
+        Verified::Accepted {
+            login,
+            without_repo_scope,
+        } => {
+            let mut line = said(&format!("ok{}", authenticated_as(login.as_deref())));
+            if *without_repo_scope {
+                line.push_str(SHORT_OF_REPO_SCOPE);
+            }
+            line
+        }
+        Verified::Refused(status) => said(&format!("{} ({status})", refusal(*status))),
+        Verified::Silent => said("the service could not be reached"),
+    }
+}
+
+/// Who the service says the credential belongs to, where it says so at all.
+fn authenticated_as(login: Option<&str>) -> String {
+    login.map_or_else(String::new, |login| {
+        format!(" — authenticated as {}", text(login))
+    })
+}
+
+/// Why a credential was turned away, in as much detail as a status alone can
+/// honestly carry.
+const fn refusal(status: u16) -> &'static str {
+    match status {
+        401 => "invalid or expired",
+        _ => "not accepted",
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -85,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_blank_save_says_that_nothing_was_given_and_nothing_changed() {
-        let rendered = told(&Outcome::NothingGiven);
+        let rendered = after(&Outcome::NothingGiven);
 
         assert!(
             rendered.contains("nothing given, nothing changed"),
@@ -95,13 +224,13 @@ mod tests {
 
     #[test]
     fn saving_and_clearing_each_say_what_they_did() {
-        assert!(told(&Outcome::Saved).contains("saved"));
-        assert!(told(&Outcome::Cleared).contains("cleared"));
+        assert!(after(&Outcome::Saved).contains("saved"));
+        assert!(after(&Outcome::Cleared).contains("cleared"));
     }
 
     #[test]
     fn a_working_token_names_who_it_authenticated_as() {
-        let rendered = told(&Outcome::Verified(Verified::Accepted {
+        let rendered = after(&Outcome::Verified(Verified::Accepted {
             login: Some("cassidy".to_owned()),
             without_repo_scope: false,
         }));
@@ -121,7 +250,7 @@ mod tests {
     /// perfectly well right up until it tries.
     #[test]
     fn a_token_that_cannot_reach_private_repositories_is_flagged_as_working_anyway() {
-        let rendered = told(&Outcome::Verified(Verified::Accepted {
+        let rendered = after(&Outcome::Verified(Verified::Accepted {
             login: Some("cassidy".to_owned()),
             without_repo_scope: true,
         }));
@@ -135,7 +264,7 @@ mod tests {
 
     #[test]
     fn a_service_that_names_nobody_just_reads_ok() {
-        let rendered = told(&Outcome::Verified(Verified::Accepted {
+        let rendered = after(&Outcome::Verified(Verified::Accepted {
             login: None,
             without_repo_scope: false,
         }));
@@ -150,23 +279,22 @@ mod tests {
     #[test]
     fn a_refused_credential_reads_as_its_status_and_nothing_the_service_said() {
         assert!(
-            told(&Outcome::Verified(Verified::Refused(401)))
-                .contains("invalid or expired (401)")
+            after(&Outcome::Verified(Verified::Refused(401))).contains("invalid or expired (401)")
         );
-        assert!(told(&Outcome::Verified(Verified::Refused(500))).contains("(500)"));
+        assert!(after(&Outcome::Verified(Verified::Refused(500))).contains("(500)"));
     }
 
     #[test]
     fn a_service_that_did_not_answer_says_so() {
         assert!(
-            told(&Outcome::Verified(Verified::Silent)).contains("could not be reached"),
+            after(&Outcome::Verified(Verified::Silent)).contains("could not be reached"),
             "a silent service reads as something else"
         );
     }
 
     #[test]
     fn a_secret_nothing_holds_has_nothing_to_check() {
-        assert!(told(&Outcome::NothingToVerify).contains("nothing to check"));
+        assert!(after(&Outcome::NothingToVerify).contains("nothing to check"));
     }
 
     #[test]
@@ -179,7 +307,7 @@ mod tests {
 
     #[test]
     fn an_account_name_cannot_smuggle_markup_into_the_panel() {
-        let rendered = told(&Outcome::Verified(Verified::Accepted {
+        let rendered = after(&Outcome::Verified(Verified::Accepted {
             login: Some("<img src=x onerror=alert(1)>".to_owned()),
             without_repo_scope: false,
         }));
@@ -196,7 +324,7 @@ mod tests {
     }
 
     /// One secret's section, reporting what was just done to it.
-    fn told(outcome: &Outcome) -> String {
+    fn after(outcome: &Outcome) -> String {
         secret_settings(Secret::GithubToken, Source::Settings, outcome)
     }
 }
