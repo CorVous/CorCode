@@ -15,7 +15,9 @@ use tokio::task::JoinHandle;
 
 use cor_code::acp::ScriptedAdapter;
 use cor_code::chats::Chats;
-use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
+use cor_code::config::{
+    Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_WARM_POOL,
+};
 use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::MemoryPlane;
 use cor_code::server;
@@ -350,6 +352,7 @@ fn test_config(data_dir: std::path::PathBuf) -> Config {
         workspace_image: "ghcr.io/corvous/corcode-workspace:2026-08-05".to_owned(),
         container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
         container_cpus: DEFAULT_CONTAINER_CPUS,
+        warm_pool: DEFAULT_WARM_POOL,
         registry: None,
         repos: vec!["CorVous/CorCode".to_owned()],
         github_token: None,
