@@ -33,13 +33,36 @@ pub enum Secret {
 }
 
 impl Secret {
-    /// The file this secret is kept in, under the secrets directory.
-    const fn file(self) -> &'static str {
+    /// Every secret this deployment holds, in the order the console lists
+    /// them.
+    pub const ALL: [Self; 2] = [Self::GithubToken, Self::AnthropicKey];
+
+    /// How this secret is spelled wherever one has to be named: the file it
+    /// is kept in, and the path the console sets it over.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::GithubToken => "github_token",
             Self::AnthropicKey => "anthropic_key",
         }
     }
+
+    /// The secret `name` names, if it names one.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|secret| secret.name() == name)
+    }
+}
+
+/// Where the value in force for a secret came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Neither the settings nor the environment hold it.
+    Unset,
+    /// The environment bootstrapped it and nothing has been set since.
+    Environment,
+    /// It was set from the console, and it is what every read gets.
+    Settings,
 }
 
 /// Something the secrets on disk would not do. No variant can carry a secret:
@@ -94,9 +117,26 @@ impl Secrets {
     /// What `secret` is worth right now: what was last written for it, else
     /// what the environment bootstrapped, else nothing.
     pub fn read(&self, secret: Secret) -> Result<Option<String>, SecretsError> {
+        Ok(self.in_force(secret)?.map(|(_, value)| value))
+    }
+
+    /// What the console says about `secret` without ever saying it.
+    pub fn source(&self, secret: Secret) -> Result<Source, SecretsError> {
         Ok(self
-            .written(secret)?
-            .or_else(|| self.from_env.get(&secret).cloned()))
+            .in_force(secret)?
+            .map_or(Source::Unset, |(source, _)| source))
+    }
+
+    /// The value in force for `secret` and where it came from: what was last
+    /// written for it, else what the environment bootstrapped.
+    fn in_force(&self, secret: Secret) -> Result<Option<(Source, String)>, SecretsError> {
+        if let Some(written) = self.written(secret)? {
+            return Ok(Some((Source::Settings, written)));
+        }
+        Ok(self
+            .from_env
+            .get(&secret)
+            .map(|value| (Source::Environment, value.clone())))
     }
 
     /// Put `value` in force for every read after this one, without the
@@ -139,14 +179,14 @@ impl Secrets {
     }
 
     fn path(&self, secret: Secret) -> PathBuf {
-        self.dir.join(secret.file())
+        self.dir.join(secret.name())
     }
 
     /// Where one write stages its secret: a name of its own, so two writes at
     /// once cannot publish half of each other.
     fn pending(&self, secret: Secret) -> PathBuf {
         self.dir
-            .join(format!("{}.{}.{PENDING}", secret.file(), Ulid::generate()))
+            .join(format!("{}.{}.{PENDING}", secret.name(), Ulid::generate()))
     }
 
     /// The secrets directory, made if it is not there yet, open to nobody but
