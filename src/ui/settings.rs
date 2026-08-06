@@ -67,14 +67,26 @@ const fn label(secret: Secret) -> &'static str {
     }
 }
 
-/// How a secret's status line reads.
+/// How a secret's status line reads: where its value came from, and — where
+/// the slot takes more than one kind of credential — what it was read as.
 fn reads(standing: Standing) -> String {
-    match standing.source {
+    let source = match standing.source {
         Source::Unset => "not set",
         Source::Environment => "set (from environment)",
         Source::Settings => "set (from settings)",
+    };
+    standing.kind.map_or_else(
+        || source.to_owned(),
+        |kind| format!("{source} — {}", named(kind)),
+    )
+}
+
+/// What the panel calls each kind of Anthropic credential out loud.
+const fn named(kind: AnthropicCredential) -> &'static str {
+    match kind {
+        AnthropicCredential::OauthToken => "OAuth token",
+        AnthropicCredential::ApiKey => "API key",
     }
-    .to_owned()
 }
 
 /// What the last action came to, or nothing at all if there has not been one.
@@ -182,7 +194,10 @@ mod tests {
     fn a_secret_that_stands_for_no_kind_of_credential_names_none() {
         let rendered = untouched(Source::Settings);
 
-        assert!(rendered.contains("<p>set (from settings)</p>"), "{rendered}");
+        assert!(
+            rendered.contains("<p>set (from settings)</p>"),
+            "{rendered}"
+        );
     }
 
     #[test]
