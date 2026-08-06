@@ -329,12 +329,65 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_box_is_inert() {
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &[]);
+    fn the_prompt_box_posts_the_prompt_and_swaps_the_log_it_lands_in() {
+        let manifest = manifest(RuntimeStatus::Live);
+
+        let rendered = chat_page(&manifest, RuntimeStatus::Live, &[]);
 
         assert!(
-            rendered.contains("<button type=\"submit\" disabled>Send</button>"),
-            "the prompt box would submit somewhere: {rendered}"
+            rendered.contains(&format!(
+                "hx-post=\"{}\"",
+                chat_prompt_path(&manifest.chat_id)
+            )),
+            "the prompt box posts nowhere: {rendered}"
+        );
+        assert!(
+            rendered.contains("hx-target=\"#log\"") && rendered.contains("name=\"prompt\""),
+            "the prompt would not land in the log: {rendered}"
+        );
+        assert!(
+            !rendered.contains("disabled"),
+            "the prompt box is still inert: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_log_polls_itself_while_the_page_is_open() {
+        let manifest = manifest(RuntimeStatus::Live);
+
+        let fragment = event_log(
+            &manifest.chat_id,
+            &log(&[chunk("agent_message_chunk", "on it")]),
+        );
+
+        assert!(
+            fragment.starts_with("<section id=\"log\""),
+            "the log is not a fragment htmx can swap: {fragment}"
+        );
+        assert!(
+            fragment.contains(&format!(
+                "hx-get=\"{}\"",
+                chat_events_path(&manifest.chat_id)
+            )) && fragment.contains("hx-trigger=\"every 2s\""),
+            "the log does not poll itself: {fragment}"
+        );
+        assert!(fragment.contains("<p>on it</p>"));
+    }
+
+    #[test]
+    fn the_chat_page_carries_the_log_and_the_script_that_polls_it() {
+        let manifest = manifest(RuntimeStatus::Live);
+        let events = log(&[chunk("agent_message_chunk", "on it")]);
+
+        let rendered = chat_page(&manifest, RuntimeStatus::Live, &events);
+
+        assert!(
+            rendered.contains(&event_log(&manifest.chat_id, &events)),
+            "the page and the fragment render the log differently: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("src=\"{}\"", crate::ui::HTMX_PATH)),
+            "htmx is not loaded, so nothing polls: {rendered}"
         );
     }
 
