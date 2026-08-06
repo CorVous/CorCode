@@ -206,6 +206,33 @@ mod tests {
     const FROM_ENV: &str = "ghs-bootstrapped";
 
     #[test]
+    fn a_secret_says_whether_it_is_set_and_what_set_it() {
+        let (_dir, secrets) = bootstrapped();
+
+        assert_eq!(source(&secrets, Secret::AnthropicKey), Source::Unset);
+        assert_eq!(source(&secrets, Secret::GithubToken), Source::Environment);
+
+        secrets
+            .write(Secret::GithubToken, TOKEN)
+            .expect("a secret should be writable");
+        assert_eq!(source(&secrets, Secret::GithubToken), Source::Settings);
+
+        secrets
+            .clear(Secret::GithubToken)
+            .expect("a secret should be clearable");
+        assert_eq!(source(&secrets, Secret::GithubToken), Source::Environment);
+    }
+
+    #[test]
+    fn every_secret_is_spelled_the_same_way_wherever_one_is_named() {
+        for secret in Secret::ALL {
+            assert_eq!(Secret::named(secret.name()), Some(secret));
+        }
+
+        assert_eq!(Secret::named("password"), None);
+    }
+
+    #[test]
     fn a_secret_nothing_holds_is_nothing() {
         let (_dir, secrets) = bare();
 
@@ -502,6 +529,10 @@ mod tests {
 
     fn read(secrets: &Secrets, secret: Secret) -> Option<String> {
         secrets.read(secret).expect("a secret should be readable")
+    }
+
+    fn source(secrets: &Secrets, secret: Secret) -> Source {
+        secrets.source(secret).expect("a secret should be readable")
     }
 
     /// Secrets over an empty dataset, with nothing bootstrapped.
