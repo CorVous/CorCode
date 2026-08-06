@@ -132,6 +132,25 @@ impl ChatStore {
         file.flush().map_err(StoreError::writing(&path))
     }
 
+    /// Every chat id `workspaces/` holds a working tree for. A dataset that
+    /// has never held a chat holds none, which is not a fault.
+    pub fn workspace_ids(&self) -> Result<Vec<String>, StoreError> {
+        let workspaces = self.root.join(WORKSPACES_DIR);
+        let listing = match fs::read_dir(&workspaces) {
+            Ok(listing) => listing,
+            Err(failure) if failure.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(failure) => return Err(StoreError::reading(&workspaces)(failure)),
+        };
+        let mut chat_ids = Vec::new();
+        for entry in listing {
+            let name = entry.map_err(StoreError::reading(&workspaces))?.file_name();
+            if !is_hidden(&name) {
+                chat_ids.push(name.to_string_lossy().into_owned());
+            }
+        }
+        Ok(chat_ids)
+    }
+
     /// Delete a chat's working tree, once everything in it is on the remote
     /// (ADR-0002 rule 1). A tree that is already gone is the state asked for.
     pub fn remove_workspace(&self, chat_id: &str) -> Result<(), StoreError> {

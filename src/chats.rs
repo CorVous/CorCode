@@ -1,11 +1,12 @@
 //! The chats the console reads and the vertical that cuts a new one
 //! (ADR-0005, ADR-0006).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Mutex;
 
 use anyhow::Result;
 use chrono::Utc;
-use log::{info, warn};
+use log::{error, info, warn};
 use serde_json::json;
 use thiserror::Error;
 use ulid::Ulid;
@@ -18,6 +19,7 @@ use crate::pool;
 use crate::store::{
     ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, runtime_status,
 };
+use crate::sweep::{self, Sweep};
 use crate::ui;
 
 /// The variable the agent reads its Anthropic credentials from (ADR-0001).
@@ -115,6 +117,7 @@ pub struct Chats<P, T: AcpTransport> {
     anthropic_api_key: Option<String>,
     workspace_image: String,
     warm_pool: usize,
+    swept: Mutex<Sweep>,
 }
 
 impl<P, T: AcpTransport + Sync> Chats<P, T> {
@@ -131,6 +134,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
             anthropic_api_key: config.anthropic_api_key.clone(),
             workspace_image: config.workspace_image.clone(),
             warm_pool: config.warm_pool,
+            swept: Mutex::default(),
         }
     }
 }
@@ -296,7 +300,56 @@ where
             })
             .map_err(unarchived)?;
         self.release(&chat_id, "archived").await;
-        self.store.remove_workspace(&chat_id).map_err(unarchived)
+        self.store.remove_workspace(&chat_id).map_err(unarchived)?;
+        self.sweep().await;
+        Ok(())
+    }
+
+    /// Reconcile `workspaces/` against the chats that claim a working tree,
+    /// deleting the ones nothing does (ADR-0002 rule 4). A dataset that
+    /// cannot be read is the operator's to hear about: a sweep repairs, it
+    /// does not gate.
+    pub async fn sweep(&self) {
+        let swept = match self.reconciled().await {
+            Ok(swept) => swept,
+            Err(failure) => return warn!("workspaces/ could not be read: {failure:#}"),
+        };
+        for chat_id in &swept.held {
+            error!("{chat_id} is not open but its container is up: its workspace is left alone");
+        }
+        for chat_id in &swept.orphaned {
+            match self.store.remove_workspace(chat_id) {
+                Ok(()) => info!("{chat_id} left a workspace no chat claims: removed"),
+                Err(stubborn) => warn!("{chat_id} left a workspace that will not go: {stubborn:#}"),
+            }
+        }
+        *self
+            .swept
+            .lock()
+            .expect("the sweep record should not be poisoned") = swept;
+    }
+
+    /// What the last sweep found, for the console to say out loud.
+    #[must_use]
+    pub fn last_sweep(&self) -> Sweep {
+        self.swept
+            .lock()
+            .expect("the sweep record should not be poisoned")
+            .clone()
+    }
+
+    /// Which working trees on disk no open chat claims, and which of those a
+    /// container is still holding.
+    async fn reconciled(&self) -> Result<Sweep> {
+        let open: HashSet<String> = self
+            .store
+            .scan()?
+            .into_iter()
+            .filter(|manifest| manifest.state == ChatState::Open)
+            .map(|manifest| manifest.chat_id)
+            .collect();
+        let live = self.plane.live_chat_ids().await?;
+        Ok(sweep::reconcile(&self.store.workspace_ids()?, &open, &live))
     }
 
     /// Get the chat's workspace onto the remote, whole. Git blocks, so it

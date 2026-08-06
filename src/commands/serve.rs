@@ -24,7 +24,9 @@ pub fn run() -> Result<()> {
 
 async fn serve(config: &Config) -> Result<()> {
     ChatStore::new(&config.data_dir).prepare()?;
-    let router = server::router(config, chats(config)?)?;
+    let chats = chats(config)?;
+    chats.sweep().await;
+    let router = server::router(config, chats)?;
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;
