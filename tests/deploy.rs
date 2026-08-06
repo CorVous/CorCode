@@ -93,8 +93,7 @@ fn compose_build_context() -> PathBuf {
     let compose = compose();
     let context = compose
         .lines()
-        .filter_map(|line| line.trim().strip_prefix("context:"))
-        .next()
+        .find_map(|line| line.trim().strip_prefix("context:"))
         .unwrap_or_else(|| panic!("the compose file names no build context: {compose}"));
     compose_path()
         .parent()

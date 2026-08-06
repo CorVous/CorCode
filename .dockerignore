@@ -1,0 +1,8 @@
+target
+.git
+.github
+.claude
+docs
+deploy
+# The build stage pins its own Rust; this file would fetch a second one.
+rust-toolchain.toml

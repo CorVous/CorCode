@@ -1,6 +1,9 @@
 services:
   corcode:
-    build: .
+    build:
+      # The repository root, one up: this file lives in deploy/, the
+      # Dockerfile does not.
+      context: ..
     restart: unless-stopped
     ports:
       - "8080:8080"
