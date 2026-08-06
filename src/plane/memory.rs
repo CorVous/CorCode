@@ -152,6 +152,19 @@ mod tests {
         assert_eq!(plane.env_of("01K1NOSUCHCHAT0000000000"), None);
     }
 
+    /// The environment carries the agent's credentials, so a plane that is
+    /// printed says which variables a container holds and never what they are.
+    #[tokio::test]
+    async fn a_plane_never_says_what_a_container_was_handed() {
+        let plane = MemoryPlane::default();
+        spawn(&plane, "01K1TESTCHATID0000000000").await;
+
+        let said = format!("{plane:?}");
+
+        assert!(said.contains("ANTHROPIC_API_KEY"));
+        assert!(!said.contains("secret"), "the key leaked: {said}");
+    }
+
     #[tokio::test]
     async fn teardown_leaves_the_other_chats_live() {
         let plane = MemoryPlane::default();
