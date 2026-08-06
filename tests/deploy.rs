@@ -1,10 +1,10 @@
-//! The deployment artefacts: what `deploy/compose.yaml` configures, and —
-//! where a docker binary exists — whether Docker itself accepts the file.
+//! What `deploy/compose.yaml` configures, read without a daemon. Whether
+//! Docker accepts the file, and whether the image it builds boots, are in
+//! `deploy_docker.rs`.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use cor_code::config::Config;
 
@@ -34,6 +34,33 @@ fn the_compose_file_boots_the_core_with_every_setting_it_requires() {
     );
 }
 
+/// `build: .` would resolve against `deploy/`, which holds no Dockerfile.
+#[test]
+fn the_compose_file_builds_from_a_context_that_holds_the_dockerfile() {
+    let context = compose_build_context();
+
+    assert!(
+        context.join("Dockerfile").is_file(),
+        "the build context holds no Dockerfile: {}",
+        context.display()
+    );
+}
+
+/// A build context carrying the target directory, the git history and the
+/// toolchain file would ship gigabytes and download a second Rust.
+#[test]
+fn the_build_context_leaves_out_what_the_image_must_not_carry() {
+    let ignored = fs::read_to_string(repo_root().join(".dockerignore"))
+        .expect("the ignore file should be readable");
+
+    for unwanted in ["target", ".git", ".claude", "rust-toolchain.toml"] {
+        assert!(
+            ignored.lines().any(|line| line.trim() == unwanted),
+            "the build context still carries {unwanted}: {ignored}"
+        );
+    }
+}
+
 #[test]
 fn the_compose_file_hands_the_core_the_daemon_it_spawns_siblings_through() {
     assert!(
@@ -52,30 +79,27 @@ fn the_compose_file_carries_placeholders_rather_than_credentials() {
     }
 }
 
-#[test]
-fn docker_accepts_the_compose_file() {
-    let Some(docker) = docker_binary() else {
-        eprintln!("SKIPPED docker_accepts_the_compose_file: no docker binary");
-        return;
-    };
-    let checked = Command::new(docker)
-        .args(["compose", "--file"])
-        .arg(compose_path())
-        .args(["config", "--quiet"])
-        .output()
-        .expect("docker should run");
-
-    assert!(
-        checked.status.success(),
-        "docker refused the compose file: {}",
-        String::from_utf8_lossy(&checked.stderr)
-    );
+fn repo_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
 fn compose_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("deploy")
-        .join("compose.yaml")
+    repo_root().join("deploy").join("compose.yaml")
+}
+
+/// Where the service's `build:` context points, as Docker would resolve it:
+/// against the directory the compose file sits in.
+fn compose_build_context() -> PathBuf {
+    let compose = compose();
+    let context = compose
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("context:"))
+        .next()
+        .unwrap_or_else(|| panic!("the compose file names no build context: {compose}"));
+    compose_path()
+        .parent()
+        .expect("the compose file sits in a directory")
+        .join(unquoted(context.trim()))
 }
 
 fn compose() -> String {
@@ -119,10 +143,4 @@ fn compose_environment() -> Vec<(String, String)> {
 
 fn unquoted(value: &str) -> &str {
     value.trim_matches('"')
-}
-
-fn docker_binary() -> Option<&'static str> {
-    ["/usr/bin/docker", "/usr/local/bin/docker", "/bin/docker"]
-        .into_iter()
-        .find(|path| Path::new(path).is_file())
 }
