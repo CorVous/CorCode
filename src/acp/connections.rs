@@ -1,9 +1,9 @@
 //! The ACP connections this core holds open, one per chat.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::Mutex as TurnLock;
+use tokio::sync::{Mutex as TurnLock, OwnedMutexGuard};
 
 use super::Connection;
 
@@ -11,6 +11,10 @@ use super::Connection;
 /// time: the adapter's stdio is a single conversation, so a second prompt
 /// waits for nothing and is told so.
 pub type Held<C> = Arc<TurnLock<Connection<C>>>;
+
+/// A chat's connection while this core has it to itself. Whoever holds one is
+/// the turn in progress, and the pool and the archive gate both read that.
+pub type Turn<C> = OwnedMutexGuard<Connection<C>>;
 
 /// Which chats can be prompted right now. Connections live only in memory:
 /// a core that restarts has none, and ADR-0007's ladder is what puts them
@@ -45,6 +49,19 @@ impl<C> Connections<C> {
             .expect("no holder of the lock panics")
             .get(chat_id)
             .map(Arc::clone)
+    }
+
+    /// The chats whose connection is in use right now, which is to say the
+    /// chats taking a turn.
+    #[must_use]
+    pub fn busy_chat_ids(&self) -> HashSet<String> {
+        self.held
+            .lock()
+            .expect("no holder of the lock panics")
+            .iter()
+            .filter(|(_, connection)| connection.try_lock().is_err())
+            .map(|(chat_id, _)| chat_id.clone())
+            .collect()
     }
 
     /// Let go of `chat_id`'s connection: whatever was on the other end of it

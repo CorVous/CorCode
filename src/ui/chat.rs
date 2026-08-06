@@ -4,7 +4,10 @@ use serde_json::Value;
 
 use crate::store::{Event, Manifest, RuntimeStatus};
 
-use super::{HTMX_PATH, chat_events_path, chat_prompt_path, last_push, page, status_word, text};
+use super::{
+    HTMX_PATH, chat_archive_path, chat_events_path, chat_prompt_path, last_push, page, status_word,
+    text,
+};
 
 /// What an event calls itself when it carries no ACP discriminator.
 const UNTYPED: &str = "event";
@@ -25,7 +28,7 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
         &format!(
             "<p><a href=\"/\">← chats</a></p>\
              <p><small>{} · {} · push {} · {}</small></p>\
-             {}{}\
+             {}{}{}\
              <form hx-post=\"{}\" hx-target=\"#log\" hx-swap=\"outerHTML\">\
              <p><input name=\"prompt\" aria-label=\"Prompt\" placeholder=\"prompt\"> \
              <button type=\"submit\">Send</button></p></form>\
@@ -34,6 +37,7 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
             text(&manifest.branch),
             text(last_push(manifest)),
             status_word(status),
+            archive_button(&manifest.chat_id, status),
             event_log(&manifest.chat_id, events),
             first_prompt_hint(status),
             text(&chat_prompt_path(&manifest.chat_id)),
@@ -52,6 +56,21 @@ pub fn event_log(chat_id: &str, events: &[Event]) -> String {
         "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {POLL_SECONDS}s\" \
          hx-swap=\"outerHTML\">{lines}</section>",
         text(&chat_events_path(chat_id)),
+    )
+}
+
+/// The gate that pushes a chat's work and gives its workspace back, offered
+/// wherever a workspace is still held — a parked chat has given up only its
+/// container (ADR-0002 rule 2). A success re-renders the page rather than
+/// swapping a fragment: archiving changes the whole of what the chat is.
+fn archive_button(chat_id: &str, status: RuntimeStatus) -> String {
+    if status == RuntimeStatus::Archived {
+        return String::new();
+    }
+    format!(
+        "<form hx-post=\"{}\" hx-swap=\"none\"><p><button type=\"submit\">Archive</button>\
+         </p></form>",
+        text(&chat_archive_path(chat_id)),
     )
 }
 
@@ -148,6 +167,7 @@ mod tests {
             repo: "CorVous/CorCode".to_owned(),
             branch: "chat/2026-08-05-resume-ladder".to_owned(),
             base_branch: "main".to_owned(),
+            checkpoint_branch: None,
             last_pushed_commit: Some("abc1234".to_owned()),
             acp_session_id: None,
             created_at: now,
@@ -317,6 +337,41 @@ mod tests {
         assert!(
             rendered.contains("revives"),
             "the archived chat gives no first-prompt hint: {rendered}"
+        );
+    }
+
+    /// Parked is the state the gate exists for: the workspace is still on
+    /// disk holding work nothing has pushed (ADR-0002 rule 1).
+    #[test]
+    fn a_chat_that_still_holds_a_workspace_offers_to_archive_itself() {
+        for status in [RuntimeStatus::Live, RuntimeStatus::Parked] {
+            let manifest = manifest(status);
+
+            let rendered = chat_page(&manifest, status, &[]);
+
+            assert!(
+                rendered.contains(&format!(
+                    "hx-post=\"{}\"",
+                    chat_archive_path(&manifest.chat_id)
+                )),
+                "a {} chat cannot be archived from its own page: {rendered}",
+                status_word(status)
+            );
+            assert!(rendered.contains("Archive</button>"));
+        }
+    }
+
+    #[test]
+    fn an_archived_chat_is_offered_no_archive_button() {
+        let rendered = chat_page(
+            &manifest(RuntimeStatus::Archived),
+            RuntimeStatus::Archived,
+            &[],
+        );
+
+        assert!(
+            !rendered.contains("Archive</button>"),
+            "an archived chat was offered the gate again: {rendered}"
         );
     }
 

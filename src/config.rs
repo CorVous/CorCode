@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{Context as _, Result, bail};
 
@@ -15,6 +16,9 @@ pub const DEFAULT_CONTAINER_MEMORY_MB: u32 = 4096;
 /// CPU ceiling of a workspace container when `CORCODE_CONTAINER_CPUS` is
 /// unset.
 pub const DEFAULT_CONTAINER_CPUS: u32 = 2;
+/// How many chats keep a container when `CORCODE_WARM_POOL` is unset
+/// (ADR-0002: a cap, and no TTL behind it).
+pub const DEFAULT_WARM_POOL: usize = 2;
 
 /// What a secret reads as anywhere it would otherwise be spelled out.
 pub const REDACTED: &str = "<redacted>";
@@ -58,6 +62,8 @@ pub struct Config {
     pub container_memory_mb: u32,
     /// CPU ceiling of one workspace container (ADR-0001).
     pub container_cpus: u32,
+    /// How many chats keep a live container at once (ADR-0002).
+    pub warm_pool: usize,
     /// Login for the registry holding the workspace image (ADR-0009).
     pub registry: Option<RegistryCredentials>,
     /// The repositories a new chat may be cut from, first one default
@@ -97,6 +103,7 @@ impl Config {
                 DEFAULT_CONTAINER_MEMORY_MB,
             )?,
             container_cpus: number(&vars, "CORCODE_CONTAINER_CPUS", DEFAULT_CONTAINER_CPUS)?,
+            warm_pool: number(&vars, "CORCODE_WARM_POOL", DEFAULT_WARM_POOL)?,
             registry: registry(&vars)?,
             repos: repos(&vars)?,
             github_token: optional(&vars, "CORCODE_GITHUB_TOKEN").map(ToOwned::to_owned),
@@ -121,7 +128,11 @@ fn required<'a>(vars: &'a HashMap<String, String>, key: &str) -> Result<&'a str>
 }
 
 /// Look up a variable that falls back to a sane number.
-fn number(vars: &HashMap<String, String>, key: &str, default: u32) -> Result<u32> {
+fn number<T>(vars: &HashMap<String, String>, key: &str, default: T) -> Result<T>
+where
+    T: FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
     optional(vars, key).map_or(Ok(default), |value| {
         value
             .parse()
@@ -187,6 +198,7 @@ impl fmt::Debug for Config {
             .field("workspace_image", &self.workspace_image)
             .field("container_memory_mb", &self.container_memory_mb)
             .field("container_cpus", &self.container_cpus)
+            .field("warm_pool", &self.warm_pool)
             .field("registry", &self.registry)
             .field("repos", &self.repos)
             .field("github_token", &self.github_token.as_ref().map(hidden))
@@ -325,6 +337,16 @@ mod tests {
             config.bind_addr,
             DEFAULT_BIND_ADDR.parse::<SocketAddr>().expect("valid addr")
         );
+    }
+
+    #[test]
+    fn the_warm_pool_defaults_to_the_cap_the_adr_set_and_can_be_tuned() {
+        let defaulted =
+            Config::from_vars(required_vars()).expect("defaulted environment should load");
+        let tuned = with(&[("CORCODE_WARM_POOL", "3")]).expect("a tuned pool should load");
+
+        assert_eq!(defaulted.warm_pool, DEFAULT_WARM_POOL);
+        assert_eq!(tuned.warm_pool, 3);
     }
 
     #[test]

@@ -3,10 +3,12 @@
 
 use std::fmt;
 use std::io;
+use std::iter;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Command;
 
 use chrono::Utc;
+use log::warn;
 use thiserror::Error;
 
 use crate::config::REDACTED;
@@ -20,6 +22,12 @@ const TOKEN_USER: &str = "x-access-token";
 /// Git is never given a terminal to ask for credentials on: a chat that
 /// cannot be cloned must fail, not hang holding a request open.
 const NO_PROMPTS: (&str, &str) = ("GIT_TERMINAL_PROMPT", "0");
+
+/// Who the core commits as on the one commit it authors itself (ADR-0005).
+const CORE_COMMITTER: (&str, &str) = ("CorCode core", "corcode@local");
+
+/// What that commit says it is.
+const CHECKPOINT_MESSAGE: &str = "Checkpoint uncommitted work at archive";
 
 /// The site the chats' repositories are cloned from, and the token that
 /// opens the private ones.
@@ -162,11 +170,9 @@ pub fn names_a_branch(branch: &str) -> bool {
 /// tokenless one before returning: the workspace is the agent's to read
 /// (ADR-0001).
 pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), GitError> {
-    let doing = format!("clone {origin} at {base_branch}");
-    let scrub = |said: &str| origin.scrub(said);
     let spelled_dest = dest.to_string_lossy();
-    let output = git(
-        &doing,
+    run(
+        &format!("clone {origin} at {base_branch}"),
         &[
             "clone",
             "--branch",
@@ -175,48 +181,311 @@ pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), G
             origin.url(),
             &spelled_dest,
         ],
+        |said| origin.scrub(said),
     )?;
-    judge(&doing, &output, scrub)?;
-    let doing = format!("take the credential back out of {}", dest.display());
-    let output = git(
-        &doing,
+    let tokenless = origin.tokenless();
+    run(
+        &format!("take the credential back out of {}", dest.display()),
         &[
             "-C",
             &spelled_dest,
             "remote",
             "set-url",
             "origin",
-            &origin.tokenless(),
+            &tokenless,
         ],
-    )?;
-    judge(&doing, &output, scrub)
+        |said| origin.scrub(said),
+    )
+    .map(drop)
 }
 
 /// Cut `branch` off whatever `workspace` has checked out and stand on it.
 /// Nothing is pushed: the branch reaches the remote with its first commit
 /// (ADR-0005).
 pub fn create_branch(workspace: &Path, branch: &str) -> Result<(), GitError> {
-    let doing = format!("cut branch {branch}");
-    let workspace = workspace.to_string_lossy();
-    let output = git(&doing, &["-C", &workspace, "checkout", "-b", branch])?;
-    judge(&doing, &output, ToOwned::to_owned)
+    run(
+        &format!("cut branch {branch}"),
+        &["-C", &workspace.to_string_lossy(), "checkout", "-b", branch],
+        ToOwned::to_owned,
+    )
+    .map(drop)
 }
 
-fn git(doing: &str, args: &[&str]) -> Result<Output, GitError> {
-    Command::new("git")
+/// The branch a chat's unpushed work is checkpointed onto (ADR-0005).
+///
+/// The chat's own branch, stamped to the second, so that two archives moments
+/// apart cannot name the same branch.
+#[must_use]
+pub fn checkpoint_branch(branch: &str) -> String {
+    format!("{branch}-chkpt-{}", Utc::now().format("%Y%m%dT%H%M%S"))
+}
+
+/// What the archive gate got onto the remote (ADR-0005).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pushed {
+    /// Where `branch` stands now: the agent's last semantic commit.
+    pub tip: String,
+    /// The branch the unpushed work went onto, if there was any.
+    pub checkpoint_branch: Option<String>,
+}
+
+/// A gate that stopped, and what of the workspace was already on the remote
+/// when it did.
+///
+/// The checkpoint goes first, so the chat branch can be the push that fails
+/// with the operator's work already safe. Saying nothing about that would
+/// send them looking for work that is right there.
+#[derive(Debug, Error)]
+#[error("{source}")]
+pub struct PushFailure {
+    /// The checkpoint branch that reached the remote before this happened.
+    pub landed: Option<String>,
+    pub source: GitError,
+}
+
+/// A failure that happened before anything could reach the remote.
+const fn unpushed(source: GitError) -> PushFailure {
+    PushFailure {
+        landed: None,
+        source,
+    }
+}
+
+/// Where a workspace stands: the commit HEAD is on, and what to check out to
+/// put it back there — its branch, or the commit itself when HEAD is
+/// detached.
+struct Standing {
+    head: String,
+    at: String,
+}
+
+/// Get everything in `workspace` onto the remote so the directory can be
+/// deleted (ADR-0002 rule 3, ADR-0005).
+///
+/// Anything `branch` does not already carry — a dirty tree, commits made off
+/// the branch — is committed onto a checkpoint branch of its own, leaving
+/// `branch` at the agent's last semantic commit; both branches are then
+/// pushed. Nothing here is destructive: the workspace is left standing on
+/// `branch` either way, so whatever the caller does next can be retried from
+/// it.
+pub fn push_for_archive(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+) -> Result<Pushed, PushFailure> {
+    let standing = standing(workspace).map_err(unpushed)?;
+    let checkpoint = checkpoint_unpushed_work(workspace, branch, &standing).map_err(unpushed)?;
+    match push_branches(origin, workspace, branch, checkpoint.as_deref()) {
+        Ok(tip) => {
+            stand_on(workspace, branch).map_err(|source| PushFailure {
+                landed: checkpoint.clone(),
+                source,
+            })?;
+            Ok(Pushed {
+                tip,
+                checkpoint_branch: checkpoint,
+            })
+        }
+        Err(failure) => {
+            if let Some(checkpoint) = &checkpoint
+                && let Err(stubborn) = undo_checkpoint(workspace, &standing, checkpoint)
+            {
+                warn!("{checkpoint} could not be rolled back: {stubborn}");
+            }
+            Err(failure)
+        }
+    }
+}
+
+/// Where `workspace` has HEAD right now.
+fn standing(workspace: &Path) -> Result<Standing, GitError> {
+    let spelled = workspace.to_string_lossy();
+    let doing = format!("read where {} stands", workspace.display());
+    let head = run(
+        &doing,
+        &["-C", &spelled, "rev-parse", "HEAD"],
+        ToOwned::to_owned,
+    )?;
+    let branch = run(
+        &doing,
+        &["-C", &spelled, "branch", "--show-current"],
+        ToOwned::to_owned,
+    )?;
+    Ok(Standing {
+        at: if branch.is_empty() {
+            head.clone()
+        } else {
+            branch
+        },
+        head,
+    })
+}
+
+/// Commit whatever `branch` would not carry onto a checkpoint branch, and say
+/// which branch that was.
+///
+/// A workspace standing somewhere else holds commits `branch` never saw, and
+/// the gate is the last look anyone gets at them: they are checkpointed even
+/// though the tree is clean.
+fn checkpoint_unpushed_work(
+    workspace: &Path,
+    branch: &str,
+    standing: &Standing,
+) -> Result<Option<String>, GitError> {
+    let dirty = dirty(workspace)?;
+    if !dirty && standing.at == branch {
+        return Ok(None);
+    }
+    let checkpoint = checkpoint_branch(branch);
+    cut_checkpoint(workspace, &checkpoint)?;
+    if dirty {
+        commit_everything(workspace, &checkpoint)?;
+    }
+    Ok(Some(checkpoint))
+}
+
+/// Whether `workspace` holds anything git has not been told about.
+fn dirty(workspace: &Path) -> Result<bool, GitError> {
+    let said = run(
+        &format!("read the state of {}", workspace.display()),
+        &["-C", &workspace.to_string_lossy(), "status", "--porcelain"],
+        ToOwned::to_owned,
+    )?;
+    Ok(!said.is_empty())
+}
+
+/// Name the commit the workspace stands on, so what follows can be pushed.
+fn cut_checkpoint(workspace: &Path, checkpoint: &str) -> Result<(), GitError> {
+    run(
+        &format!("cut {checkpoint} off the working tree"),
+        &[
+            "-C",
+            &workspace.to_string_lossy(),
+            "checkout",
+            "-b",
+            checkpoint,
+        ],
+        ToOwned::to_owned,
+    )
+    .map(drop)
+}
+
+/// Commit the whole working tree onto the checkpoint branch, in the core's
+/// own name: these are the one kind of commit no agent authored (ADR-0005).
+fn commit_everything(workspace: &Path, checkpoint: &str) -> Result<(), GitError> {
+    let workspace = workspace.to_string_lossy();
+    let doing = |what: &str| format!("{what} on {checkpoint}");
+    run(
+        &doing("stage the working tree"),
+        &["-C", &workspace, "add", "-A"],
+        ToOwned::to_owned,
+    )?;
+    run(
+        &doing("commit the working tree"),
+        &[
+            "-C",
+            &workspace,
+            "-c",
+            &format!("user.name={}", CORE_COMMITTER.0),
+            "-c",
+            &format!("user.email={}", CORE_COMMITTER.1),
+            "commit",
+            "--message",
+            CHECKPOINT_MESSAGE,
+        ],
+        ToOwned::to_owned,
+    )
+    .map(drop)
+}
+
+/// Push the checkpoint branch, then the chat's own, answering with where the
+/// chat's branch stands. Whatever fails, the failure carries the checkpoint
+/// that got there first.
+fn push_branches(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    checkpoint: Option<&str>,
+) -> Result<String, PushFailure> {
+    let spelled = workspace.to_string_lossy();
+    let mut landed = None;
+    for pushing in checkpoint.into_iter().chain(iter::once(branch)) {
+        push_one(origin, &spelled, pushing).map_err(|source| PushFailure {
+            landed: landed.clone(),
+            source,
+        })?;
+        landed = checkpoint.map(ToOwned::to_owned);
+    }
+    run(
+        &format!("read where {branch} stands"),
+        &["-C", &spelled, "rev-parse", branch],
+        ToOwned::to_owned,
+    )
+    .map_err(|source| PushFailure { landed, source })
+}
+
+/// Put one branch on the remote under its own name.
+fn push_one(origin: &Origin, workspace: &str, pushing: &str) -> Result<(), GitError> {
+    run(
+        &format!("push {pushing} to {origin}"),
+        &[
+            "-C",
+            workspace,
+            "push",
+            "--",
+            origin.url(),
+            &format!("{pushing}:refs/heads/{pushing}"),
+        ],
+        |said| origin.scrub(said),
+    )
+    .map(drop)
+}
+
+/// Stand the workspace on the branch its chat works from, which is where
+/// anyone who retries the archive expects to find it.
+fn stand_on(workspace: &Path, branch: &str) -> Result<(), GitError> {
+    run(
+        &format!("stand {} back on {branch}", workspace.display()),
+        &["-C", &workspace.to_string_lossy(), "checkout", branch],
+        ToOwned::to_owned,
+    )
+    .map(drop)
+}
+
+/// Put a checkpoint nobody could push back the way it was found: the commit
+/// undone, its files dirty again, the workspace standing where it was, the
+/// branch gone.
+fn undo_checkpoint(
+    workspace: &Path,
+    standing: &Standing,
+    checkpoint: &str,
+) -> Result<(), GitError> {
+    let workspace = workspace.to_string_lossy();
+    let doing = format!("roll back {checkpoint}");
+    for args in [
+        vec!["-C", &workspace, "reset", "--mixed", &standing.head],
+        vec!["-C", &workspace, "checkout", &standing.at],
+        vec!["-C", &workspace, "branch", "-d", checkpoint],
+    ] {
+        run(&doing, &args, ToOwned::to_owned)?;
+    }
+    Ok(())
+}
+
+/// Run one git command, answering with what it wrote on its way out. A
+/// non-zero exit is the failure it is, in git's own words with `scrub`
+/// applied to them.
+fn run(doing: &str, args: &[&str], scrub: impl FnOnce(&str) -> String) -> Result<String, GitError> {
+    let output = Command::new("git")
         .args(args)
         .env(NO_PROMPTS.0, NO_PROMPTS.1)
         .output()
         .map_err(|source| GitError::Unusable {
             doing: doing.to_owned(),
             source,
-        })
-}
-
-/// Turn a non-zero exit into the failure it is, in git's own words.
-fn judge(doing: &str, output: &Output, scrub: impl FnOnce(&str) -> String) -> Result<(), GitError> {
+        })?;
     if output.status.success() {
-        return Ok(());
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
     }
     Err(GitError::Refused {
         doing: doing.to_owned(),
@@ -226,7 +495,7 @@ fn judge(doing: &str, output: &Output, scrub: impl FnOnce(&str) -> String) -> Re
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use tempfile::TempDir;
@@ -402,6 +671,194 @@ mod tests {
 
     const REPO: &str = "CorVous/fixture";
     const BARE: &str = "CorVous/fixture.git";
+    const CHAT_BRANCH: &str = "chat/2026-08-05-archived";
+
+    /// Two archives of one chat a few seconds apart must not name the same
+    /// branch: the second push would be refused as a non-fast-forward.
+    #[test]
+    fn a_checkpoint_branch_is_stamped_to_the_second() {
+        let stamp = Utc::now().format("%Y%m%dT%H%M%S");
+
+        assert_eq!(
+            checkpoint_branch(CHAT_BRANCH),
+            format!("{CHAT_BRANCH}-chkpt-{stamp}")
+        );
+    }
+
+    #[test]
+    fn a_clean_workspace_pushes_its_branch_and_cuts_no_checkpoint() {
+        let (origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let semantic = commit_in(&workspace, "third.txt", "the agent's own commit");
+
+        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect("a clean workspace should push");
+
+        assert_eq!(pushed.checkpoint_branch, None);
+        assert_eq!(pushed.tip, semantic);
+        assert_eq!(
+            git_says(&origin_dir.path().join(BARE), &["rev-parse", CHAT_BRANCH]),
+            semantic,
+            "the chat branch did not reach the remote"
+        );
+    }
+
+    #[test]
+    fn a_dirty_workspace_checkpoints_onto_a_branch_of_its_own() {
+        let (origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        let semantic = commit_in(&workspace, "third.txt", "the agent's own commit");
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+        let bare = origin_dir.path().join(BARE);
+
+        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect("a dirty workspace should push");
+
+        let checkpoint = pushed
+            .checkpoint_branch
+            .expect("a dirty tree should cut a checkpoint branch");
+        assert!(
+            checkpoint.starts_with(&format!("{CHAT_BRANCH}-chkpt-")),
+            "the checkpoint branch is not named after the chat's: {checkpoint}"
+        );
+        assert_eq!(
+            pushed.tip, semantic,
+            "the chat branch left the agent's last semantic commit"
+        );
+        assert_eq!(git_says(&bare, &["rev-parse", CHAT_BRANCH]), semantic);
+        assert_eq!(
+            git_says(&bare, &["show", &format!("{checkpoint}:scratch.txt")]),
+            "work in flight",
+            "the dirty state never reached the remote"
+        );
+        assert_eq!(
+            git_says(&bare, &["log", "-1", "--format=%cn <%ce>", &checkpoint]),
+            "CorCode core <corcode@local>",
+            "the checkpoint was committed as somebody else"
+        );
+    }
+
+    /// An agent that wanders off its branch — a detached rebase, a stray
+    /// checkout — leaves commits nothing else would push. The gate is the last
+    /// look anyone gets at the workspace, so it takes them too.
+    #[test]
+    fn a_clean_workspace_standing_off_its_chat_branch_is_checkpointed_all_the_same() {
+        let (origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        commit_in(&workspace, "third.txt", "the agent's own commit");
+        run(&workspace, &["checkout", "--detach"]);
+        let stray = commit_in(
+            &workspace,
+            "fourth.txt",
+            "a commit the chat branch never saw",
+        );
+
+        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect("a workspace off its branch should push");
+
+        let checkpoint = pushed
+            .checkpoint_branch
+            .expect("work off the chat branch should be checkpointed");
+        assert_eq!(
+            git_says(&origin_dir.path().join(BARE), &["rev-parse", &checkpoint]),
+            stray,
+            "the commit the chat branch never saw was left to be deleted"
+        );
+    }
+
+    /// Whatever the caller does after the gate — write the manifest, tear the
+    /// container down — can fail, and it retries from this workspace.
+    #[test]
+    fn a_gate_that_pushed_everything_leaves_the_workspace_on_the_chat_branch() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        commit_in(&workspace, "third.txt", "the agent's own commit");
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+
+        push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect("a dirty workspace should push");
+
+        assert_eq!(
+            git_says(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            CHAT_BRANCH,
+            "the workspace was left standing on the checkpoint branch"
+        );
+    }
+
+    #[test]
+    fn a_push_that_fails_leaves_the_workspace_as_it_was() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        commit_in(&workspace, "third.txt", "the agent's own commit");
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+        let unreachable = Remotes::new("file:///nowhere/at/all", None);
+
+        let error = push_for_archive(&unreachable.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect_err("a push to nowhere should fail");
+
+        assert!(
+            format!("{error}").contains("push"),
+            "error should say what it was doing, got: {error}"
+        );
+        assert_eq!(
+            git_says(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            CHAT_BRANCH,
+            "the workspace was left standing somewhere else"
+        );
+        assert_eq!(
+            git_says(&workspace, &["status", "--porcelain"]),
+            "?? scratch.txt",
+            "the work the operator can still retry from was swallowed"
+        );
+        assert_eq!(
+            git_says(&workspace, &["branch", "--list", "*chkpt*"]),
+            "",
+            "an unpushed checkpoint branch was left where the next try will not find it"
+        );
+    }
+
+    #[test]
+    fn the_gate_leaves_no_credential_behind_in_the_workspace() {
+        let (_origin_dir, origin) = credentialed_repository();
+        let (_into, workspace) = chat_workspace(&origin);
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+
+        push_for_archive(&origin, &workspace, CHAT_BRANCH).expect("a credentialed push should go");
+
+        let config = std::fs::read_to_string(workspace.join(".git").join("config"))
+            .expect("a clone writes a config");
+        assert!(
+            !config.contains(TOKEN),
+            "the token was left where the agent can read it: {config}"
+        );
+    }
+
+    /// A cloned workspace standing on its chat branch, ready to commit as the
+    /// agent would.
+    fn chat_workspace(origin: &Origin) -> (TempDir, PathBuf) {
+        let into = TempDir::new().expect("clone target should be created");
+        let workspace = into.path().join("workspace");
+        clone_at(origin, "main", &workspace).expect("the seeded repo should clone");
+        create_branch(&workspace, CHAT_BRANCH).expect("the chat branch should be cut");
+        run(
+            &workspace,
+            &["config", "user.email", "agent@example.invalid"],
+        );
+        run(&workspace, &["config", "user.name", "Agent"]);
+        (into, workspace)
+    }
+
+    /// One agent-authored commit, answering with the sha it landed on.
+    fn commit_in(workspace: &Path, file: &str, message: &str) -> String {
+        std::fs::write(workspace.join(file), message).expect("a file should be writable");
+        run(workspace, &["add", "."]);
+        run(workspace, &["commit", "-m", message]);
+        git_says(workspace, &["rev-parse", "HEAD"])
+    }
 
     /// A bare repository with two commits on `main`, reachable over `file://`
     /// so that no test needs the network.

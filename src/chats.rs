@@ -1,19 +1,24 @@
 //! The chats the console reads and the vertical that cuts a new one
 //! (ADR-0005, ADR-0006).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
-use log::warn;
+use chrono::Utc;
+use log::{error, info, warn};
 use serde_json::json;
 use thiserror::Error;
 use ulid::Ulid;
 
-use crate::acp::{AcpError, AcpTransport, Adapter, Connections, Held};
+use crate::acp::{AcpError, AcpTransport, Adapter, Connections, Held, Turn};
 use crate::config::Config;
 use crate::git::{self, Remotes};
 use crate::plane::ContainerPlane;
-use crate::store::{ChatStore, ContainerLiveness, Event, Manifest, NewChat, runtime_status};
+use crate::pool;
+use crate::store::{
+    ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, runtime_status,
+};
+use crate::sweep::{self, Sweep};
 use crate::ui;
 
 /// The variable the agent reads its Anthropic credentials from (ADR-0001).
@@ -76,8 +81,61 @@ impl PromptError {
     }
 }
 
+/// Why a chat was not archived. Whichever this is, the chat is as it was:
+/// nothing is torn down until everything in the workspace is on the remote
+/// (ADR-0002 rule 3).
+#[derive(Debug, Error)]
+pub enum ArchiveError {
+    #[error("this dataset holds no such chat")]
+    NoSuchChat,
+    #[error("this chat was archived already")]
+    AlreadyArchived,
+    #[error("this chat is in the middle of a turn")]
+    Busy,
+    #[error("nothing reached the remote, so nothing was torn down")]
+    NotPushed(#[source] anyhow::Error),
+    #[error("the chat could not be archived")]
+    Broke(#[source] anyhow::Error),
+}
+
+impl ArchiveError {
+    /// Whether the request was turned down over what the chat is doing rather
+    /// than the archive failing. A refusal touched nothing.
+    #[must_use]
+    pub const fn is_refusal(&self) -> bool {
+        matches!(self, Self::AlreadyArchived | Self::Busy)
+    }
+}
+
+fn unarchived(failure: impl Into<anyhow::Error>) -> ArchiveError {
+    ArchiveError::Broke(failure.into())
+}
+
+/// What the chat's log is told about an archive that stopped part way. A
+/// checkpoint that landed is named: it is where the operator's work is, and
+/// nothing else will tell them (ADR-0006).
+fn half_pushed(failure: &git::PushFailure) -> String {
+    let retry = "The chat is still open and can be archived again.";
+    failure.landed.as_ref().map_or_else(
+        || format!("Nothing was archived: {failure}. {retry}"),
+        |landed| {
+            format!(
+                "The archive stopped part way: {failure}. \
+                 The work in flight is on the remote, on {landed}. {retry}"
+            )
+        },
+    )
+}
+
 /// What a refusal calls itself in a chat's own log (ADR-0006).
 const REFUSAL: &str = "refusal";
+
+/// What an archive that got nothing onto the remote calls itself there.
+const PUSH_FAILURE: &str = "push_failure";
+
+/// The right to decide who gives a container up, held by one capping at a
+/// time.
+type ParkingLock = tokio::sync::Mutex<()>;
 
 /// Every chat in one dataset: who is live, what they hold, and how a new one
 /// comes to exist.
@@ -90,6 +148,8 @@ pub struct Chats<P, T: AcpTransport> {
     repos: Vec<String>,
     anthropic_api_key: Option<String>,
     workspace_image: String,
+    warm_pool: usize,
+    parking: ParkingLock,
 }
 
 impl<P, T: AcpTransport + Sync> Chats<P, T> {
@@ -105,6 +165,8 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
             repos: config.repos.clone(),
             anthropic_api_key: config.anthropic_api_key.clone(),
             workspace_image: config.workspace_image.clone(),
+            warm_pool: config.warm_pool,
+            parking: ParkingLock::default(),
         }
     }
 }
@@ -118,6 +180,12 @@ where
     #[must_use]
     pub fn workspace_image(&self) -> &str {
         &self.workspace_image
+    }
+
+    /// How many containers this deployment keeps warm (ADR-0002 rule 2).
+    #[must_use]
+    pub const fn warm_pool(&self) -> usize {
+        self.warm_pool
     }
 
     /// The repositories a new chat may be cut from, first one default.
@@ -173,12 +241,181 @@ where
     pub async fn prompt(&self, chat_id: &Ulid, said: &str) -> Result<(), PromptError> {
         let chat_id = chat_id.to_string();
         let outcome = self.turn(&chat_id, said).await;
-        if let Err(refusal) = &outcome {
-            if refusal.is_refusal() {
-                self.note_refusal(&chat_id, refusal);
+        match &outcome {
+            Ok(()) => {
+                self.touch(&chat_id);
+                self.cap_the_pool().await;
             }
+            Err(refusal) if refusal.is_refusal() => self.note_refusal(&chat_id, refusal),
+            Err(_) => {}
         }
         outcome
+    }
+
+    /// Say that a chat was just active. This is the whole of the warm pool's
+    /// order, written once per completed turn rather than per event
+    /// (ADR-0006).
+    fn touch(&self, chat_id: &str) {
+        let touched = self.store.read_manifest(chat_id).and_then(|manifest| {
+            self.store.write_manifest(&Manifest {
+                last_active_at: Utc::now(),
+                ..manifest
+            })
+        });
+        if let Err(failure) = touched {
+            warn!("{chat_id} took a turn that could not be dated: {failure:#}");
+        }
+    }
+
+    /// Bring the pool back inside its cap. A pool that cannot be read is the
+    /// operator's to hear about, not this request's to fail on: the turn or
+    /// the chat it followed is already done.
+    ///
+    /// One capping at a time: two that weigh the same pool before either of
+    /// them parks anything would each pick the same victims and cut the pool
+    /// below its cap.
+    async fn cap_the_pool(&self) {
+        let _capping = self.parking.lock().await;
+        match self.overflowing().await {
+            Ok(overflowing) => {
+                for chat_id in overflowing {
+                    self.park(&chat_id).await;
+                }
+            }
+            Err(failure) => warn!("the warm pool could not be weighed: {failure:#}"),
+        }
+    }
+
+    /// The chats holding a container the pool has no room for (ADR-0002).
+    async fn overflowing(&self) -> Result<Vec<String>> {
+        let chats = self.store.scan()?;
+        let live = self.plane.live_chat_ids().await?;
+        Ok(pool::beyond_the_pool(
+            &chats,
+            &live,
+            &self.connections.busy_chat_ids(),
+            self.warm_pool,
+        ))
+    }
+
+    /// Park one chat: the container goes, the workspace and the agent's
+    /// memory stay where they are, and nothing at all is committed
+    /// (ADR-0002 rule 2, ADR-0005).
+    async fn park(&self, chat_id: &str) {
+        self.release(chat_id, "parked, workspace kept").await;
+    }
+
+    /// Give a chat's container up. What is left on disk is the caller's to
+    /// decide: parking keeps the workspace, the archive gate deletes it once
+    /// everything in it is on the remote.
+    async fn release(&self, chat_id: &str, why: &str) {
+        match self.plane.teardown(chat_id).await {
+            Ok(()) => {
+                self.connections.forget(chat_id);
+                info!("{chat_id} {why}: container torn down");
+            }
+            Err(stubborn) => warn!("{chat_id} ({why}) would not stop: {stubborn}"),
+        }
+    }
+
+    /// Close a chat for good: everything in the workspace onto the remote,
+    /// then the container down and the workspace deleted (ADR-0002 rule 3).
+    ///
+    /// The push is the gate. A dirty tree goes onto a checkpoint branch of
+    /// its own so the chat's branch keeps only the agent's own commits
+    /// (ADR-0005); if any of it fails to land, the chat is left exactly as it
+    /// was, told about in its own log, and the operator can try again.
+    ///
+    /// The turn lock is held throughout: the gate commits and then deletes the
+    /// whole working tree, which is the one thing that must never happen under
+    /// an agent that is writing into it.
+    pub async fn archive(&self, chat_id: &Ulid) -> Result<(), ArchiveError> {
+        let chat_id = chat_id.to_string();
+        let manifest = match self.store.read_manifest(&chat_id) {
+            Ok(manifest) => manifest,
+            Err(failure) if failure.is_missing() => return Err(ArchiveError::NoSuchChat),
+            Err(failure) => return Err(unarchived(failure)),
+        };
+        if manifest.state != ChatState::Open {
+            return Err(ArchiveError::AlreadyArchived);
+        }
+        let _turn = self.idle(&chat_id)?;
+        let pushed = match self.push_everything(&manifest).await {
+            Ok(pushed) => pushed,
+            Err(failure) => {
+                self.note(&chat_id, PUSH_FAILURE, &half_pushed(&failure));
+                return Err(ArchiveError::NotPushed(failure.into()));
+            }
+        };
+        self.store
+            .write_manifest(&Manifest {
+                state: ChatState::Archived,
+                last_pushed_commit: Some(pushed.tip),
+                checkpoint_branch: pushed.checkpoint_branch,
+                ..manifest
+            })
+            .map_err(unarchived)?;
+        self.release(&chat_id, "archived").await;
+        self.store.remove_workspace(&chat_id).map_err(unarchived)?;
+        self.sweep().await;
+        Ok(())
+    }
+
+    /// Take the chat's connection for as long as the caller keeps what comes
+    /// back, so that no turn can run over it meanwhile. A chat holding no
+    /// connection has nothing to take and nothing running.
+    fn idle(&self, chat_id: &str) -> Result<Option<Turn<T::Channel>>, ArchiveError> {
+        self.connections.of(chat_id).map_or(Ok(None), |connection| {
+            connection
+                .try_lock_owned()
+                .map(Some)
+                .map_err(|_| ArchiveError::Busy)
+        })
+    }
+
+    /// Reconcile `workspaces/` against the chats that claim a working tree,
+    /// deleting the ones nothing does (ADR-0002 rule 4). A dataset that
+    /// cannot be read is the operator's to hear about: a sweep repairs, it
+    /// does not gate.
+    pub async fn sweep(&self) {
+        let swept = match self.reconciled().await {
+            Ok(swept) => swept,
+            Err(failure) => return warn!("workspaces/ could not be read: {failure:#}"),
+        };
+        for chat_id in &swept.held {
+            error!("{chat_id} is not open but its container is up: its workspace is left alone");
+        }
+        for chat_id in &swept.orphaned {
+            match self.store.remove_workspace(chat_id) {
+                Ok(()) => info!("{chat_id} left a workspace no chat claims: removed"),
+                Err(stubborn) => warn!("{chat_id} left a workspace that will not go: {stubborn:#}"),
+            }
+        }
+    }
+
+    /// Which working trees on disk no open chat claims, and which of those a
+    /// container is still holding.
+    async fn reconciled(&self) -> Result<Sweep> {
+        let open: HashSet<String> = self
+            .store
+            .scan()?
+            .into_iter()
+            .filter(|manifest| manifest.state == ChatState::Open)
+            .map(|manifest| manifest.chat_id)
+            .collect();
+        let live = self.plane.live_chat_ids().await?;
+        Ok(sweep::reconcile(&self.store.workspace_ids()?, &open, &live))
+    }
+
+    /// Get the chat's workspace onto the remote, whole. Git blocks, so it
+    /// runs off the runtime.
+    async fn push_everything(&self, manifest: &Manifest) -> Result<git::Pushed, git::PushFailure> {
+        let origin = self.remotes.origin(&manifest.repo);
+        let workspace = self.store.workspace_dir(&manifest.chat_id);
+        let branch = manifest.branch.clone();
+        tokio::task::spawn_blocking(move || git::push_for_archive(&origin, &workspace, &branch))
+            .await
+            .expect("the git task should not panic")
     }
 
     async fn turn(&self, chat_id: &str, said: &str) -> Result<(), PromptError> {
@@ -211,9 +448,15 @@ where
     /// this is the only place the operator can read why their prompt went
     /// nowhere; the next poll brings it (ADR-0006).
     fn note_refusal(&self, chat_id: &str, refusal: &PromptError) {
-        let line = json!({"corcode": REFUSAL, "text": format!("Prompt not sent: {refusal}.")});
+        self.note(chat_id, REFUSAL, &format!("Prompt not sent: {refusal}."));
+    }
+
+    /// A line in the core's own voice in a chat's log, which is the only
+    /// place the UI can say anything the agent did not (ADR-0006).
+    fn note(&self, chat_id: &str, kind: &str, text: &str) {
+        let line = json!({"corcode": kind, "text": text});
         if let Err(failure) = self.store.append_event(chat_id, &line) {
-            warn!("a refusal could not be written down: {failure:#}");
+            warn!("a {kind} line could not be written down: {failure:#}");
         }
     }
 
@@ -262,7 +505,10 @@ where
         self.check_out(&chat_id, &wanted, &branch).await?;
         let container = self.spawn(&chat_id).await?;
         match self.record_session(manifest, &container).await {
-            Ok(()) => Ok(chat_id),
+            Ok(()) => {
+                self.cap_the_pool().await;
+                Ok(chat_id)
+            }
             Err(failure) => {
                 if let Err(stubborn) = self.plane.teardown(&chat_id).await {
                     warn!("{chat_id} never opened a session and would not stop: {stubborn}");

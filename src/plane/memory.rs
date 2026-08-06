@@ -170,6 +170,7 @@ mod tests {
             repo: "CorVous/CorCode".to_owned(),
             branch: "chat/test".to_owned(),
             base_branch: "main".to_owned(),
+            checkpoint_branch: None,
             last_pushed_commit: None,
             acp_session_id: None,
             created_at: now,

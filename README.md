@@ -42,6 +42,7 @@ Serving (the default action) reads its configuration from the environment:
 | `CORCODE_BIND_ADDR`         | no       | `0.0.0.0:8080` |
 | `CORCODE_CONTAINER_MEMORY_MB` | no     | `4096`         |
 | `CORCODE_CONTAINER_CPUS`    | no       | `2`            |
+| `CORCODE_WARM_POOL`         | no       | `2`            |
 | `CORCODE_REGISTRY_USER`     | no       | -              |
 | `CORCODE_REGISTRY_TOKEN`    | no       | -              |
 | `CORCODE_GITHUB_TOKEN`      | no       | -              |
@@ -49,8 +50,10 @@ Serving (the default action) reads its configuration from the environment:
 
 `CORCODE_REPOS` is the comma-separated `owner/name` list the new-chat form
 offers, first entry the default. `CORCODE_GITHUB_TOKEN` clones private
-repositories; `CORCODE_ANTHROPIC_API_KEY` reaches the agent as
-`ANTHROPIC_API_KEY`.
+repositories and pushes at archive; `CORCODE_ANTHROPIC_API_KEY` reaches the
+agent as `ANTHROPIC_API_KEY`. `CORCODE_WARM_POOL` is how many chats keep a
+container: the rest are parked, workspaces kept. A chat taking a turn keeps
+its container until the turn ends, so the pool can sit one over its size.
 
 ## Development
 

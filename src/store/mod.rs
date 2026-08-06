@@ -132,6 +132,37 @@ impl ChatStore {
         file.flush().map_err(StoreError::writing(&path))
     }
 
+    /// Every chat id `workspaces/` holds a working tree for. A dataset that
+    /// has never held a chat holds none, which is not a fault.
+    pub fn workspace_ids(&self) -> Result<Vec<String>, StoreError> {
+        let workspaces = self.root.join(WORKSPACES_DIR);
+        let listing = match fs::read_dir(&workspaces) {
+            Ok(listing) => listing,
+            Err(failure) if failure.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(failure) => return Err(StoreError::reading(&workspaces)(failure)),
+        };
+        let mut chat_ids = Vec::new();
+        for entry in listing {
+            let name = entry.map_err(StoreError::reading(&workspaces))?.file_name();
+            if !is_hidden(&name) {
+                chat_ids.push(name.to_string_lossy().into_owned());
+            }
+        }
+        Ok(chat_ids)
+    }
+
+    /// Delete a chat's working tree, once everything in it is on the remote
+    /// (ADR-0002 rule 1). A tree that is already gone is the state asked for.
+    pub fn remove_workspace(&self, chat_id: &str) -> Result<(), StoreError> {
+        let workspace = self.workspace_dir(chat_id);
+        match fs::remove_dir_all(&workspace) {
+            Err(failure) if failure.kind() != io::ErrorKind::NotFound => {
+                Err(StoreError::writing(&workspace)(failure))
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn read_events(&self, chat_id: &str) -> Result<Vec<Event>, StoreError> {
         let path = self.events_path(chat_id);
         let log = fs::read_to_string(&path).map_err(StoreError::reading(&path))?;
@@ -384,6 +415,54 @@ mod tests {
     }
 
     #[test]
+    fn the_working_trees_on_disk_are_listed_for_the_sweep_to_read() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("open"))
+            .expect("chat should be created");
+
+        assert_eq!(
+            store.workspace_ids().expect("workspaces should list"),
+            [manifest.chat_id]
+        );
+    }
+
+    #[test]
+    fn a_dataset_that_has_held_no_chat_yet_holds_no_working_trees() {
+        let (_root, store) = store();
+
+        assert!(
+            store
+                .workspace_ids()
+                .expect("a dataset with no workspaces dir should still list")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_working_tree_is_removed_whole_and_removing_it_twice_is_harmless() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("archived"))
+            .expect("chat should be created");
+        let workspace = store.workspace_dir(&manifest.chat_id);
+        fs::write(workspace.join("README.md"), "fixture").expect("a file should be writable");
+
+        store
+            .remove_workspace(&manifest.chat_id)
+            .expect("a working tree should be removable");
+        store
+            .remove_workspace(&manifest.chat_id)
+            .expect("removing what is already gone is the state asked for");
+
+        assert!(!workspace.exists());
+        assert!(
+            store.chat_dir(&manifest.chat_id).is_dir(),
+            "the chat's durable half went with its working tree"
+        );
+    }
+
+    #[test]
     fn scan_fails_loudly_on_a_corrupt_manifest() {
         let (_root, store) = store();
         let manifest = store
@@ -398,6 +477,37 @@ mod tests {
             format!("{error}").contains(&path.display().to_string()),
             "error should name the file, got: {error}"
         );
+    }
+
+    /// The checkpoint branch was added to schema 1 after chats had already
+    /// been written: a manifest without it is an older chat, not damage
+    /// (ADR-0006 amendment).
+    #[test]
+    fn a_manifest_written_before_checkpoint_branches_reads_as_having_none() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("older"))
+            .expect("chat should be created");
+        let path = store.manifest_path(&manifest.chat_id);
+        let mut fields: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("manifest should be readable"))
+                .expect("manifest should be json");
+        assert!(
+            fields
+                .as_object_mut()
+                .expect("a manifest is an object")
+                .remove("checkpoint_branch")
+                .is_some(),
+            "a manifest this build writes should carry the field"
+        );
+        fs::write(&path, fields.to_string()).expect("manifest should be rewritable");
+
+        let older = store
+            .read_manifest(&manifest.chat_id)
+            .expect("an older manifest should still read");
+
+        assert_eq!(older.checkpoint_branch, None);
+        assert_eq!(older.schema, MANIFEST_SCHEMA);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use log::debug;
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
-pub use connections::{Connections, Held};
+pub use connections::{Connections, Held, Turn};
 pub use docker::{ADAPTER, DockerExec};
 pub use error::AcpError;
 pub use scripted::ScriptedAdapter;

@@ -10,9 +10,6 @@ use super::{CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, last_push, page, status_wo
 /// The branch a chat is cut from when the operator says nothing else.
 const DEFAULT_BASE_BRANCH: &str = "main";
 
-/// Warm-pool size, held here until the plane reports its own (ADR-0002).
-const POOL_SLOTS: usize = 2;
-
 /// Orphan-sweep result, held here until a sweep actually runs (ADR-0008).
 const SWEEP: &str = "ok";
 
@@ -26,7 +23,12 @@ const GROUPS: [RuntimeStatus; 3] = [
 /// The whole console: status line, the collapsed new-chat form over the
 /// repositories this deployment offers, and the grouped chat list.
 #[must_use]
-pub fn console_page(chats: &[Chat], workspace_image: &str, repos: &[String]) -> String {
+pub fn console_page(
+    chats: &[Chat],
+    workspace_image: &str,
+    repos: &[String],
+    warm_pool: usize,
+) -> String {
     page(
         "CorCode",
         &format!(
@@ -34,7 +36,7 @@ pub fn console_page(chats: &[Chat], workspace_image: &str, repos: &[String]) -> 
              <form method=\"post\" action=\"{LOGOUT_PATH}\">\
              <p><button type=\"submit\">Log out everywhere</button></p></form>\
              <script src=\"{HTMX_PATH}\" defer></script>",
-            status_line(chats, workspace_image),
+            status_line(chats, workspace_image, warm_pool),
             new_chat_form(repos),
             chat_list(chats),
         ),
@@ -63,12 +65,12 @@ pub fn chat_list(chats: &[Chat]) -> String {
 }
 
 /// The container picture in one line, expanding in place (ADR-0008).
-fn status_line(chats: &[Chat], workspace_image: &str) -> String {
+fn status_line(chats: &[Chat], workspace_image: &str, warm_pool: usize) -> String {
     let live = count(chats, RuntimeStatus::Live);
     let parked = count(chats, RuntimeStatus::Parked);
     format!(
         "<details>\
-         <summary>pool {live}/{POOL_SLOTS} · parked {parked} · img {} · sweep {SWEEP}</summary>\
+         <summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {SWEEP}</summary>\
          <dl><dt>Pool</dt><dd>{}</dd>\
          <dt>Parked</dt><dd>{parked} chats — workspace kept, container torn down</dd>\
          <dt>Image</dt><dd>{}</dd>\
@@ -174,6 +176,10 @@ mod tests {
 
     const IMAGE: &str = "ghcr.io/corvous/corcode-workspace:2026-08-05";
 
+    /// A warm pool sized like no default, so a status line that reads it
+    /// cannot pass by reading a constant.
+    const POOL: usize = 3;
+
     /// What a deployment offers, in the order it was given them.
     fn repos() -> Vec<String> {
         vec![
@@ -196,6 +202,7 @@ mod tests {
             repo: "CorVous/CorCode".to_owned(),
             branch: format!("chat/2026-08-05-{title}"),
             base_branch: "main".to_owned(),
+            checkpoint_branch: None,
             last_pushed_commit: Some("abc1234".to_owned()),
             acp_session_id: None,
             created_at: now,
@@ -272,7 +279,7 @@ mod tests {
 
     #[test]
     fn an_empty_dataset_still_renders_every_group() {
-        let rendered = console_page(&[], IMAGE, &repos());
+        let rendered = console_page(&[], IMAGE, &repos(), POOL);
 
         for status in [
             RuntimeStatus::Live,
@@ -287,11 +294,11 @@ mod tests {
     }
 
     #[test]
-    fn the_status_line_reports_the_parked_count_and_the_pinned_image_tag() {
-        let rendered = console_page(&every_state(), IMAGE, &repos());
+    fn the_status_line_reports_the_configured_pool_size_the_parked_count_and_the_image_tag() {
+        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
 
         assert!(
-            rendered.contains("<summary>pool 1/2 · parked 1 · img 2026-08-05 · sweep ok</summary>"),
+            rendered.contains("<summary>pool 1/3 · parked 1 · img 2026-08-05 · sweep ok</summary>"),
             "the status line does not read as ADR-0008 asks: {rendered}"
         );
         assert!(
@@ -302,7 +309,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_offers_the_repositories_this_deployment_was_given() {
-        let rendered = console_page(&every_state(), IMAGE, &repos());
+        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
 
         assert!(
             rendered
@@ -317,7 +324,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_previews_the_branch_it_would_cut() {
-        let rendered = console_page(&[], IMAGE, &repos());
+        let rendered = console_page(&[], IMAGE, &repos(), POOL);
         let today = Utc::now().format("%Y-%m-%d");
 
         assert!(
@@ -328,7 +335,7 @@ mod tests {
 
     #[test]
     fn the_branch_preview_slugifies_what_you_type() {
-        let rendered = console_page(&[], IMAGE, &repos());
+        let rendered = console_page(&[], IMAGE, &repos(), POOL);
 
         assert!(
             rendered.contains("toLowerCase()") && rendered.contains("[^a-z0-9]+"),
@@ -338,7 +345,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_posts_itself_to_the_chats_path() {
-        let rendered = console_page(&every_state(), IMAGE, &repos());
+        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
 
         assert!(
             rendered.contains(&format!("<form method=\"post\" action=\"{CHATS_PATH}\">")),
@@ -352,7 +359,7 @@ mod tests {
 
     #[test]
     fn the_chat_list_refreshes_itself_through_htmx() {
-        let rendered = console_page(&[], IMAGE, &repos());
+        let rendered = console_page(&[], IMAGE, &repos(), POOL);
 
         assert!(
             rendered.contains(&format!("src=\"{}\"", super::super::HTMX_PATH)),
