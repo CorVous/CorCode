@@ -4,7 +4,7 @@
 //! No function here is ever handed a secret's value, which is how none of
 //! them can render one.
 
-use crate::secrets::{Secret, Source, Standing};
+use crate::secrets::{AnthropicCredential, Secret, Source, Standing};
 use crate::settings::Outcome;
 use crate::verify::Verified;
 
@@ -146,6 +146,43 @@ mod tests {
                 "a {source:?} secret does not read as {reads}: {rendered}"
             );
         }
+    }
+
+    /// The Anthropic slot takes either kind, and the two are opened with in
+    /// different ways. Which one is in there is the operator's to see, from
+    /// wherever it came.
+    #[test]
+    fn a_slot_that_takes_more_than_one_kind_of_credential_names_the_one_in_it() {
+        for (source, set) in [
+            (Source::Settings, "set (from settings)"),
+            (Source::Environment, "set (from environment)"),
+        ] {
+            for (kind, named) in [
+                (AnthropicCredential::OauthToken, "OAuth token"),
+                (AnthropicCredential::ApiKey, "API key"),
+            ] {
+                let rendered = secret_settings(
+                    Secret::AnthropicKey,
+                    Standing {
+                        source,
+                        kind: Some(kind),
+                    },
+                    &Outcome::Untouched,
+                );
+
+                assert!(
+                    rendered.contains(&format!("{set} — {named}")),
+                    "a {kind:?} from {source:?} does not read as one: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_secret_that_stands_for_no_kind_of_credential_names_none() {
+        let rendered = untouched(Source::Settings);
+
+        assert!(rendered.contains("<p>set (from settings)</p>"), "{rendered}");
     }
 
     #[test]
