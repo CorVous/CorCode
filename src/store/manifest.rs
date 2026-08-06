@@ -27,6 +27,11 @@ pub struct Manifest {
     pub repo: String,
     pub branch: String,
     pub base_branch: String,
+    /// Where the archive gate put a dirty tree, if it found one (ADR-0005).
+    /// Chats archived before this field existed carry no such branch, so a
+    /// manifest without it reads as one rather than as a broken file.
+    #[serde(default)]
+    pub checkpoint_branch: Option<String>,
     pub last_pushed_commit: Option<String>,
     pub acp_session_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -60,6 +65,7 @@ impl Manifest {
             repo: new_chat.repo,
             branch: new_chat.branch,
             base_branch: new_chat.base_branch,
+            checkpoint_branch: None,
             last_pushed_commit: None,
             acp_session_id: None,
             created_at: now,

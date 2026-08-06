@@ -148,6 +148,7 @@ mod tests {
             repo: "CorVous/CorCode".to_owned(),
             branch: "chat/2026-08-05-resume-ladder".to_owned(),
             base_branch: "main".to_owned(),
+            checkpoint_branch: None,
             last_pushed_commit: Some("abc1234".to_owned()),
             acp_session_id: None,
             created_at: now,
