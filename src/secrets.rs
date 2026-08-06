@@ -335,6 +335,31 @@ mod tests {
         assert_eq!(AnthropicCredential::ApiKey.variable(), "ANTHROPIC_API_KEY");
     }
 
+    /// A variable is quoted by hand in a compose file, and the whitespace
+    /// that survives that is not part of the credential. A read takes it off
+    /// a file already; the environment is no different, and a prefix that is
+    /// not at the front reads as the wrong kind entirely.
+    #[test]
+    fn a_bootstrapped_credential_is_read_without_the_whitespace_around_it() {
+        let dir = tempdir().expect("temp dir should be creatable");
+        let secrets = Secrets::new(
+            dir.path(),
+            [(Secret::AnthropicKey, format!("  {SUBSCRIPTION}\n"))],
+        );
+
+        assert_eq!(
+            read(&secrets, Secret::AnthropicKey).as_deref(),
+            Some(SUBSCRIPTION)
+        );
+        assert_eq!(
+            standing(&secrets, Secret::AnthropicKey),
+            Standing {
+                source: Source::Environment,
+                kind: Some(AnthropicCredential::OauthToken),
+            }
+        );
+    }
+
     /// The Anthropic slot takes either kind, and which one is in it is the
     /// only thing about the value anything else is told.
     #[test]
