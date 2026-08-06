@@ -47,6 +47,10 @@ async fn a_new_chat_arrives_live_with_a_checked_out_workspace_and_a_session() {
     let chat_id = chat_id_of(&response);
     let branch = format!("chat/{}-resume-ladder", Utc::now().format("%Y-%m-%d"));
     let manifest = app.manifest(&chat_id);
+    assert_eq!(
+        manifest["title"], "Resume Ladder!",
+        "the operator's own words should survive into the manifest"
+    );
     assert_eq!(manifest["branch"], branch);
     assert_eq!(manifest["base_branch"], "main");
     assert_eq!(manifest["repo"], REPO);
