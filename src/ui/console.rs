@@ -5,12 +5,14 @@ use std::fmt::Write as _;
 use chrono::TimeDelta;
 
 use crate::git::chat_branch;
+use crate::secrets::{Secret, Source};
 use crate::status::{Slot, Status};
 use crate::store::RuntimeStatus;
 use crate::sweep::Swept;
 
 use super::{
-    CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, STATUS_PATH, last_push, page, status_word, text,
+    CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, STATUS_PATH, last_push, page, settings_panel,
+    status_word, text,
 };
 
 /// The branch a chat is cut from when the operator says nothing else.
@@ -29,19 +31,26 @@ const GROUPS: [RuntimeStatus; 3] = [
 ];
 
 /// The whole console: status line, the collapsed new-chat form over the
-/// repositories this deployment offers, and the grouped chat list.
+/// repositories this deployment offers, the grouped chat list, and the
+/// settings panel over the secrets this deployment runs on.
 #[must_use]
-pub fn console_page(chats: &[Chat], status: &Status, repos: &[String]) -> String {
+pub fn console_page(
+    chats: &[Chat],
+    status: &Status,
+    repos: &[String],
+    secrets: &[(Secret, Source)],
+) -> String {
     page(
         "CorCode",
         &format!(
-            "{}{}{}\
+            "{}{}{}{}\
              <form method=\"post\" action=\"{LOGOUT_PATH}\">\
              <p><button type=\"submit\">Log out everywhere</button></p></form>\
              <script src=\"{HTMX_PATH}\" defer></script>",
             status_line(status),
             new_chat_form(repos),
             chat_list(chats),
+            settings_panel(secrets),
         ),
     )
 }
@@ -261,6 +270,15 @@ mod tests {
     /// cannot pass by reading a constant.
     const POOL: usize = 3;
 
+    /// A deployment whose environment carried a GitHub token in and which was
+    /// given no Anthropic key at all.
+    fn secrets() -> [(Secret, Source); 2] {
+        [
+            (Secret::GithubToken, Source::Environment),
+            (Secret::AnthropicKey, Source::Unset),
+        ]
+    }
+
     /// What a deployment offers, in the order it was given them.
     fn repos() -> Vec<String> {
         vec![
@@ -360,7 +378,7 @@ mod tests {
 
     #[test]
     fn an_empty_dataset_still_renders_every_group() {
-        let rendered = console_page(&[], &status(), &repos());
+        let rendered = console_page(&[], &status(), &repos(), &secrets());
 
         for status in [
             RuntimeStatus::Live,
@@ -376,7 +394,7 @@ mod tests {
 
     #[test]
     fn the_status_line_reports_the_configured_pool_size_the_parked_count_and_the_image_tag() {
-        let rendered = console_page(&every_state(), &status(), &repos());
+        let rendered = console_page(&every_state(), &status(), &repos(), &secrets());
 
         assert!(
             rendered.contains("<summary>pool 1/3 · parked 1 · img 2026-08-05 · sweep ok</summary>"),
@@ -406,7 +424,7 @@ mod tests {
             "the console and the polled fragment render the status differently"
         );
         assert!(
-            console_page(&every_state(), &status(), &repos()).contains(&rendered),
+            console_page(&every_state(), &status(), &repos(), &secrets()).contains(&rendered),
             "the console renders a status line of its own"
         );
     }
@@ -532,7 +550,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_offers_the_repositories_this_deployment_was_given() {
-        let rendered = console_page(&every_state(), &status(), &repos());
+        let rendered = console_page(&every_state(), &status(), &repos(), &secrets());
 
         assert!(
             rendered
@@ -547,7 +565,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_previews_the_branch_it_would_cut() {
-        let rendered = console_page(&[], &status(), &repos());
+        let rendered = console_page(&[], &status(), &repos(), &secrets());
         let today = Utc::now().format("%Y-%m-%d");
 
         assert!(
@@ -558,7 +576,7 @@ mod tests {
 
     #[test]
     fn the_branch_preview_slugifies_what_you_type() {
-        let rendered = console_page(&[], &status(), &repos());
+        let rendered = console_page(&[], &status(), &repos(), &secrets());
 
         assert!(
             rendered.contains("toLowerCase()") && rendered.contains("[^a-z0-9]+"),
@@ -568,7 +586,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_posts_itself_to_the_chats_path() {
-        let rendered = console_page(&every_state(), &status(), &repos());
+        let rendered = console_page(&every_state(), &status(), &repos(), &secrets());
 
         assert!(
             rendered.contains(&format!("<form method=\"post\" action=\"{CHATS_PATH}\">")),
@@ -584,22 +602,17 @@ mod tests {
     /// other detail on it (ADR-0008).
     #[test]
     fn the_console_carries_the_settings_panel() {
-        let secrets = [
-            (Secret::GithubToken, Source::Environment),
-            (Secret::AnthropicKey, Source::Unset),
-        ];
-
-        let rendered = console_page(&[], &status(), &repos(), &secrets);
+        let rendered = console_page(&[], &status(), &repos(), &secrets());
 
         assert!(
-            rendered.contains(&settings_panel(&secrets)),
+            rendered.contains(&settings_panel(&secrets())),
             "the console renders a settings panel of its own: {rendered}"
         );
     }
 
     #[test]
     fn the_chat_list_refreshes_itself_through_htmx() {
-        let rendered = console_page(&[], &status(), &repos());
+        let rendered = console_page(&[], &status(), &repos(), &secrets());
 
         assert!(
             rendered.contains(&format!("src=\"{}\"", super::super::HTMX_PATH)),

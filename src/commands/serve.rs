@@ -13,7 +13,9 @@ use crate::git::{GITHUB, Remotes};
 use crate::plane::{DockerPlane, PlaneSettings};
 use crate::secrets::Secrets;
 use crate::server;
+use crate::settings::Settings;
 use crate::store::ChatStore;
+use crate::verify::UpstreamVerifier;
 
 /// Execute the serve command.
 pub fn run() -> Result<()> {
@@ -27,9 +29,10 @@ pub fn run() -> Result<()> {
 
 async fn serve(config: &Config) -> Result<()> {
     ChatStore::new(&config.data_dir).prepare()?;
-    let chats = chats(config)?;
+    let secrets = Arc::new(Secrets::from_config(config));
+    let chats = chats(config, Arc::clone(&secrets))?;
     chats.sweep().await;
-    let router = server::router(config, chats)?;
+    let router = server::router(config, chats, Settings::new(secrets, UpstreamVerifier::new()))?;
     let listener = TcpListener::bind(config.bind_addr)
         .await
         .with_context(|| format!("failed to bind {}", config.bind_addr))?;
@@ -44,7 +47,7 @@ async fn serve(config: &Config) -> Result<()> {
 /// The dataset as this deployment reaches it: real containers, real adapters,
 /// real repositories on GitHub. Both Docker clients want the daemon's socket
 /// to be there before the address is taken.
-fn chats(config: &Config) -> Result<Chats<DockerPlane, DockerExec>> {
+fn chats(config: &Config, secrets: Arc<Secrets>) -> Result<Chats<DockerPlane, DockerExec>> {
     let plane = DockerPlane::connect(PlaneSettings {
         image: config.workspace_image.clone(),
         memory_mb: config.container_memory_mb,
@@ -56,6 +59,6 @@ fn chats(config: &Config) -> Result<Chats<DockerPlane, DockerExec>> {
         plane,
         DockerExec::connect()?,
         Remotes::new(GITHUB),
-        Arc::new(Secrets::from_config(config)),
+        secrets,
     ))
 }
