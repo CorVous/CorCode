@@ -12,10 +12,12 @@ use ulid::Ulid;
 
 use crate::acp::{AcpError, AcpTransport, Adapter, Connections, Held};
 use crate::config::Config;
-use crate::git::{self, Remotes};
+use crate::git::{self, GitError, Remotes};
 use crate::plane::ContainerPlane;
 use crate::pool;
-use crate::store::{ChatStore, ContainerLiveness, Event, Manifest, NewChat, runtime_status};
+use crate::store::{
+    ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, runtime_status,
+};
 use crate::ui;
 
 /// The variable the agent reads its Anthropic credentials from (ADR-0001).
@@ -78,8 +80,28 @@ impl PromptError {
     }
 }
 
+/// Why a chat was not archived. Whichever this is, the chat is as it was:
+/// nothing is torn down until everything in the workspace is on the remote
+/// (ADR-0002 rule 3).
+#[derive(Debug, Error)]
+pub enum ArchiveError {
+    #[error("this dataset holds no such chat")]
+    NoSuchChat,
+    #[error("nothing reached the remote, so nothing was torn down")]
+    NotPushed(#[source] anyhow::Error),
+    #[error("the chat could not be archived")]
+    Broke(#[source] anyhow::Error),
+}
+
+fn unarchived(failure: impl Into<anyhow::Error>) -> ArchiveError {
+    ArchiveError::Broke(failure.into())
+}
+
 /// What a refusal calls itself in a chat's own log (ADR-0006).
 const REFUSAL: &str = "refusal";
+
+/// What an archive that got nothing onto the remote calls itself there.
+const PUSH_FAILURE: &str = "push_failure";
 
 /// Every chat in one dataset: who is live, what they hold, and how a new one
 /// comes to exist.
@@ -228,13 +250,64 @@ where
     /// memory stay where they are, and nothing at all is committed
     /// (ADR-0002 rule 2, ADR-0005).
     async fn park(&self, chat_id: &str) {
+        self.release(chat_id, "parked, workspace kept").await;
+    }
+
+    /// Give a chat's container up. What is left on disk is the caller's to
+    /// decide: parking keeps the workspace, the archive gate deletes it once
+    /// everything in it is on the remote.
+    async fn release(&self, chat_id: &str, why: &str) {
         match self.plane.teardown(chat_id).await {
             Ok(()) => {
                 self.connections.forget(chat_id);
-                info!("{chat_id} parked: workspace kept, container torn down");
+                info!("{chat_id} {why}: container torn down");
             }
-            Err(stubborn) => warn!("{chat_id} is past the pool and would not stop: {stubborn}"),
+            Err(stubborn) => warn!("{chat_id} ({why}) would not stop: {stubborn}"),
         }
+    }
+
+    /// Close a chat for good: everything in the workspace onto the remote,
+    /// then the container down and the workspace deleted (ADR-0002 rule 3).
+    ///
+    /// The push is the gate. A dirty tree goes onto a checkpoint branch of
+    /// its own so the chat's branch keeps only the agent's own commits
+    /// (ADR-0005); if any of it fails to land, the chat is left exactly as it
+    /// was, told about in its own log, and the operator can try again.
+    pub async fn archive(&self, chat_id: &Ulid) -> Result<(), ArchiveError> {
+        let chat_id = chat_id.to_string();
+        let manifest = match self.store.read_manifest(&chat_id) {
+            Ok(manifest) => manifest,
+            Err(failure) if failure.is_missing() => return Err(ArchiveError::NoSuchChat),
+            Err(failure) => return Err(unarchived(failure)),
+        };
+        let pushed = match self.push_everything(&manifest).await {
+            Ok(pushed) => pushed,
+            Err(failure) => {
+                self.note(&chat_id, PUSH_FAILURE, &format!("Nothing was archived: {failure}. The chat is still open and can be archived again."));
+                return Err(ArchiveError::NotPushed(failure.into()));
+            }
+        };
+        self.store
+            .write_manifest(&Manifest {
+                state: ChatState::Archived,
+                last_pushed_commit: Some(pushed.tip),
+                checkpoint_branch: pushed.checkpoint_branch,
+                ..manifest
+            })
+            .map_err(unarchived)?;
+        self.release(&chat_id, "archived").await;
+        self.store.remove_workspace(&chat_id).map_err(unarchived)
+    }
+
+    /// Get the chat's workspace onto the remote, whole. Git blocks, so it
+    /// runs off the runtime.
+    async fn push_everything(&self, manifest: &Manifest) -> Result<git::Pushed, GitError> {
+        let origin = self.remotes.origin(&manifest.repo);
+        let workspace = self.store.workspace_dir(&manifest.chat_id);
+        let branch = manifest.branch.clone();
+        tokio::task::spawn_blocking(move || git::push_for_archive(&origin, &workspace, &branch))
+            .await
+            .expect("the git task should not panic")
     }
 
     async fn turn(&self, chat_id: &str, said: &str) -> Result<(), PromptError> {
@@ -267,9 +340,15 @@ where
     /// this is the only place the operator can read why their prompt went
     /// nowhere; the next poll brings it (ADR-0006).
     fn note_refusal(&self, chat_id: &str, refusal: &PromptError) {
-        let line = json!({"corcode": REFUSAL, "text": format!("Prompt not sent: {refusal}.")});
+        self.note(chat_id, REFUSAL, &format!("Prompt not sent: {refusal}."));
+    }
+
+    /// A line in the core's own voice in a chat's log, which is the only
+    /// place the UI can say anything the agent did not (ADR-0006).
+    fn note(&self, chat_id: &str, kind: &str, text: &str) {
+        let line = json!({"corcode": kind, "text": text});
         if let Err(failure) = self.store.append_event(chat_id, &line) {
-            warn!("a refusal could not be written down: {failure:#}");
+            warn!("a {kind} line could not be written down: {failure:#}");
         }
     }
 

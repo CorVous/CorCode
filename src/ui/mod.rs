@@ -56,6 +56,12 @@ pub fn chat_prompt_path(chat_id: &str) -> String {
     format!("{}/prompt", chat_path(chat_id))
 }
 
+/// Where one chat's archive button posts (ADR-0002 rule 3).
+#[must_use]
+pub fn chat_archive_path(chat_id: &str) -> String {
+    format!("{}/archive", chat_path(chat_id))
+}
+
 /// A semantic HTML document on browser defaults (ADR-0008).
 #[must_use]
 pub fn page(title: &str, body: &str) -> String {

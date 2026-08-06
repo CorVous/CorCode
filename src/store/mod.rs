@@ -132,6 +132,18 @@ impl ChatStore {
         file.flush().map_err(StoreError::writing(&path))
     }
 
+    /// Delete a chat's working tree, once everything in it is on the remote
+    /// (ADR-0002 rule 1). A tree that is already gone is the state asked for.
+    pub fn remove_workspace(&self, chat_id: &str) -> Result<(), StoreError> {
+        let workspace = self.workspace_dir(chat_id);
+        match fs::remove_dir_all(&workspace) {
+            Err(failure) if failure.kind() != io::ErrorKind::NotFound => {
+                Err(StoreError::writing(&workspace)(failure))
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub fn read_events(&self, chat_id: &str) -> Result<Vec<Event>, StoreError> {
         let path = self.events_path(chat_id);
         let log = fs::read_to_string(&path).map_err(StoreError::reading(&path))?;

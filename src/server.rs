@@ -21,7 +21,7 @@ use ulid::Ulid;
 use crate::acp::AcpTransport;
 use crate::auth::gate::{Gate, SignIn};
 use crate::auth::session;
-use crate::chats::{Chats, PromptError, WantedChat};
+use crate::chats::{ArchiveError, Chats, PromptError, WantedChat};
 use crate::config::Config;
 use crate::plane::ContainerPlane;
 use crate::store::ContainerLiveness;
@@ -38,6 +38,10 @@ const HEALTH_PATH: &str = "/health";
 
 /// The path parameter every per-chat route is spelled with.
 const CHAT_ID: &str = "{chat_id}";
+
+/// The header htmx reads as "render this page again": how a chat that is no
+/// longer open comes back as what it is now.
+const HX_REFRESH: &str = "HX-Refresh";
 
 /// Build the application's routes. Every route is gated except the handful
 /// [`is_public`] names, so a route added here is protected by default
@@ -67,6 +71,7 @@ where
         .route(&ui::chat_path(CHAT_ID), get(chat_view))
         .route(&ui::chat_events_path(CHAT_ID), get(chat_events))
         .route(&ui::chat_prompt_path(CHAT_ID), post(prompt_chat))
+        .route(&ui::chat_archive_path(CHAT_ID), post(archive_chat))
         .route(ui::HTMX_PATH, get(htmx))
         .with_state(chats)
 }
@@ -253,6 +258,42 @@ where
 #[derive(Deserialize)]
 struct PromptForm {
     prompt: String,
+}
+
+/// Close a chat: its work onto the remote, then its container and workspace
+/// given back (ADR-0002 rule 3). A failed push is answered as the failure it
+/// is, and the chat's own log carries why; the page's next poll brings it.
+async fn archive_chat<P, T>(
+    State(chats): State<Arc<Chats<P, T>>>,
+    Path(chat_id): Path<String>,
+) -> Response
+where
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
+{
+    let Ok(chat_id) = chat_id.parse::<Ulid>() else {
+        return no_such_chat();
+    };
+    match chats.archive(&chat_id).await {
+        Ok(()) => ([(HX_REFRESH, "true")], "").into_response(),
+        Err(ArchiveError::NoSuchChat) => no_such_chat(),
+        Err(failure @ ArchiveError::NotPushed(_)) => {
+            error!("a chat was not archived: {:#}", anyhow::Error::new(failure));
+            (
+                StatusCode::BAD_GATEWAY,
+                "Nothing reached the remote, so nothing was torn down.\n",
+            )
+                .into_response()
+        }
+        Err(failure) => {
+            error!("a chat broke on archive: {:#}", anyhow::Error::new(failure));
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The chat could not be archived.\n",
+            )
+                .into_response()
+        }
+    }
 }
 
 /// The chat's log as it stands on disk right now.

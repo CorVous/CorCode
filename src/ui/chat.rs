@@ -4,7 +4,10 @@ use serde_json::Value;
 
 use crate::store::{Event, Manifest, RuntimeStatus};
 
-use super::{HTMX_PATH, chat_events_path, chat_prompt_path, last_push, page, status_word, text};
+use super::{
+    HTMX_PATH, chat_archive_path, chat_events_path, chat_prompt_path, last_push, page, status_word,
+    text,
+};
 
 /// What an event calls itself when it carries no ACP discriminator.
 const UNTYPED: &str = "event";
@@ -25,7 +28,7 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
         &format!(
             "<p><a href=\"/\">← chats</a></p>\
              <p><small>{} · {} · push {} · {}</small></p>\
-             {}{}\
+             {}{}{}\
              <form hx-post=\"{}\" hx-target=\"#log\" hx-swap=\"outerHTML\">\
              <p><input name=\"prompt\" aria-label=\"Prompt\" placeholder=\"prompt\"> \
              <button type=\"submit\">Send</button></p></form>\
@@ -34,6 +37,7 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
             text(&manifest.branch),
             text(last_push(manifest)),
             status_word(status),
+            archive_button(&manifest.chat_id, status),
             event_log(&manifest.chat_id, events),
             first_prompt_hint(status),
             text(&chat_prompt_path(&manifest.chat_id)),
@@ -52,6 +56,21 @@ pub fn event_log(chat_id: &str, events: &[Event]) -> String {
         "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {POLL_SECONDS}s\" \
          hx-swap=\"outerHTML\">{lines}</section>",
         text(&chat_events_path(chat_id)),
+    )
+}
+
+/// The gate that pushes a chat's work and gives its workspace back, offered
+/// only where there is a container to close (ADR-0002 rule 3). A success
+/// re-renders the page rather than swapping a fragment: archiving changes the
+/// whole of what the chat is.
+fn archive_button(chat_id: &str, status: RuntimeStatus) -> String {
+    if status != RuntimeStatus::Live {
+        return String::new();
+    }
+    format!(
+        "<form hx-post=\"{}\" hx-swap=\"none\"><p><button type=\"submit\">Archive</button>\
+         </p></form>",
+        text(&chat_archive_path(chat_id)),
     )
 }
 
