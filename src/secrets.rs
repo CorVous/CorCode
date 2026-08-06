@@ -68,6 +68,14 @@ pub struct Standing {
     pub kind: Option<AnthropicCredential>,
 }
 
+impl From<Source> for Standing {
+    /// A secret whose slot takes one kind of credential stands for where its
+    /// value came from and nothing else.
+    fn from(source: Source) -> Self {
+        Self { source, kind: None }
+    }
+}
+
 /// One operational secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Secret {
@@ -170,14 +178,14 @@ impl Secrets {
     /// answers both halves, so a rotation cannot land between them and leave
     /// the panel describing two different values.
     pub fn standing(&self, secret: Secret) -> Result<Standing, SecretsError> {
-        let in_force = self.in_force(secret)?;
-        Ok(Standing {
-            source: in_force
-                .as_ref()
-                .map_or(Source::Unset, |&(source, _)| source),
-            kind: match secret {
-                Secret::AnthropicKey => in_force.map(|(_, value)| AnthropicCredential::of(&value)),
-                Secret::GithubToken => None,
+        let Some((source, value)) = self.in_force(secret)? else {
+            return Ok(Source::Unset.into());
+        };
+        Ok(match secret {
+            Secret::GithubToken => source.into(),
+            Secret::AnthropicKey => Standing {
+                source,
+                kind: Some(AnthropicCredential::of(&value)),
             },
         })
     }

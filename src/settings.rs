@@ -228,8 +228,8 @@ mod tests {
         assert_eq!(
             settings.statuses().expect("the secrets should be readable"),
             vec![
-                (Secret::GithubToken, stands(Source::Environment)),
-                (Secret::AnthropicKey, stands(Source::Unset)),
+                (Secret::GithubToken, Source::Environment.into()),
+                (Secret::AnthropicKey, Source::Unset.into()),
             ]
         );
     }
@@ -258,11 +258,6 @@ mod tests {
             .standing(Secret::GithubToken)
             .expect("a secret should be readable")
             .source
-    }
-
-    /// How a secret that names no kind of credential stands.
-    const fn stands(source: Source) -> Standing {
-        Standing { source, kind: None }
     }
 
     fn kept(dir: &TempDir) -> std::path::PathBuf {

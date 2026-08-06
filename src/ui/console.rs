@@ -275,14 +275,9 @@ mod tests {
     /// given no Anthropic key at all.
     fn secrets() -> [(Secret, Standing); 2] {
         [
-            (Secret::GithubToken, stands(Source::Environment)),
-            (Secret::AnthropicKey, stands(Source::Unset)),
+            (Secret::GithubToken, Source::Environment.into()),
+            (Secret::AnthropicKey, Source::Unset.into()),
         ]
-    }
-
-    /// How a secret that names no kind of credential stands.
-    const fn stands(source: Source) -> Standing {
-        Standing { source, kind: None }
     }
 
     /// What a deployment offers, in the order it was given them.

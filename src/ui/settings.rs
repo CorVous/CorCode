@@ -239,8 +239,8 @@ mod tests {
     #[test]
     fn nothing_in_the_panel_checks_a_credential_on_a_clock() {
         let rendered = settings_panel(&[
-            (Secret::GithubToken, stands(Source::Settings)),
-            (Secret::AnthropicKey, stands(Source::Environment)),
+            (Secret::GithubToken, Source::Settings.into()),
+            (Secret::AnthropicKey, Source::Environment.into()),
         ]);
 
         assert!(
@@ -252,8 +252,8 @@ mod tests {
     #[test]
     fn the_panel_holds_every_secret_this_deployment_keeps() {
         let rendered = settings_panel(&[
-            (Secret::GithubToken, stands(Source::Settings)),
-            (Secret::AnthropicKey, stands(Source::Unset)),
+            (Secret::GithubToken, Source::Settings.into()),
+            (Secret::AnthropicKey, Source::Unset.into()),
         ]);
 
         assert!(
@@ -370,16 +370,11 @@ mod tests {
 
     /// One secret's section, with nothing just done to it.
     fn untouched(source: Source) -> String {
-        secret_settings(Secret::GithubToken, stands(source), &Outcome::Untouched)
+        secret_settings(Secret::GithubToken, source.into(), &Outcome::Untouched)
     }
 
     /// One secret's section, reporting what was just done to it.
     fn after(outcome: &Outcome) -> String {
-        secret_settings(Secret::GithubToken, stands(Source::Settings), outcome)
-    }
-
-    /// How a secret that names no kind of credential stands.
-    const fn stands(source: Source) -> Standing {
-        Standing { source, kind: None }
+        secret_settings(Secret::GithubToken, Source::Settings.into(), outcome)
     }
 }
