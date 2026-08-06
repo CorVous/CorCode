@@ -39,6 +39,18 @@ const TURN_PATIENCE: Duration = Duration::from_secs(600);
 /// The notification an adapter streams a turn over.
 const SESSION_UPDATE: &str = "session/update";
 
+/// The cheapest way back into a session: the adapter's own state restored,
+/// with nothing replayed to us (ADR-0007 rung 1). The method is unstable, so
+/// an adapter that has never heard of it is a case, not a fault.
+const RESUME_SESSION: &str = "unstable_resumeSession";
+
+/// The whole transcript replayed as notifications and then answered, which is
+/// how an adapter that cannot resume remembers instead (rung 2).
+const LOAD_SESSION: &str = "session/load";
+
+/// A session that remembers nothing, under an id of its own (rung 3).
+const NEW_SESSION: &str = "session/new";
+
 /// The one thing an adapter asks a client that declares no capabilities for.
 const PERMISSION_ASK: &str = "session/request_permission";
 
@@ -105,6 +117,14 @@ impl<T: AcpTransport + Sync> Adapter<T> {
     /// workspace, answering with the connection every later turn is taken
     /// over.
     pub async fn open_session(&self, container: &str) -> Result<Connection<T::Channel>, AcpError> {
+        let mut greeting = self.greet(container).await?;
+        let session_id = greeting.open().await?;
+        Ok(greeting.over(session_id))
+    }
+
+    /// Hand shake with the adapter and stop there, answering with a greeting
+    /// that holds no session: ADR-0007's ladder is climbed over one of these.
+    pub async fn greet(&self, container: &str) -> Result<Greeting<T::Channel>, AcpError> {
         let channel = timeout(self.patience, self.transport.open(container))
             .await
             .map_err(|_| AcpError::Unstarted {
@@ -128,24 +148,60 @@ impl<T: AcpTransport + Sync> Adapter<T> {
                 }),
             )
             .await?;
-        let session = calls
-            .call(
-                "session/new",
-                json!({"cwd": WORKSPACE_MOUNT, "mcpServers": []}),
-            )
+        Ok(Greeting {
+            calls,
+            turn_patience: self.turn_patience,
+        })
+    }
+}
+
+/// An adapter that has said hello and been given no session yet.
+pub struct Greeting<C> {
+    calls: Calls<C>,
+    turn_patience: Duration,
+}
+
+impl<C: AcpChannel> Greeting<C> {
+    /// Rung 1: ask for the adapter's own memory of `session_id` back.
+    pub async fn resume(&mut self, session_id: &str) -> Result<(), AcpError> {
+        panic!("the first rung is not written yet")
+    }
+
+    /// Rung 2: have the adapter rebuild its memory by replaying the whole
+    /// transcript of `session_id`.
+    ///
+    /// The replay arrives as `session/update` notifications before the answer
+    /// does, and every one of them is heard and dropped: the chat's log
+    /// already holds those lines, and writing them again would say everything
+    /// twice (ADR-0007 rule 3).
+    pub async fn load(&mut self, session_id: &str) -> Result<(), AcpError> {
+        panic!("the second rung is not written yet")
+    }
+
+    /// Rung 3: a session that remembers nothing, answering with its new id.
+    pub async fn open(&mut self) -> Result<String, AcpError> {
+        let session = self
+            .calls
+            .call(NEW_SESSION, json!({"cwd": WORKSPACE_MOUNT, "mcpServers": []}))
             .await?;
-        let session_id = session["sessionId"]
+        session["sessionId"]
             .as_str()
             .map(ToOwned::to_owned)
             .ok_or_else(|| AcpError::Unreadable {
-                method: "session/new".to_owned(),
+                method: NEW_SESSION.to_owned(),
                 answer: session.to_string(),
-            })?;
-        Ok(Connection {
-            calls,
+            })
+    }
+
+    /// The connection turns are taken over, once a rung has put `session_id`
+    /// behind it.
+    #[must_use]
+    pub fn over(self, session_id: String) -> Connection<C> {
+        Connection {
+            calls: self.calls,
             session_id,
             turn_patience: self.turn_patience,
-        })
+        }
     }
 }
 
@@ -496,6 +552,114 @@ mod tests {
                     "method": "session/new",
                     "params": {"cwd": "/workspace", "mcpServers": []},
                 }),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_rung_asks_for_the_session_the_chat_already_has() {
+        let adapter = Adapter::new(ScriptedAdapter::resuming(SESSION, &[]));
+        let mut greeting = adapter
+            .greet(CONTAINER)
+            .await
+            .expect("the scripted adapter should say hello");
+
+        greeting
+            .resume(SESSION)
+            .await
+            .expect("the scripted adapter should resume the session it was given");
+
+        assert_eq!(
+            adapter.transport().requests().last(),
+            Some(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "unstable_resumeSession",
+                "params": {"sessionId": SESSION, "cwd": "/workspace", "mcpServers": []},
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rung_the_adapter_has_never_heard_of_is_answered_rather_than_hung_on() {
+        let adapter = Adapter::waiting(ScriptedAdapter::answering(SESSION, &[]), IMPATIENT);
+        let mut greeting = adapter
+            .greet(CONTAINER)
+            .await
+            .expect("the scripted adapter should say hello");
+
+        let error = greeting
+            .resume(SESSION)
+            .await
+            .expect_err("an adapter that never heard of the method should not resume");
+
+        assert!(
+            error.answered(),
+            "a rung the adapter turned down should leave a channel to try the next one over: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_second_rung_hands_the_adapter_the_session_to_rebuild() {
+        let adapter = Adapter::new(ScriptedAdapter::loading(SESSION, &[], &[]));
+        let mut greeting = adapter
+            .greet(CONTAINER)
+            .await
+            .expect("the scripted adapter should say hello");
+
+        greeting
+            .load(SESSION)
+            .await
+            .expect("the scripted adapter should load the session it was given");
+
+        assert_eq!(
+            adapter.transport().requests().last(),
+            Some(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "session/load",
+                "params": {"sessionId": SESSION, "cwd": "/workspace", "mcpServers": []},
+            }))
+        );
+    }
+
+    /// The replay is heard rather than left in the pipe: anything the load did
+    /// not consume would be read back by the next turn and written down as
+    /// something the agent had just said (ADR-0007 rule 3).
+    #[tokio::test]
+    async fn a_replayed_transcript_lands_in_nothing_written_afterwards() {
+        let adapter = Adapter::new(ScriptedAdapter::loading(
+            SESSION,
+            &[update(SESSION, "said before"), update(SESSION, "and before")],
+            &[update(SESSION, "on it")],
+        ));
+        let mut greeting = adapter
+            .greet(CONTAINER)
+            .await
+            .expect("the scripted adapter should say hello");
+        greeting
+            .load(SESSION)
+            .await
+            .expect("the scripted adapter should load the session it was given");
+        let mut connection = greeting.over(SESSION.to_owned());
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("the scripted turn should end");
+
+        assert_eq!(
+            record,
+            [
+                json!({
+                    "sessionId": SESSION,
+                    "prompt": [{"type": "text", "text": "ship the ladder"}],
+                }),
+                recorded("on it"),
             ]
         );
     }

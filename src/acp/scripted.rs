@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::{AcpChannel, AcpError, AcpTransport};
+use super::{AcpChannel, AcpError, AcpTransport, LOAD_SESSION, NO_SUCH_METHOD, RESUME_SESSION};
 
 /// A notification the fake volunteers before every answer, as a real adapter
 /// does: no client may assume the next line is the one it is waiting for.
@@ -19,6 +19,8 @@ const CHATTER: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"s
 enum Answer {
     Result(Value),
     Refusal(String),
+    /// A method this adapter has never heard of, answered as JSON-RPC says.
+    Unheard,
 }
 
 /// What the fake answers to each method it knows.
@@ -37,6 +39,7 @@ enum Stall {
 pub struct ScriptedAdapter {
     answers: Arc<Script>,
     asks: Arc<Vec<Value>>,
+    replay: Arc<Vec<Value>>,
     updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     stall: Stall,
@@ -63,13 +66,39 @@ impl ScriptedAdapter {
     /// An adapter that streams `updates` at every prompt and then ends the
     /// turn. Each update is the params of one `session/update` notification,
     /// so a test can address one at whichever session it likes.
+    ///
+    /// It knows neither rung of ADR-0007's ladder, as an adapter that has
+    /// forgotten the chat does.
     #[must_use]
     pub fn answering(session_id: &str, updates: &[Value]) -> Self {
-        let mut script = working_script(session_id);
-        script.insert(
-            "session/prompt".to_owned(),
-            Answer::Result(json!({"stopReason": "end_turn"})),
-        );
+        Self {
+            updates: Arc::new(updates.to_vec()),
+            ..Self::reading(prompting_script(session_id))
+        }
+    }
+
+    /// An adapter that hands a session back where it left off, replaying
+    /// nothing (ADR-0007 rung 1).
+    #[must_use]
+    pub fn resuming(session_id: &str, updates: &[Value]) -> Self {
+        Self::climbable(session_id, RESUME_SESSION, updates)
+    }
+
+    /// An adapter that will not resume but replays `history` as
+    /// `session/update` notifications when the session is loaded, before it
+    /// answers the load (rung 2).
+    #[must_use]
+    pub fn loading(session_id: &str, history: &[Value], updates: &[Value]) -> Self {
+        Self {
+            replay: Arc::new(history.to_vec()),
+            ..Self::climbable(session_id, LOAD_SESSION, updates)
+        }
+    }
+
+    /// An adapter that answers `rung` and then takes prompts.
+    fn climbable(session_id: &str, rung: &str, updates: &[Value]) -> Self {
+        let mut script = prompting_script(session_id);
+        script.insert(rung.to_owned(), Answer::Result(Value::Null));
         Self {
             updates: Arc::new(updates.to_vec()),
             ..Self::reading(script)
@@ -159,6 +188,7 @@ impl ScriptedAdapter {
         Self {
             answers: Arc::new(script),
             asks: Arc::new(Vec::new()),
+            replay: Arc::new(Vec::new()),
             updates: Arc::new(Vec::new()),
             heard: Arc::new(Mutex::new(Heard::default())),
             stall: Stall::Nowhere,
@@ -179,7 +209,8 @@ impl ScriptedAdapter {
     }
 }
 
-/// What every scripted adapter answers before anything goes wrong.
+/// What every scripted adapter answers before anything goes wrong: a
+/// handshake, a new session, and neither rung of ADR-0007's ladder.
 fn working_script(session_id: &str) -> Script {
     Script::from([
         (
@@ -193,7 +224,19 @@ fn working_script(session_id: &str) -> Script {
             "session/new".to_owned(),
             Answer::Result(json!({"sessionId": session_id})),
         ),
+        (RESUME_SESSION.to_owned(), Answer::Unheard),
+        (LOAD_SESSION.to_owned(), Answer::Unheard),
     ])
+}
+
+/// The working script, plus a turn that ends.
+fn prompting_script(session_id: &str) -> Script {
+    let mut script = working_script(session_id);
+    script.insert(
+        "session/prompt".to_owned(),
+        Answer::Result(json!({"stopReason": "end_turn"})),
+    );
+    script
 }
 
 impl AcpTransport for ScriptedAdapter {
@@ -207,6 +250,7 @@ impl AcpTransport for ScriptedAdapter {
         Ok(ScriptedChannel {
             answers: Arc::clone(&self.answers),
             asks: Arc::clone(&self.asks),
+            replay: Arc::clone(&self.replay),
             updates: Arc::clone(&self.updates),
             heard: Arc::clone(&self.heard),
             unread: VecDeque::new(),
@@ -221,12 +265,25 @@ impl AcpTransport for ScriptedAdapter {
 pub struct ScriptedChannel {
     answers: Arc<Script>,
     asks: Arc<Vec<Value>>,
+    replay: Arc<Vec<Value>>,
     updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     unread: VecDeque<String>,
     stall: Stall,
     hangs_up: bool,
     dawdle: Duration,
+}
+
+impl ScriptedChannel {
+    /// Line up `params` as `session/update` notifications, each one a whole
+    /// message the client has to read past to reach the answer it waits for.
+    fn stream(&mut self, params: &[Value]) {
+        for update in params {
+            self.unread.push_back(
+                json!({"jsonrpc": "2.0", "method": "session/update", "params": update}).to_string(),
+            );
+        }
+    }
 }
 
 impl AcpChannel for ScriptedChannel {
@@ -249,12 +306,10 @@ impl AcpChannel for ScriptedChannel {
             for ask in self.asks.iter() {
                 self.unread.push_back(ask.to_string());
             }
-            for update in self.updates.iter() {
-                self.unread.push_back(
-                    json!({"jsonrpc": "2.0", "method": "session/update", "params": update})
-                        .to_string(),
-                );
-            }
+            self.stream(&self.updates.clone());
+        }
+        if method == LOAD_SESSION {
+            self.stream(&self.replay.clone());
         }
         match self.answers.get(&method) {
             Some(Answer::Result(result)) => self
@@ -263,6 +318,14 @@ impl AcpChannel for ScriptedChannel {
             Some(Answer::Refusal(complaint)) => self.unread.push_back(
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": complaint}})
                     .to_string(),
+            ),
+            Some(Answer::Unheard) => self.unread.push_back(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": NO_SUCH_METHOD, "message": format!("no method {method}")},
+                })
+                .to_string(),
             ),
             None => {}
         }
