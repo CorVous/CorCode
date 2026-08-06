@@ -6,6 +6,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use argon2::password_hash::{PasswordHasher as _, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -23,6 +24,7 @@ use cor_code::config::{
 };
 use cor_code::git::Remotes;
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings};
+use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::store::ChatStore;
 
@@ -114,6 +116,7 @@ impl Serving {
             DockerPlane::connect(settings(deployment)).expect("the daemon should be reachable"),
             DockerExec::connect().expect("the daemon should be reachable"),
             remotes,
+            Arc::new(Secrets::from_config(&config)),
         );
         let router = server::router(&config, chats).expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
@@ -390,7 +393,7 @@ fn seeded_repository() -> (TempDir, Remotes) {
     run(&work, &["remote", "add", "origin", &spelled(&bare)]);
     run(&work, &["push", "origin", "main"]);
     let served_from = format!("file://{}", spelled(dir.path()));
-    (dir, Remotes::new(served_from, None))
+    (dir, Remotes::new(served_from))
 }
 
 fn spelled(path: &Path) -> String {

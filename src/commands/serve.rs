@@ -1,5 +1,7 @@
 //! Default action: run the HTTP service until shutdown.
 
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result};
 use log::info;
 use tokio::net::TcpListener;
@@ -9,6 +11,7 @@ use crate::chats::Chats;
 use crate::config::Config;
 use crate::git::{GITHUB, Remotes};
 use crate::plane::{DockerPlane, PlaneSettings};
+use crate::secrets::Secrets;
 use crate::server;
 use crate::store::ChatStore;
 
@@ -52,6 +55,7 @@ fn chats(config: &Config) -> Result<Chats<DockerPlane, DockerExec>> {
         config,
         plane,
         DockerExec::connect()?,
-        Remotes::new(GITHUB, config.github_token.clone()),
+        Remotes::new(GITHUB),
+        Arc::new(Secrets::from_config(config)),
     ))
 }

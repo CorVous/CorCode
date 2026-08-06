@@ -1,5 +1,6 @@
 //! Integration tests for the HTTP server.
 
+use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -11,6 +12,7 @@ use cor_code::config::{
 };
 use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::MemoryPlane;
+use cor_code::secrets::Secrets;
 
 #[tokio::test]
 async fn health_endpoint_answers_on_ephemeral_port() {
@@ -42,7 +44,8 @@ async fn health_endpoint_answers_on_ephemeral_port() {
             &config,
             MemoryPlane::default(),
             ScriptedAdapter::silent(),
-            Remotes::new(GITHUB, None),
+            Remotes::new(GITHUB),
+            Arc::new(Secrets::from_config(&config)),
         ),
     )
     .expect("router should build");

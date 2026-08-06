@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use tempfile::TempDir;
@@ -16,6 +17,7 @@ use cor_code::config::{
 };
 use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::{ContainerPlane as _, MemoryPlane};
+use cor_code::secrets::Secrets;
 use cor_code::store::{ChatStore, Manifest, NewChat};
 use cor_code::ui;
 
@@ -149,11 +151,14 @@ impl Dataset {
     }
 
     fn chats(&self, plane: MemoryPlane) -> Chats<MemoryPlane, ScriptedAdapter> {
+        let config = config(self.dir.path());
+        let secrets = Arc::new(Secrets::from_config(&config));
         Chats::new(
-            &config(self.dir.path()),
+            &config,
             plane,
             ScriptedAdapter::silent(),
-            Remotes::new(GITHUB, None),
+            Remotes::new(GITHUB),
+            secrets,
         )
     }
 }

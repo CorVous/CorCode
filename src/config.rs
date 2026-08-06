@@ -74,10 +74,11 @@ pub struct Config {
     /// The repositories a new chat may be cut from, first one default
     /// (ADR-0005).
     pub repos: Vec<String>,
-    /// Clones the private repositories when set; a GitHub token in all but
-    /// name.
+    /// Bootstraps the GitHub token the private repositories are cloned over,
+    /// until one is written through [`crate::secrets::Secrets`].
     pub github_token: Option<String>,
-    /// Handed to the agent as `ANTHROPIC_API_KEY` (ADR-0001).
+    /// Bootstraps the key the agent is handed as `ANTHROPIC_API_KEY`
+    /// (ADR-0001), until one is written through [`crate::secrets::Secrets`].
     pub anthropic_api_key: Option<String>,
 }
 

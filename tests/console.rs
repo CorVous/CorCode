@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use argon2::password_hash::{PasswordHasher as _, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -20,6 +21,7 @@ use cor_code::config::{
 };
 use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::MemoryPlane;
+use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::store::{ChatStore, Manifest, NewChat};
 
@@ -299,7 +301,8 @@ impl TestApp {
                 &config,
                 MemoryPlane::default(),
                 ScriptedAdapter::silent(),
-                Remotes::new(GITHUB, None),
+                Remotes::new(GITHUB),
+                Arc::new(Secrets::from_config(&config)),
             ),
         )
         .expect("router should build");

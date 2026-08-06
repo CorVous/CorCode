@@ -3,6 +3,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -24,10 +25,24 @@ pub struct MemoryPlane {
     live: Arc<Mutex<HashMap<String, Spawned>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Spawned {
     container: ContainerRef,
     mounts: Mounts,
+    env: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for Spawned {
+    /// The environment a container was handed carries the agent's credentials
+    /// (ADR-0001): which variables it holds is the plane's to say, what they
+    /// are worth is not.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Spawned")
+            .field("container", &self.container)
+            .field("mounts", &self.mounts)
+            .field("env", &self.env.keys())
+            .finish()
+    }
 }
 
 impl ContainerPlane for MemoryPlane {
@@ -36,7 +51,7 @@ impl ContainerPlane for MemoryPlane {
         chat_id: &str,
         workspace_dir: &Path,
         claude_dir: &Path,
-        _env: &BTreeMap<String, String>,
+        env: &BTreeMap<String, String>,
     ) -> Result<ContainerRef, PlaneError> {
         let spawned = Spawned {
             container: ContainerRef::new(chat_id, format!("in-memory-{chat_id}")),
@@ -44,6 +59,7 @@ impl ContainerPlane for MemoryPlane {
                 workspace: workspace_dir.to_path_buf(),
                 claude: claude_dir.to_path_buf(),
             },
+            env: env.clone(),
         };
         match self.live().entry(chat_id.to_owned()) {
             Entry::Occupied(_) => Err(PlaneError::AlreadyLive {
@@ -75,6 +91,13 @@ impl MemoryPlane {
         self.live()
             .get(chat_id)
             .map(|spawned| spawned.mounts.clone())
+    }
+
+    /// What a live chat's container was spawned with, or nothing if the chat
+    /// holds no container.
+    #[must_use]
+    pub fn env_of(&self, chat_id: &str) -> Option<BTreeMap<String, String>> {
+        self.live().get(chat_id).map(|spawned| spawned.env.clone())
     }
 
     fn live(&self) -> MutexGuard<'_, HashMap<String, Spawned>> {
@@ -122,6 +145,38 @@ mod tests {
             plane.list_live().await.expect("liveness should answer"),
             HashSet::from(["01K1TESTCHATID0000000000".to_owned()])
         );
+    }
+
+    /// What a container is handed at spawn is the whole of what the agent in
+    /// it can read (ADR-0001), so a test of the credentials it runs on has
+    /// nowhere else to look.
+    #[tokio::test]
+    async fn a_spawn_records_the_environment_it_was_handed() {
+        let plane = MemoryPlane::default();
+
+        spawn(&plane, "01K1TESTCHATID0000000000").await;
+
+        assert_eq!(
+            plane.env_of("01K1TESTCHATID0000000000"),
+            Some(BTreeMap::from([(
+                "ANTHROPIC_API_KEY".to_owned(),
+                "secret".to_owned()
+            )]))
+        );
+        assert_eq!(plane.env_of("01K1NOSUCHCHAT0000000000"), None);
+    }
+
+    /// The environment carries the agent's credentials, so a plane that is
+    /// printed says which variables a container holds and never what they are.
+    #[tokio::test]
+    async fn a_plane_never_says_what_a_container_was_handed() {
+        let plane = MemoryPlane::default();
+        spawn(&plane, "01K1TESTCHATID0000000000").await;
+
+        let said = format!("{plane:?}");
+
+        assert!(said.contains("ANTHROPIC_API_KEY"));
+        assert!(!said.contains("secret"), "the key leaked: {said}");
     }
 
     #[tokio::test]
