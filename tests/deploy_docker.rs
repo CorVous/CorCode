@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use cor_code::auth::password::verify_password;
+use cor_code::auth::password::{hash_password, verify_password};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
@@ -102,7 +102,10 @@ impl Container {
                 "--env",
                 "CORCODE_USERNAME=cassidy",
                 "--env",
-                &format!("CORCODE_PASSWORD_HASH={}", hashed(docker)),
+                &format!(
+                    "CORCODE_PASSWORD_HASH={}",
+                    hash_password(PASSWORD).expect("a password should hash")
+                ),
                 "--env",
                 "CORCODE_WORKSPACE_IMAGE=ghcr.io/corvous/corcode-workspace:2026-08-05",
                 "--env",
@@ -146,16 +149,6 @@ fn build_image(docker: &str) {
         "the core image would not build: {}",
         String::from_utf8_lossy(&built.stderr)
     );
-}
-
-fn hashed(docker: &str) -> String {
-    piped(
-        docker,
-        &["run", "--rm", "--interactive", IMAGE, "hash-password"],
-        PASSWORD,
-    )
-    .trim_end()
-    .to_owned()
 }
 
 fn published_port(docker: &str) -> u16 {

@@ -24,8 +24,16 @@ fn read_password() -> io::Result<String> {
     }
 }
 
+/// The first line on the pipe, whether or not the writer ended it: a pipe
+/// that closes is as much a terminator as a newline, and `printf` is as good
+/// a way to feed one as `echo`.
 fn read_piped(input: &mut impl BufRead) -> io::Result<String> {
-    rpassword::read_password_from_bufread(input)
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    Ok(line
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_owned())
 }
 
 fn print_hash(password: &str, output: &mut impl Write) -> Result<()> {
