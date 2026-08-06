@@ -12,7 +12,7 @@ use ureq::http::header::{ACCEPT, AUTHORIZATION, HeaderValue, InvalidHeaderValue,
 use ureq::http::{Request, Response};
 use ureq::{Agent, Body};
 
-use crate::secrets::Secret;
+use crate::secrets::{AnthropicCredential, Secret};
 
 use super::{Verified, VerifyClient};
 
@@ -38,6 +38,16 @@ const REPO_SCOPE: &str = "repo";
 
 /// The cheapest authenticated call the Anthropic API has.
 const ANTHROPIC_MODELS: &str = "https://api.anthropic.com/v1/models";
+
+/// The API version every Anthropic call is made against.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The beta a subscription token is authenticated under. Taken from the SDK
+/// the agent itself runs on, which appends exactly this to every request it
+/// makes under token auth: `OAUTH_API_BETA_HEADER` in
+/// `@anthropic-ai/sdk/src/lib/credentials/types.ts`, applied in
+/// `client.ts::prepareRequest`.
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// Checks credentials against the real services.
 #[derive(Clone)]
@@ -111,11 +121,18 @@ fn request(secret: Secret, value: &str) -> Result<Request<()>, ureq::http::Error
             .header("x-github-api-version", "2022-11-28")
             .header(AUTHORIZATION, credential(&format!("Bearer {value}"))?)
             .body(()),
-        Secret::AnthropicKey => Request::get(ANTHROPIC_MODELS)
-            .header(USER_AGENT, ASKING)
-            .header("anthropic-version", "2023-06-01")
-            .header("x-api-key", credential(value)?)
-            .body(()),
+        Secret::AnthropicKey => {
+            let asking = Request::get(ANTHROPIC_MODELS)
+                .header(USER_AGENT, ASKING)
+                .header("anthropic-version", ANTHROPIC_VERSION);
+            match AnthropicCredential::of(value) {
+                AnthropicCredential::ApiKey => asking.header("x-api-key", credential(value)?),
+                AnthropicCredential::OauthToken => asking
+                    .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+                    .header(AUTHORIZATION, credential(&format!("Bearer {value}"))?),
+            }
+            .body(())
+        }
     }
 }
 
