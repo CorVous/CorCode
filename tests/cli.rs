@@ -50,6 +50,26 @@ fn cli_version_subcommand() {
 }
 
 #[test]
+fn cli_hash_password_subcommand_reads_the_password_off_stdin() {
+    const PASSWORD: &str = "correct horse battery staple";
+
+    let printed = cli()
+        .arg("hash-password")
+        .write_stdin(format!("{PASSWORD}\n"))
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let printed = String::from_utf8(printed).expect("the hash should be text");
+    assert!(
+        cor_code::auth::password::verify_password(printed.trim_end(), PASSWORD),
+        "the gate would refuse the hash the CLI printed: {printed}"
+    );
+}
+
+#[test]
 fn cli_verbose_flag_enables_info() {
     cli()
         .args(["-v", "version"])

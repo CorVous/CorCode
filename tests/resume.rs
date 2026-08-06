@@ -718,6 +718,7 @@ fn says(cwd: &Path, args: &[&str]) -> String {
 /// first and the tests have something to wake.
 fn test_config(data_dir: PathBuf) -> Config {
     Config {
+        host_data_dir: data_dir.clone(),
         data_dir,
         bind_addr: "127.0.0.1:0".parse().expect("valid address"),
         username: "cassidy".to_owned(),

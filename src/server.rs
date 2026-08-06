@@ -11,6 +11,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
+use chrono::Utc;
 use log::error;
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -67,6 +68,7 @@ where
 {
     Router::new()
         .route("/", get(console))
+        .route(ui::STATUS_PATH, get(status))
         .route(ui::CHATS_PATH, get(chat_list).post(create_chat))
         .route(&ui::chat_path(CHAT_ID), get(chat_view))
         .route(&ui::chat_events_path(CHAT_ID), get(chat_events))
@@ -107,13 +109,23 @@ where
     T: AcpTransport + Send + Sync + 'static,
 {
     match chats.survey().await {
-        Ok(survey) => Html(ui::console_page(
-            &survey,
-            chats.workspace_image(),
-            chats.repos(),
-            chats.warm_pool(),
-        ))
-        .into_response(),
+        Ok(survey) => {
+            let status = chats.status_of(&survey, Utc::now());
+            Html(ui::console_page(&survey, &status, chats.repos())).into_response()
+        }
+        Err(failure) => broken_invariant(&failure),
+    }
+}
+
+/// The status line alone, for htmx to poll while the console is open
+/// (ADR-0008).
+async fn status<P, T>(State(chats): State<Arc<Chats<P, T>>>) -> Response
+where
+    P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
+    T: AcpTransport + Send + Sync + 'static,
+{
+    match chats.status(Utc::now()).await {
+        Ok(status) => Html(ui::status_picture(&status)).into_response(),
         Err(failure) => broken_invariant(&failure),
     }
 }

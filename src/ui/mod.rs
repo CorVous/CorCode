@@ -7,13 +7,21 @@ mod escape;
 use crate::store::{Manifest, RuntimeStatus};
 
 pub use chat::{chat_page, event_log};
-pub use console::{chat_list, console_page};
+pub use console::{chat_list, console_page, status_line, status_picture};
 
 use escape::text;
 
 /// The chat list, both as a section of the console and as a fragment htmx
 /// swaps in on its own.
 pub const CHATS_PATH: &str = "/chats";
+
+/// The status line, both as the head of the console and as the fragment htmx
+/// polls to keep it true (ADR-0008).
+///
+/// Every poll costs one scan of `chats/` and one liveness call to the daemon,
+/// per console tab left open. At a household's handful of chats and tabs that
+/// is nothing; it is the reason the interval is seconds rather than sub-second.
+pub const STATUS_PATH: &str = "/status";
 
 /// Where the vendored htmx bundle is served from; nothing reaches a CDN.
 pub const HTMX_PATH: &str = "/assets/htmx.js";
@@ -90,6 +98,8 @@ fn last_push(manifest: &Manifest) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use crate::status::Status;
+
     use super::*;
 
     /// ADR-0008 budgets styling at "on the order of a dozen lines". Past this
@@ -134,9 +144,14 @@ mod tests {
     fn the_console_styles_itself_only_from_the_stylesheet() {
         assert_styling_is_only_the_stylesheet(&console_page(
             &[],
-            "ghcr.io/corvous/x:2026-08-05",
+            &Status {
+                pool: Vec::new(),
+                warm_pool: 2,
+                parked: 0,
+                image: "ghcr.io/corvous/x:2026-08-05".to_owned(),
+                sweep: None,
+            },
             &["CorVous/CorCode".to_owned()],
-            2,
         ));
     }
 

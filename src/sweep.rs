@@ -5,13 +5,24 @@ use std::collections::HashSet;
 use std::hash::BuildHasher;
 
 /// What one pass over `workspaces/` found.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Sweep {
     /// Working trees no open chat claims, which are the sweep's to delete.
     pub orphaned: Vec<String>,
     /// Orphans whose container is somehow still up. Deleting one would pull
     /// the floor out from under a running agent, so the sweep says so and
     /// leaves it.
+    pub held: Vec<String>,
+}
+
+/// What one pass came to, once the deletions it planned have been tried.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Swept {
+    /// Working trees that are gone.
+    pub removed: Vec<String>,
+    /// Working trees the sweep meant to delete and could not.
+    pub stubborn: Vec<String>,
+    /// Orphans left alone because a container still holds them.
     pub held: Vec<String>,
 }
 

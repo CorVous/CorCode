@@ -1,0 +1,100 @@
+//! `hash-password` subcommand — turn a password into the hash
+//! `CORCODE_PASSWORD_HASH` wants (ADR-0003).
+
+use std::io::{self, BufRead, IsTerminal as _, Write};
+
+use anyhow::{Context as _, Result, bail};
+
+use crate::auth::password::hash_password;
+
+/// Hash the password on stdin, where no shell history and no process listing
+/// can hold it.
+pub fn run() -> Result<()> {
+    let typed = read_password().context("the password could not be read from stdin")?;
+    print_hash(&typed, &mut io::stdout())
+}
+
+/// Typed at a terminal the password does not echo; piped in, it is one line
+/// like any other input, which is how a script or a test feeds it.
+fn read_password() -> io::Result<String> {
+    if io::stdin().is_terminal() {
+        rpassword::read_password()
+    } else {
+        read_piped(&mut io::stdin().lock())
+    }
+}
+
+/// The first line on the pipe, whether or not the writer ended it: a pipe
+/// that closes is as much a terminator as a newline, and `printf` is as good
+/// a way to feed one as `echo`.
+fn read_piped(input: &mut impl BufRead) -> io::Result<String> {
+    let mut line = String::new();
+    input.read_line(&mut line)?;
+    Ok(line
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_owned())
+}
+
+fn print_hash(password: &str, output: &mut impl Write) -> Result<()> {
+    if password.is_empty() {
+        bail!("no password arrived on stdin");
+    }
+    writeln!(output, "{}", hash_password(password)?)
+        .context("the hash could not be written to stdout")
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::auth::password::verify_password;
+
+    use super::*;
+
+    const PASSWORD: &str = "correct horse battery staple";
+
+    fn hashed(password: &str) -> String {
+        let mut written = Vec::new();
+        print_hash(password, &mut written).expect("a password should hash");
+        String::from_utf8(written).expect("the hash should be text")
+    }
+
+    #[test]
+    fn the_password_is_printed_as_a_hash_the_gate_accepts() {
+        let printed = hashed(PASSWORD);
+
+        assert!(
+            verify_password(printed.trim_end(), PASSWORD),
+            "the gate would refuse this hash: {printed}"
+        );
+        assert!(
+            !printed.contains(PASSWORD),
+            "the password itself was printed: {printed}"
+        );
+    }
+
+    #[test]
+    fn a_pipe_that_closes_ends_the_password_as_surely_as_a_newline() {
+        let read = read_piped(&mut PASSWORD.as_bytes()).expect("a closed pipe should end the line");
+
+        assert_eq!(read, PASSWORD);
+    }
+
+    #[test]
+    fn a_password_piped_in_as_a_whole_line_arrives_without_its_newline() {
+        let line = format!("{PASSWORD}\n");
+
+        let read = read_piped(&mut line.as_bytes()).expect("a whole line should read");
+
+        assert_eq!(read, PASSWORD);
+    }
+
+    #[test]
+    fn stdin_with_no_password_on_it_is_refused_rather_than_hashed() {
+        let failure = print_hash("", &mut Vec::new()).expect_err("nothing should not hash");
+
+        assert!(
+            format!("{failure:#}").contains("password"),
+            "the refusal does not say what was missing: {failure:#}"
+        );
+    }
+}

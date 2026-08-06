@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use log::{error, info, warn};
 use serde_json::json;
 use thiserror::Error;
@@ -16,10 +16,12 @@ use crate::git::{self, Remotes};
 use crate::plane::{ContainerPlane, container_name};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
+use crate::status::{Slot, Status};
 use crate::store::{
-    ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, runtime_status,
+    ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, RuntimeStatus,
+    runtime_status,
 };
-use crate::sweep::{self, Sweep};
+use crate::sweep::{self, Sweep, Swept};
 use crate::ui;
 
 /// The variable the agent reads its Anthropic credentials from (ADR-0001).
@@ -153,6 +155,10 @@ type ParkingLock = tokio::sync::Mutex<()>;
 /// one chat, and none of which a sweep or a capping may cut across.
 type Waking = std::sync::Mutex<HashSet<String>>;
 
+/// What the last orphan sweep came to, kept for the status line to read
+/// (ADR-0008). Nothing until one has run.
+type LastSweep = std::sync::Mutex<Option<Swept>>;
+
 /// One chat's wake, given to whoever asked for it first and given back when
 /// the wake is over however it ends.
 struct Claim<'a> {
@@ -197,6 +203,7 @@ pub struct Chats<P, T: AcpTransport> {
     warm_pool: usize,
     parking: ParkingLock,
     waking: Waking,
+    last_sweep: LastSweep,
 }
 
 impl<P, T: AcpTransport + Sync> Chats<P, T> {
@@ -204,7 +211,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
     /// `transport` reaches, from the repositories `remotes` holds.
     pub fn new(config: &Config, plane: P, transport: T, remotes: Remotes) -> Self {
         Self {
-            store: ChatStore::new(&config.data_dir),
+            store: ChatStore::mounted(&config.data_dir, &config.host_data_dir),
             plane,
             adapter: Adapter::new(transport),
             connections: Connections::default(),
@@ -215,6 +222,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
             warm_pool: config.warm_pool,
             parking: ParkingLock::default(),
             waking: Waking::default(),
+            last_sweep: LastSweep::default(),
         }
     }
 }
@@ -224,16 +232,37 @@ where
     P: ContainerPlane + ContainerLiveness + Sync,
     T: AcpTransport + Sync,
 {
-    /// The pinned image every chat runs (ADR-0004).
-    #[must_use]
-    pub fn workspace_image(&self) -> &str {
-        &self.workspace_image
+    /// The container picture as of `now`, over one pass of the dataset
+    /// (ADR-0008).
+    pub async fn status(&self, now: DateTime<Utc>) -> Result<Status> {
+        Ok(self.status_of(&self.survey().await?, now))
     }
 
-    /// How many containers this deployment keeps warm (ADR-0002 rule 2).
+    /// The same picture read off a survey the caller already has, so that
+    /// rendering the whole console costs one pass and not two.
     #[must_use]
-    pub const fn warm_pool(&self) -> usize {
-        self.warm_pool
+    pub fn status_of(&self, chats: &[ui::Chat], now: DateTime<Utc>) -> Status {
+        Status {
+            pool: chats
+                .iter()
+                .filter(|(_, status)| *status == RuntimeStatus::Live)
+                .map(|(manifest, _)| Slot {
+                    title: manifest.title.clone(),
+                    idle: now - manifest.last_active_at,
+                })
+                .collect(),
+            warm_pool: self.warm_pool,
+            parked: chats
+                .iter()
+                .filter(|(_, status)| *status == RuntimeStatus::Parked)
+                .count(),
+            image: self.workspace_image.clone(),
+            sweep: self
+                .last_sweep
+                .lock()
+                .expect("no holder of the lock panics")
+                .clone(),
+        }
     }
 
     /// The repositories a new chat may be cut from, first one default.
@@ -447,12 +476,26 @@ where
         for chat_id in &swept.held {
             error!("{chat_id} is not open but its container is up: its workspace is left alone");
         }
-        for chat_id in &swept.orphaned {
-            match self.store.remove_workspace(chat_id) {
-                Ok(()) => info!("{chat_id} left a workspace no chat claims: removed"),
-                Err(stubborn) => warn!("{chat_id} left a workspace that will not go: {stubborn:#}"),
+        let mut outcome = Swept {
+            held: swept.held,
+            ..Swept::default()
+        };
+        for chat_id in swept.orphaned {
+            match self.store.remove_workspace(&chat_id) {
+                Ok(()) => {
+                    info!("{chat_id} left a workspace no chat claims: removed");
+                    outcome.removed.push(chat_id);
+                }
+                Err(stubborn) => {
+                    warn!("{chat_id} left a workspace that will not go: {stubborn:#}");
+                    outcome.stubborn.push(chat_id);
+                }
             }
         }
+        *self
+            .last_sweep
+            .lock()
+            .expect("no holder of the lock panics") = Some(outcome);
     }
 
     /// Which working trees on disk no open chat claims, and which of those a
@@ -834,8 +877,8 @@ where
             .plane
             .spawn(
                 chat_id,
-                &self.store.workspace_dir(chat_id),
-                &self.store.claude_dir(chat_id),
+                &self.store.host_workspace_dir(chat_id),
+                &self.store.host_claude_dir(chat_id),
                 &env,
             )
             .await?

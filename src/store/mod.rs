@@ -32,30 +32,56 @@ const EVENTS_FILE: &str = "events.jsonl";
 /// Reader and writer of every chat under one dataset root.
 pub struct ChatStore {
     root: PathBuf,
+    host_root: PathBuf,
 }
 
 impl ChatStore {
-    /// Serve the dataset root given by `CORCODE_DATA_DIR`.
+    /// Serve a dataset root the core and the daemon call by the same name.
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        Self {
+            host_root: root.clone(),
+            root,
+        }
+    }
+
+    /// Serve a dataset the core reads through `root` while the sibling daemon
+    /// only knows it as `host_root` (ADR-0001).
+    pub fn mounted(root: impl Into<PathBuf>, host_root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            host_root: host_root.into(),
+        }
     }
 
     /// Durable home of a chat: manifest, event log, agent memory.
     #[must_use]
     pub fn chat_dir(&self, chat_id: &str) -> PathBuf {
-        self.root.join(CHATS_DIR).join(chat_id)
+        chat_dir_under(&self.root, chat_id)
     }
 
     /// Agent memory, mounted as `CLAUDE_CONFIG_DIR` (ADR-0004).
     #[must_use]
     pub fn claude_dir(&self, chat_id: &str) -> PathBuf {
-        self.chat_dir(chat_id).join(CLAUDE_DIR)
+        claude_dir_under(&self.root, chat_id)
     }
 
     /// Working tree of an open chat; exists iff the chat is open (ADR-0002).
     #[must_use]
     pub fn workspace_dir(&self, chat_id: &str) -> PathBuf {
-        self.root.join(WORKSPACES_DIR).join(chat_id)
+        workspace_dir_under(&self.root, chat_id)
+    }
+
+    /// The agent memory to bind into a container, named as the daemon knows it.
+    #[must_use]
+    pub fn host_claude_dir(&self, chat_id: &str) -> PathBuf {
+        claude_dir_under(&self.host_root, chat_id)
+    }
+
+    /// The working tree to bind into a container, named as the daemon knows it.
+    #[must_use]
+    pub fn host_workspace_dir(&self, chat_id: &str) -> PathBuf {
+        workspace_dir_under(&self.host_root, chat_id)
     }
 
     /// Make the dataset ready to hold chats. The root itself is never
@@ -190,6 +216,18 @@ impl ChatStore {
     fn events_path(&self, chat_id: &str) -> PathBuf {
         self.chat_dir(chat_id).join(EVENTS_FILE)
     }
+}
+
+fn chat_dir_under(root: &Path, chat_id: &str) -> PathBuf {
+    root.join(CHATS_DIR).join(chat_id)
+}
+
+fn claude_dir_under(root: &Path, chat_id: &str) -> PathBuf {
+    chat_dir_under(root, chat_id).join(CLAUDE_DIR)
+}
+
+fn workspace_dir_under(root: &Path, chat_id: &str) -> PathBuf {
+    root.join(WORKSPACES_DIR).join(chat_id)
 }
 
 /// Publish a manifest into `chat_dir`, replacing any older one wholesale.
@@ -412,6 +450,45 @@ mod tests {
             .collect();
 
         assert_eq!(titles, ["fresh", "middling", "stale"]);
+    }
+
+    /// A containerised core reads the dataset through a mount of its own,
+    /// but the sibling daemon it asks for containers only knows the host's
+    /// name for the same directories (ADR-0001).
+    #[test]
+    fn a_mounted_dataset_reads_through_its_own_path_and_binds_the_hosts() {
+        let store = ChatStore::mounted("/data", "/mnt/tank/corcode");
+
+        assert_eq!(
+            store.workspace_dir("01K1CHAT"),
+            Path::new("/data/workspaces/01K1CHAT")
+        );
+        assert_eq!(
+            store.claude_dir("01K1CHAT"),
+            Path::new("/data/chats/01K1CHAT/claude")
+        );
+        assert_eq!(
+            store.host_workspace_dir("01K1CHAT"),
+            Path::new("/mnt/tank/corcode/workspaces/01K1CHAT")
+        );
+        assert_eq!(
+            store.host_claude_dir("01K1CHAT"),
+            Path::new("/mnt/tank/corcode/chats/01K1CHAT/claude")
+        );
+    }
+
+    #[test]
+    fn a_dataset_the_core_reads_at_its_own_name_binds_that_same_name() {
+        let store = ChatStore::new("/mnt/tank/corcode");
+
+        assert_eq!(
+            store.host_workspace_dir("01K1CHAT"),
+            store.workspace_dir("01K1CHAT")
+        );
+        assert_eq!(
+            store.host_claude_dir("01K1CHAT"),
+            store.claude_dir("01K1CHAT")
+        );
     }
 
     #[test]

@@ -2,16 +2,24 @@
 
 use std::fmt::Write as _;
 
-use crate::git::chat_branch;
-use crate::store::RuntimeStatus;
+use chrono::TimeDelta;
 
-use super::{CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, last_push, page, status_word, text};
+use crate::git::chat_branch;
+use crate::status::{Slot, Status};
+use crate::store::RuntimeStatus;
+use crate::sweep::Swept;
+
+use super::{
+    CHATS_PATH, Chat, HTMX_PATH, LOGOUT_PATH, STATUS_PATH, last_push, page, status_word, text,
+};
 
 /// The branch a chat is cut from when the operator says nothing else.
 const DEFAULT_BASE_BRANCH: &str = "main";
 
-/// Orphan-sweep result, held here until a sweep actually runs (ADR-0008).
-const SWEEP: &str = "ok";
+/// How often the console asks for the container picture again. Slots and
+/// idle times move with the turns other pages are taking, so the line has to
+/// be polled to stay true; nothing here is worth the chat log's cadence.
+const POLL_SECONDS: u32 = 5;
 
 /// The groups the chat list is stacked in, top to bottom (ADR-0002).
 const GROUPS: [RuntimeStatus; 3] = [
@@ -23,12 +31,7 @@ const GROUPS: [RuntimeStatus; 3] = [
 /// The whole console: status line, the collapsed new-chat form over the
 /// repositories this deployment offers, and the grouped chat list.
 #[must_use]
-pub fn console_page(
-    chats: &[Chat],
-    workspace_image: &str,
-    repos: &[String],
-    warm_pool: usize,
-) -> String {
+pub fn console_page(chats: &[Chat], status: &Status, repos: &[String]) -> String {
     page(
         "CorCode",
         &format!(
@@ -36,7 +39,7 @@ pub fn console_page(
              <form method=\"post\" action=\"{LOGOUT_PATH}\">\
              <p><button type=\"submit\">Log out everywhere</button></p></form>\
              <script src=\"{HTMX_PATH}\" defer></script>",
-            status_line(chats, workspace_image, warm_pool),
+            status_line(status),
             new_chat_form(repos),
             chat_list(chats),
         ),
@@ -64,21 +67,115 @@ pub fn chat_list(chats: &[Chat]) -> String {
     list
 }
 
-/// The container picture in one line, expanding in place (ADR-0008).
-fn status_line(chats: &[Chat], workspace_image: &str, warm_pool: usize) -> String {
-    let live = count(chats, RuntimeStatus::Live);
-    let parked = count(chats, RuntimeStatus::Parked);
+/// The container picture, expanding in place and polling itself (ADR-0008).
+///
+/// Only the inside is swapped: the `<details>` holds whether the reader has
+/// it open, and a poll landing mid-read must not close it.
+#[must_use]
+pub fn status_line(status: &Status) -> String {
     format!(
-        "<details>\
-         <summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {SWEEP}</summary>\
+        "<details id=\"status\" hx-get=\"{STATUS_PATH}\" hx-trigger=\"every {POLL_SECONDS}s\" \
+         hx-target=\"this\" hx-swap=\"innerHTML\">{}</details>",
+        status_picture(status),
+    )
+}
+
+/// The inside of the status line, which is all a poll replaces.
+#[must_use]
+pub fn status_picture(status: &Status) -> String {
+    let Status {
+        pool,
+        warm_pool,
+        parked,
+        image,
+        sweep,
+    } = status;
+    let live = pool.len();
+    format!(
+        "<summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {}</summary>\
          <dl><dt>Pool</dt><dd>{}</dd>\
          <dt>Parked</dt><dd>{parked} chats — workspace kept, container torn down</dd>\
          <dt>Image</dt><dd>{}</dd>\
-         <dt>Sweep</dt><dd>{SWEEP}</dd></dl></details>",
-        text(image_tag(workspace_image)),
-        pool(chats),
-        text(workspace_image),
+         <dt>Sweep</dt><dd>{}</dd></dl>",
+        text(image_tag(image)),
+        swept_in_a_word(sweep.as_ref()),
+        slots(pool),
+        text(image),
+        swept_in_full(sweep.as_ref()),
     )
+}
+
+/// Who holds a warm-pool slot right now, and how long since each of them
+/// last took a turn.
+fn slots(pool: &[Slot]) -> String {
+    if pool.is_empty() {
+        return "no containers running".to_owned();
+    }
+    pool.iter()
+        .map(|slot| format!("{} · {}", text(&slot.title), idle_for(slot.idle)))
+        .collect::<Vec<String>>()
+        .join("<br>")
+}
+
+/// How long a chat has been quiet, in the largest unit it fills. A clock
+/// that slipped backwards reads as no time at all rather than as a chat from
+/// the future.
+fn idle_for(idle: TimeDelta) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+
+    let seconds = idle.num_seconds().max(0);
+    if seconds < MINUTE {
+        format!("{seconds}s")
+    } else if seconds < HOUR {
+        format!("{}m", seconds / MINUTE)
+    } else if seconds < DAY {
+        format!("{}h", seconds / HOUR)
+    } else {
+        format!("{}d", seconds / DAY)
+    }
+}
+
+/// What the last sweep came to, short enough for the summary line
+/// (ADR-0002 rule 4). A working tree that would not go is the news, and it
+/// outranks the ones that went.
+fn swept_in_a_word(sweep: Option<&Swept>) -> String {
+    let Some(sweep) = sweep else {
+        return "not yet run".to_owned();
+    };
+    if !sweep.stubborn.is_empty() {
+        format!("failed to remove {}", sweep.stubborn.len())
+    } else if sweep.removed.is_empty() {
+        "ok".to_owned()
+    } else {
+        format!("removed {}", sweep.removed.len())
+    }
+}
+
+/// The same sweep with the chat ids spelled out, for the expanded picture.
+/// A working tree an orphan's container is still holding was left alone, and
+/// only this line says which (ADR-0002 rule 4).
+fn swept_in_full(sweep: Option<&Swept>) -> String {
+    let Some(sweep) = sweep else {
+        return "not yet run".to_owned();
+    };
+    let mut told = swept_in_a_word(Some(sweep));
+    for (chat_ids, what_became_of_them) in [
+        (&sweep.stubborn, "would not go"),
+        (&sweep.removed, "removed"),
+        (&sweep.held, "left alone while their containers are up"),
+    ] {
+        if !chat_ids.is_empty() {
+            write!(
+                told,
+                ", {what_became_of_them} ({})",
+                text(&chat_ids.join(", "))
+            )
+            .expect("writing to a string cannot fail");
+        }
+    }
+    told
 }
 
 /// The new chat this form cuts. The preview slugifies as you type so it reads
@@ -140,22 +237,6 @@ fn row((manifest, _): &Chat) -> String {
         text(&manifest.branch),
         text(last_push(manifest)),
     )
-}
-
-fn count(chats: &[Chat], status: RuntimeStatus) -> usize {
-    in_group(chats, status).count()
-}
-
-/// Who holds a warm-pool slot right now.
-fn pool(chats: &[Chat]) -> String {
-    let holders: Vec<String> = in_group(chats, RuntimeStatus::Live)
-        .map(|(manifest, _)| text(&manifest.title).to_string())
-        .collect();
-    if holders.is_empty() {
-        "no containers running".to_owned()
-    } else {
-        holders.join("<br>")
-    }
 }
 
 /// The dated half of a pinned image reference (ADR-0004).
@@ -279,7 +360,7 @@ mod tests {
 
     #[test]
     fn an_empty_dataset_still_renders_every_group() {
-        let rendered = console_page(&[], IMAGE, &repos(), POOL);
+        let rendered = console_page(&[], &status(), &repos());
 
         for status in [
             RuntimeStatus::Live,
@@ -295,21 +376,163 @@ mod tests {
 
     #[test]
     fn the_status_line_reports_the_configured_pool_size_the_parked_count_and_the_image_tag() {
-        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
+        let rendered = console_page(&every_state(), &status(), &repos());
 
         assert!(
             rendered.contains("<summary>pool 1/3 · parked 1 · img 2026-08-05 · sweep ok</summary>"),
             "the status line does not read as ADR-0008 asks: {rendered}"
         );
         assert!(
-            rendered.contains("<details><summary>pool"),
+            rendered.contains("<summary>pool"),
             "the status line does not expand in place: {rendered}"
         );
     }
 
     #[test]
+    fn the_status_line_polls_itself_while_the_console_is_open() {
+        let rendered = status_line(&status());
+
+        assert!(
+            rendered.starts_with("<details id=\"status\""),
+            "the status line is not one element htmx can poll: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("hx-get=\"{STATUS_PATH}\""))
+                && rendered.contains("hx-trigger=\"every 5s\""),
+            "the status line does not poll itself: {rendered}"
+        );
+        assert!(
+            rendered.contains(&status_picture(&status())),
+            "the console and the polled fragment render the status differently"
+        );
+        assert!(
+            console_page(&every_state(), &status(), &repos()).contains(&rendered),
+            "the console renders a status line of its own"
+        );
+    }
+
+    #[test]
+    fn the_expanded_picture_names_every_slot_the_parked_count_the_image_and_the_sweep() {
+        let fragment = status_line(&Status {
+            pool: vec![
+                slot("running", TimeDelta::minutes(3)),
+                slot("waiting", TimeDelta::hours(2)),
+            ],
+            sweep: Some(Swept {
+                removed: vec!["01K1ORPHAN".to_owned()],
+                ..Swept::default()
+            }),
+            ..status()
+        });
+
+        assert!(
+            fragment.contains("running · 3m") && fragment.contains("waiting · 2h"),
+            "the slots do not carry their idle times: {fragment}"
+        );
+        assert!(
+            fragment.contains(IMAGE),
+            "the pinned image is missing: {fragment}"
+        );
+        assert!(
+            fragment.contains("01K1ORPHAN"),
+            "the sweep does not name what it removed: {fragment}"
+        );
+    }
+
+    /// A poll lands every few seconds, and one landing while the picture is
+    /// open must not close it: the element the reader opened is the one thing
+    /// the swap leaves alone.
+    #[test]
+    fn an_expanded_picture_survives_the_poll_that_lands_while_it_is_read() {
+        let rendered = status_line(&status());
+
+        assert!(
+            rendered.contains("hx-target=\"this\"") && rendered.contains("hx-swap=\"innerHTML\""),
+            "the poll replaces the element holding the open state: {rendered}"
+        );
+        assert!(
+            !status_picture(&status()).contains("<details"),
+            "the polled fragment brings its own details element, closed"
+        );
+    }
+
+    /// A workspace the sweep meant to delete and could not is not a sweep
+    /// that went fine, and the operator has to be able to tell them apart.
+    #[test]
+    fn a_workspace_that_would_not_go_reads_apart_from_one_that_went() {
+        let fragment = status_line(&Status {
+            sweep: Some(Swept {
+                removed: vec!["01K1GONE".to_owned()],
+                stubborn: vec!["01K1STUCK".to_owned()],
+                held: Vec::new(),
+            }),
+            ..status()
+        });
+
+        assert!(
+            fragment.contains("sweep failed to remove 1"),
+            "a failed removal reads as a clean sweep: {fragment}"
+        );
+        assert!(
+            fragment.contains("would not go (01K1STUCK)")
+                && fragment.contains("removed (01K1GONE)"),
+            "the expanded picture does not say which was which: {fragment}"
+        );
+    }
+
+    #[test]
+    fn an_empty_pool_says_so_rather_than_showing_nothing() {
+        let fragment = status_line(&Status {
+            pool: Vec::new(),
+            ..status()
+        });
+
+        assert!(
+            fragment.contains("no containers running"),
+            "an empty pool renders as a blank: {fragment}"
+        );
+    }
+
+    #[test]
+    fn an_idle_time_reads_in_the_largest_unit_it_fills() {
+        for (idle, reads) in [
+            (TimeDelta::seconds(4), "4s"),
+            (TimeDelta::seconds(59), "59s"),
+            (TimeDelta::minutes(3), "3m"),
+            (TimeDelta::hours(2), "2h"),
+            (TimeDelta::hours(26), "1d"),
+        ] {
+            assert_eq!(idle_for(idle), reads);
+        }
+    }
+
+    /// A clock that has slipped backwards is not a chat from the future.
+    #[test]
+    fn an_idle_time_that_ran_backwards_reads_as_no_time_at_all() {
+        assert_eq!(idle_for(TimeDelta::seconds(-30)), "0s");
+    }
+
+    fn slot(title: &str, idle: TimeDelta) -> Slot {
+        Slot {
+            title: title.to_owned(),
+            idle,
+        }
+    }
+
+    /// A pool holding the one live chat of [`every_state`], swept clean.
+    fn status() -> Status {
+        Status {
+            pool: vec![slot("running", TimeDelta::zero())],
+            warm_pool: POOL,
+            parked: 1,
+            image: IMAGE.to_owned(),
+            sweep: Some(Swept::default()),
+        }
+    }
+
+    #[test]
     fn the_new_chat_form_offers_the_repositories_this_deployment_was_given() {
-        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
+        let rendered = console_page(&every_state(), &status(), &repos());
 
         assert!(
             rendered
@@ -324,7 +547,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_previews_the_branch_it_would_cut() {
-        let rendered = console_page(&[], IMAGE, &repos(), POOL);
+        let rendered = console_page(&[], &status(), &repos());
         let today = Utc::now().format("%Y-%m-%d");
 
         assert!(
@@ -335,7 +558,7 @@ mod tests {
 
     #[test]
     fn the_branch_preview_slugifies_what_you_type() {
-        let rendered = console_page(&[], IMAGE, &repos(), POOL);
+        let rendered = console_page(&[], &status(), &repos());
 
         assert!(
             rendered.contains("toLowerCase()") && rendered.contains("[^a-z0-9]+"),
@@ -345,7 +568,7 @@ mod tests {
 
     #[test]
     fn the_new_chat_form_posts_itself_to_the_chats_path() {
-        let rendered = console_page(&every_state(), IMAGE, &repos(), POOL);
+        let rendered = console_page(&every_state(), &status(), &repos());
 
         assert!(
             rendered.contains(&format!("<form method=\"post\" action=\"{CHATS_PATH}\">")),
@@ -359,7 +582,7 @@ mod tests {
 
     #[test]
     fn the_chat_list_refreshes_itself_through_htmx() {
-        let rendered = console_page(&[], IMAGE, &repos(), POOL);
+        let rendered = console_page(&[], &status(), &repos());
 
         assert!(
             rendered.contains(&format!("src=\"{}\"", super::super::HTMX_PATH)),

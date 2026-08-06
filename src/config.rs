@@ -48,8 +48,13 @@ impl fmt::Debug for RegistryCredentials {
 /// Everything the core needs from its deployment environment.
 #[derive(Clone)]
 pub struct Config {
-    /// Root of the NAS dataset holding chats and workspaces (ADR-0006).
+    /// Root of the NAS dataset holding chats and workspaces (ADR-0006), as
+    /// this process reads it.
     pub data_dir: PathBuf,
+    /// The same dataset root under the name the Docker daemon knows, which
+    /// differs from `data_dir` whenever the core is itself in a container
+    /// (ADR-0001).
+    pub host_data_dir: PathBuf,
     /// Address the HTTP server binds.
     pub bind_addr: SocketAddr,
     /// The single account's name (ADR-0003).
@@ -89,8 +94,12 @@ impl Config {
     {
         let vars: HashMap<String, String> = vars.into_iter().collect();
         let bind_addr = optional(&vars, "CORCODE_BIND_ADDR").unwrap_or(DEFAULT_BIND_ADDR);
+        let data_dir = required(&vars, "CORCODE_DATA_DIR")?;
         Ok(Self {
-            data_dir: PathBuf::from(required(&vars, "CORCODE_DATA_DIR")?),
+            host_data_dir: PathBuf::from(
+                optional(&vars, "CORCODE_HOST_DATA_DIR").unwrap_or(data_dir),
+            ),
+            data_dir: PathBuf::from(data_dir),
             bind_addr: bind_addr
                 .parse()
                 .with_context(|| format!("CORCODE_BIND_ADDR is not an address: {bind_addr}"))?,
@@ -192,6 +201,7 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("data_dir", &self.data_dir)
+            .field("host_data_dir", &self.host_data_dir)
             .field("bind_addr", &self.bind_addr)
             .field("username", &self.username)
             .field("password_hash", &hidden(&self.password_hash))
@@ -278,6 +288,27 @@ mod tests {
         assert!(
             format!("{error:#}").contains("CORCODE_REPOS"),
             "error should name the missing variable, got: {error:#}"
+        );
+    }
+
+    /// A core in a container reads the dataset through its own mount, but
+    /// the sibling daemon binds the host's name for it (ADR-0001).
+    #[test]
+    fn the_host_side_dataset_root_defaults_to_the_one_the_core_reads() {
+        let on_the_host =
+            Config::from_vars(required_vars()).expect("an uncontainerised core should load");
+        let containerised = with(&[
+            ("CORCODE_DATA_DIR", "/data"),
+            ("CORCODE_HOST_DATA_DIR", "/mnt/tank/corcode"),
+        ])
+        .expect("a containerised core should load");
+
+        assert_eq!(on_the_host.host_data_dir, on_the_host.data_dir);
+        assert_eq!(containerised.data_dir, Path::new("/data"));
+        assert_eq!(
+            containerised.host_data_dir,
+            Path::new("/mnt/tank/corcode"),
+            "the daemon would have been handed the core's own mount point"
         );
     }
 

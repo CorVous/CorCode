@@ -1,0 +1,39 @@
+services:
+  corcode:
+    build:
+      # The repository root, one up: this file lives in deploy/, the
+      # Dockerfile does not.
+      context: ..
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      # The dataset, host path on the left. Whatever it says here must also be
+      # CORCODE_HOST_DATA_DIR below: agent containers are siblings, so the
+      # daemon resolves their binds against the host, not against this mount.
+      - /mnt/tank/corcode:/data
+      # ADR-0001: reaching the daemon this way is root on the NAS in all but
+      # name. It is the price of sibling containers, and the reason the core
+      # is only ever exposed over the tailnet.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      CORCODE_DATA_DIR: /data
+      CORCODE_HOST_DATA_DIR: /mnt/tank/corcode
+      CORCODE_BIND_ADDR: 0.0.0.0:8080
+      CORCODE_USERNAME: REPLACE_WITH_YOUR_LOGIN_NAME
+      # cor-code hash-password, then paste the line it prints
+      CORCODE_PASSWORD_HASH: REPLACE_WITH_THE_HASH_hash-password_PRINTS
+      CORCODE_WORKSPACE_IMAGE: ghcr.io/corvous/corcode-workspace:2026-08-05
+      CORCODE_REPOS: CorVous/CorCode
+      CORCODE_WARM_POOL: "2"
+      CORCODE_CONTAINER_MEMORY_MB: "4096"
+      CORCODE_CONTAINER_CPUS: "2"
+      # Pulls the workspace image from GHCR: a GitHub username and a
+      # classic token carrying read:packages.
+      CORCODE_REGISTRY_USER: REPLACE_WITH_YOUR_GITHUB_USERNAME
+      CORCODE_REGISTRY_TOKEN: REPLACE_WITH_A_READ_PACKAGES_TOKEN
+      # Clones private repositories and pushes at archive.
+      CORCODE_GITHUB_TOKEN: REPLACE_WITH_A_REPO_SCOPED_TOKEN
+      # Reaches the agent as ANTHROPIC_API_KEY; drop it to use a Claude
+      # subscription login held in the chat's own agent memory instead.
+      CORCODE_ANTHROPIC_API_KEY: REPLACE_WITH_AN_ANTHROPIC_KEY

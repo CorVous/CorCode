@@ -11,6 +11,7 @@ pub mod plane;
 pub mod pool;
 pub mod resume;
 pub mod server;
+pub mod status;
 pub mod store;
 pub mod sweep;
 pub mod ui;
