@@ -27,7 +27,9 @@ use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::server;
+use cor_code::settings::Settings;
 use cor_code::store::ChatStore;
+use cor_code::verify::ScriptedVerifier;
 
 const USERNAME: &str = "cassidy";
 const PASSWORD: &str = "correct horse battery staple";
@@ -373,14 +375,20 @@ impl TestApp {
             .prepare()
             .expect("the dataset should prepare, as serving does");
         let plane = MemoryPlane::default();
+        let secrets = Arc::new(Secrets::from_config(&config));
         let chats = Chats::new(
             &config,
             plane.clone(),
             ScriptedAdapter::opening(SESSION),
             remotes,
-            Arc::new(Secrets::from_config(&config)),
+            Arc::clone(&secrets),
         );
-        let router = server::router(&config, chats).expect("router should build");
+        let router = server::router(
+            &config,
+            chats,
+            Settings::new(secrets, ScriptedVerifier::default()),
+        )
+        .expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {
             shutdown_rx.await.ok();

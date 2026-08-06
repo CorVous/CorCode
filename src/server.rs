@@ -6,7 +6,8 @@ use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
 use axum::Router;
-use axum::extract::{Form, Path, Request, State};
+use axum::extract::{Form, FromRef, FromRequestParts, Path, Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -25,8 +26,11 @@ use crate::auth::session;
 use crate::chats::{ArchiveError, Chats, PromptError, WantedChat};
 use crate::config::Config;
 use crate::plane::ContainerPlane;
+use crate::secrets::{Secret, SecretsError};
+use crate::settings::{Outcome, Settings};
 use crate::store::ContainerLiveness;
 use crate::ui::{self, page};
+use crate::verify::VerifyClient;
 
 /// Name of the cookie carrying the session (ADR-0003).
 pub const SESSION_COOKIE: &str = "corcode_session";
@@ -40,6 +44,9 @@ const HEALTH_PATH: &str = "/health";
 /// The path parameter every per-chat route is spelled with.
 const CHAT_ID: &str = "{chat_id}";
 
+/// The path parameter every per-secret route is spelled with.
+const SECRET: &str = "{secret}";
+
 /// The header htmx reads as "render this page again": how a chat that is no
 /// longer open comes back as what it is now.
 const HX_REFRESH: &str = "HX-Refresh";
@@ -47,35 +54,73 @@ const HX_REFRESH: &str = "HX-Refresh";
 /// Build the application's routes. Every route is gated except the handful
 /// [`is_public`] names, so a route added here is protected by default
 /// (ADR-0003).
-pub fn router<P, T>(config: &Config, chats: Chats<P, T>) -> Result<Router>
+pub fn router<P, T, V>(config: &Config, chats: Chats<P, T>, settings: Settings<V>) -> Result<Router>
 where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
     T: AcpTransport + Send + Sync + 'static,
+    V: VerifyClient + Send + Sync + 'static,
 {
     let gate = Arc::new(Gate::new(config)?);
     Ok(Router::new()
-        .merge(console_routes(Arc::new(chats)))
+        .merge(console_routes(Console {
+            chats: Arc::new(chats),
+            settings: Arc::new(settings),
+        }))
         .merge(session_routes(Arc::clone(&gate)))
         .layer(from_fn_with_state(gate, require_session))
         .layer(from_fn(same_origin)))
 }
 
-/// The console over the dataset and the one form it posts (ADR-0008).
-fn console_routes<P, T>(chats: Arc<Chats<P, T>>) -> Router
+/// Everything the one screen is drawn from: the dataset, and the secrets the
+/// deployment runs on.
+struct Console<P, T: AcpTransport, V> {
+    chats: Arc<Chats<P, T>>,
+    settings: Arc<Settings<V>>,
+}
+
+/// Cloning shares both halves rather than requiring either to be cloneable.
+impl<P, T: AcpTransport, V> Clone for Console<P, T, V> {
+    fn clone(&self) -> Self {
+        Self {
+            chats: Arc::clone(&self.chats),
+            settings: Arc::clone(&self.settings),
+        }
+    }
+}
+
+impl<P, T: AcpTransport, V> FromRef<Console<P, T, V>> for Arc<Chats<P, T>> {
+    fn from_ref(console: &Console<P, T, V>) -> Self {
+        Self::clone(&console.chats)
+    }
+}
+
+impl<P, T: AcpTransport, V> FromRef<Console<P, T, V>> for Arc<Settings<V>> {
+    fn from_ref(console: &Console<P, T, V>) -> Self {
+        Self::clone(&console.settings)
+    }
+}
+
+/// The console over the dataset, the one form it posts, and the settings
+/// panel over the secrets it runs on (ADR-0008).
+fn console_routes<P, T, V>(console: Console<P, T, V>) -> Router
 where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
     T: AcpTransport + Send + Sync + 'static,
+    V: VerifyClient + Send + Sync + 'static,
 {
     Router::new()
-        .route("/", get(console))
+        .route("/", get(console_page))
         .route(ui::STATUS_PATH, get(status))
         .route(ui::CHATS_PATH, get(chat_list).post(create_chat))
         .route(&ui::chat_path(CHAT_ID), get(chat_view))
         .route(&ui::chat_events_path(CHAT_ID), get(chat_events))
         .route(&ui::chat_prompt_path(CHAT_ID), post(prompt_chat))
         .route(&ui::chat_archive_path(CHAT_ID), post(archive_chat))
+        .route(&ui::secret_path(SECRET), post(save_secret))
+        .route(&ui::secret_clear_path(SECRET), post(clear_secret))
+        .route(&ui::secret_verify_path(SECRET), post(verify_secret))
         .route(ui::HTMX_PATH, get(htmx))
-        .with_state(chats)
+        .with_state(console)
 }
 
 /// Signing in, signing out, and saying the process is alive (ADR-0003).
@@ -102,19 +147,114 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// The one screen: status line, new-chat form, grouped chat list (ADR-0008).
-async fn console<P, T>(State(chats): State<Arc<Chats<P, T>>>) -> Response
+/// The one screen: status line, new-chat form, grouped chat list, settings
+/// panel (ADR-0008).
+async fn console_page<P, T, V>(
+    State(chats): State<Arc<Chats<P, T>>>,
+    State(settings): State<Arc<Settings<V>>>,
+) -> Response
 where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
     T: AcpTransport + Send + Sync + 'static,
+    V: VerifyClient + Send + Sync + 'static,
 {
+    let statuses = match settings.statuses() {
+        Ok(statuses) => statuses,
+        Err(failure) => return broken_invariant(&anyhow::Error::new(failure)),
+    };
     match chats.survey().await {
         Ok(survey) => {
             let status = chats.status_of(&survey, Utc::now());
-            Html(ui::console_page(&survey, &status, chats.repos())).into_response()
+            Html(ui::console_page(&survey, &status, chats.repos(), &statuses)).into_response()
         }
         Err(failure) => broken_invariant(&failure),
     }
+}
+
+/// Put a value in force for one secret, or say that a blank box changed
+/// nothing (ADR-0003: unsetting one is Clear's to do).
+async fn save_secret<V>(
+    State(settings): State<Arc<Settings<V>>>,
+    secret: Secret,
+    Form(form): Form<SecretForm>,
+) -> Response
+where
+    V: VerifyClient + Send + Sync + 'static,
+{
+    answer(&settings, secret, settings.save(secret, &form.value))
+}
+
+/// What one secret's Save submits. The box is never filled in, so this is
+/// only ever what the operator just typed.
+#[derive(Deserialize)]
+struct SecretForm {
+    value: String,
+}
+
+/// Take one secret's set value away, leaving whatever the environment
+/// bootstrapped in force again.
+async fn clear_secret<V>(State(settings): State<Arc<Settings<V>>>, secret: Secret) -> Response
+where
+    V: VerifyClient + Send + Sync + 'static,
+{
+    answer(&settings, secret, settings.clear(secret))
+}
+
+/// Put one secret to the service it opens. Only a click reaches here: the
+/// panel carries no trigger that would spend a call on a clock.
+async fn verify_secret<V>(State(settings): State<Arc<Settings<V>>>, secret: Secret) -> Response
+where
+    V: VerifyClient + Send + Sync + 'static,
+{
+    let outcome = settings.verify(secret).await;
+    answer(&settings, secret, outcome)
+}
+
+/// The secret's own section as it now stands, reporting what was just done to
+/// it, for htmx to swap in place of the one that was clicked.
+fn answer<V>(
+    settings: &Settings<V>,
+    secret: Secret,
+    outcome: Result<Outcome, SecretsError>,
+) -> Response
+where
+    V: VerifyClient + Send + Sync + 'static,
+{
+    match section(settings, secret, outcome) {
+        Ok(section) => Html(section).into_response(),
+        Err(failure) => broken_invariant(&anyhow::Error::new(failure)),
+    }
+}
+
+/// The section's markup, or whatever went wrong reading the secret's state.
+fn section<V>(
+    settings: &Settings<V>,
+    secret: Secret,
+    outcome: Result<Outcome, SecretsError>,
+) -> Result<String, SecretsError>
+where
+    V: VerifyClient + Send + Sync + 'static,
+{
+    let outcome = outcome?;
+    let source = settings.source(secret)?;
+    Ok(ui::secret_settings(secret, source, &outcome))
+}
+
+/// Which secret a per-secret route was asked about: the one its path names.
+impl<S: Send + Sync> FromRequestParts<S> for Secret {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let named = Path::<String>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| no_such_secret())?;
+        Self::named(&named).ok_or_else(no_such_secret)
+    }
+}
+
+/// The one answer a path that names no secret gets.
+fn no_such_secret() -> Response {
+    (StatusCode::NOT_FOUND, "No such secret.\n").into_response()
 }
 
 /// The status line alone, for htmx to poll while the console is open

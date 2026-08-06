@@ -3,11 +3,13 @@
 mod chat;
 mod console;
 mod escape;
+mod settings;
 
 use crate::store::{Manifest, RuntimeStatus};
 
 pub use chat::{chat_page, event_log};
 pub use console::{chat_list, console_page, status_line, status_picture};
+pub use settings::{secret_settings, settings_panel};
 
 use escape::text;
 
@@ -28,6 +30,9 @@ pub const HTMX_PATH: &str = "/assets/htmx.js";
 
 /// Where the key-rotating sign-out posts (ADR-0003).
 pub const LOGOUT_PATH: &str = "/logout-all";
+
+/// Under which every settings action on every secret is spelled.
+pub const SETTINGS_PATH: &str = "/settings";
 
 /// The exact htmx build compiled into the binary.
 pub const HTMX: &str = include_str!("../../assets/htmx-2.0.10.min.js");
@@ -70,6 +75,26 @@ pub fn chat_archive_path(chat_id: &str) -> String {
     format!("{}/archive", chat_path(chat_id))
 }
 
+/// Where one secret's Save posts. The router spells its routes with these
+/// too, passing the path parameter as the name, so no path is written down
+/// twice.
+#[must_use]
+pub fn secret_path(secret: &str) -> String {
+    format!("{SETTINGS_PATH}/{secret}")
+}
+
+/// Where one secret's Clear posts.
+#[must_use]
+pub fn secret_clear_path(secret: &str) -> String {
+    format!("{}/clear", secret_path(secret))
+}
+
+/// Where one secret's Verify posts.
+#[must_use]
+pub fn secret_verify_path(secret: &str) -> String {
+    format!("{}/verify", secret_path(secret))
+}
+
 /// A semantic HTML document on browser defaults (ADR-0008).
 #[must_use]
 pub fn page(title: &str, body: &str) -> String {
@@ -98,6 +123,7 @@ fn last_push(manifest: &Manifest) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use crate::secrets::{Secret, Source};
     use crate::status::Status;
 
     use super::*;
@@ -152,6 +178,10 @@ mod tests {
                 sweep: None,
             },
             &["CorVous/CorCode".to_owned()],
+            &[
+                (Secret::GithubToken, Source::Environment),
+                (Secret::AnthropicKey, Source::Unset),
+            ],
         ));
     }
 

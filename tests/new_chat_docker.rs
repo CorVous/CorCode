@@ -26,7 +26,9 @@ use cor_code::git::Remotes;
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings};
 use cor_code::secrets::Secrets;
 use cor_code::server;
+use cor_code::settings::Settings;
 use cor_code::store::ChatStore;
+use cor_code::verify::ScriptedVerifier;
 
 const DOCKER_SOCKET: &str = "/var/run/docker.sock";
 const USERNAME: &str = "cassidy";
@@ -111,14 +113,20 @@ impl Serving {
             .await
             .expect("ephemeral port should bind");
         let address = listener.local_addr().expect("listener reports its address");
+        let secrets = Arc::new(Secrets::from_config(&config));
         let chats = Chats::new(
             &config,
             DockerPlane::connect(settings(deployment)).expect("the daemon should be reachable"),
             DockerExec::connect().expect("the daemon should be reachable"),
             remotes,
-            Arc::new(Secrets::from_config(&config)),
+            Arc::clone(&secrets),
         );
-        let router = server::router(&config, chats).expect("router should build");
+        let router = server::router(
+            &config,
+            chats,
+            Settings::new(secrets, ScriptedVerifier::default()),
+        )
+        .expect("router should build");
         let (shutdown, shutdown_rx) = oneshot::channel();
         let server = tokio::spawn(server::serve(listener, router, async {
             shutdown_rx.await.ok();

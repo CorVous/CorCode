@@ -13,6 +13,8 @@ use cor_code::config::{
 use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
+use cor_code::settings::Settings;
+use cor_code::verify::ScriptedVerifier;
 
 #[tokio::test]
 async fn health_endpoint_answers_on_ephemeral_port() {
@@ -38,6 +40,7 @@ async fn health_endpoint_answers_on_ephemeral_port() {
         github_token: None,
         anthropic_api_key: None,
     };
+    let secrets = Arc::new(Secrets::from_config(&config));
     let router = cor_code::server::router(
         &config,
         Chats::new(
@@ -45,8 +48,9 @@ async fn health_endpoint_answers_on_ephemeral_port() {
             MemoryPlane::default(),
             ScriptedAdapter::silent(),
             Remotes::new(GITHUB),
-            Arc::new(Secrets::from_config(&config)),
+            Arc::clone(&secrets),
         ),
+        Settings::new(secrets, ScriptedVerifier::default()),
     )
     .expect("router should build");
     let (shutdown, shutdown_rx) = oneshot::channel();
