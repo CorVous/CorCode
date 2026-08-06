@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -174,6 +175,87 @@ async fn a_chat_whose_push_fails_keeps_its_container_and_says_so() {
     assert!(
         log.contains("<blockquote>"),
         "the operator is told nothing when they next look: {log}"
+    );
+}
+
+/// The checkpoint is pushed before the chat's own branch, so the second push
+/// can fail with the operator's work already safe on the remote. The notice
+/// has to say so, or they will read "nothing was archived" and go looking for
+/// work that is right there.
+#[tokio::test]
+async fn a_checkpoint_that_landed_is_named_when_the_chat_branch_will_not_go() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+    app.refuse_the_chat_branch();
+
+    let response = app.archive(&chat).await;
+
+    assert!(
+        response.status().is_server_error(),
+        "a half-finished archive answered {}",
+        response.status()
+    );
+    let landed = app
+        .origin_says(&["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+        .lines()
+        .find(|branch| branch.contains("-chkpt-"))
+        .expect("the checkpoint should reach the remote before the branch is refused")
+        .to_owned();
+    assert!(
+        app.events(&chat).contains(&landed),
+        "the notice does not name the checkpoint that landed: {}",
+        app.events(&chat)
+    );
+    let manifest = app.manifest(&chat);
+    assert_eq!(manifest["state"], "open");
+    assert_eq!(
+        manifest["checkpoint_branch"],
+        Value::Null,
+        "the manifest was written for an archive that did not happen"
+    );
+    assert!(app.workspace(&chat).join("scratch.txt").is_file());
+    assert_eq!(group(&app.body("/").await, &chat), "Live");
+
+    app.allow_the_chat_branch();
+    assert_eq!(
+        app.archive(&chat).await.status(),
+        StatusCode::OK,
+        "the operator could not archive again once the remote took the branch"
+    );
+}
+
+/// The gate is not the last thing that can fail: the manifest is written
+/// after it. Whatever the operator retries from has to be a workspace on the
+/// chat's own branch.
+#[tokio::test]
+async fn an_archive_the_dataset_cannot_record_leaves_the_workspace_on_the_chat_branch() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+    app.seal_the_chat_dir(&chat);
+
+    let response = app.archive(&chat).await;
+    app.unseal_the_chat_dir(&chat);
+
+    assert!(
+        response.status().is_server_error(),
+        "an unrecorded archive answered {}",
+        response.status()
+    );
+    assert!(
+        app.workspace(&chat).exists(),
+        "the workspace went even though the chat is still open (ADR-0002 rule 1)"
+    );
+    assert_eq!(
+        says(
+            &app.workspace(&chat),
+            &["rev-parse", "--abbrev-ref", "HEAD"]
+        ),
+        app.branch(&chat),
+        "the retry would start from a checkpoint branch"
     );
 }
 
@@ -441,6 +523,39 @@ impl TestApp {
     /// Take the remote away, so the next push has nowhere to land.
     fn lose_the_remote(&self) {
         fs::remove_dir_all(self.origin.path().join(BARE)).expect("the remote should be removable");
+    }
+
+    /// Make the remote refuse every branch but a checkpoint, as a protected
+    /// branch does, so that half of a gate's pushes land.
+    fn refuse_the_chat_branch(&self) {
+        let hook = self.origin.path().join(BARE).join("hooks").join("update");
+        fs::write(
+            &hook,
+            "#!/bin/sh\ncase \"$1\" in *chkpt*) exit 0;; esac\nexit 1\n",
+        )
+        .expect("the hook should be writable");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("the hook should be runnable");
+    }
+
+    fn allow_the_chat_branch(&self) {
+        fs::remove_file(self.origin.path().join(BARE).join("hooks").join("update"))
+            .expect("the hook should be removable");
+    }
+
+    /// Make the chat's own directory unwritable, so that the archive's next
+    /// write to the dataset fails the way a full disk would.
+    fn seal_the_chat_dir(&self, chat_id: &str) {
+        self.chmod_chat_dir(chat_id, 0o555);
+    }
+
+    fn unseal_the_chat_dir(&self, chat_id: &str) {
+        self.chmod_chat_dir(chat_id, 0o755);
+    }
+
+    fn chmod_chat_dir(&self, chat_id: &str, mode: u32) {
+        fs::set_permissions(self.chat_dir(chat_id), fs::Permissions::from_mode(mode))
+            .expect("the chat directory should be chmodable");
     }
 }
 

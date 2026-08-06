@@ -549,9 +549,11 @@ mod tests {
     const BARE: &str = "CorVous/fixture.git";
     const CHAT_BRANCH: &str = "chat/2026-08-05-archived";
 
+    /// Two archives of one chat a few seconds apart must not name the same
+    /// branch: the second push would be refused as a non-fast-forward.
     #[test]
-    fn a_checkpoint_branch_is_stamped_to_the_minute() {
-        let stamp = Utc::now().format("%Y%m%dT%H%M");
+    fn a_checkpoint_branch_is_stamped_to_the_second() {
+        let stamp = Utc::now().format("%Y%m%dT%H%M%S");
 
         assert_eq!(
             checkpoint_branch(CHAT_BRANCH),
@@ -610,6 +612,54 @@ mod tests {
             git_says(&bare, &["log", "-1", "--format=%cn <%ce>", &checkpoint]),
             "CorCode core <corcode@local>",
             "the checkpoint was committed as somebody else"
+        );
+    }
+
+    /// An agent that wanders off its branch — a detached rebase, a stray
+    /// checkout — leaves commits nothing else would push. The gate is the last
+    /// look anyone gets at the workspace, so it takes them too.
+    #[test]
+    fn a_clean_workspace_standing_off_its_chat_branch_is_checkpointed_all_the_same() {
+        let (origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        commit_in(&workspace, "third.txt", "the agent's own commit");
+        run(&workspace, &["checkout", "--detach"]);
+        let stray = commit_in(
+            &workspace,
+            "fourth.txt",
+            "a commit the chat branch never saw",
+        );
+
+        let pushed = push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect("a workspace off its branch should push");
+
+        let checkpoint = pushed
+            .checkpoint_branch
+            .expect("work off the chat branch should be checkpointed");
+        assert_eq!(
+            git_says(&origin_dir.path().join(BARE), &["rev-parse", &checkpoint]),
+            stray,
+            "the commit the chat branch never saw was left to be deleted"
+        );
+    }
+
+    /// Whatever the caller does after the gate — write the manifest, tear the
+    /// container down — can fail, and it retries from this workspace.
+    #[test]
+    fn a_gate_that_pushed_everything_leaves_the_workspace_on_the_chat_branch() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO));
+        commit_in(&workspace, "third.txt", "the agent's own commit");
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+
+        push_for_archive(&remotes.origin(REPO), &workspace, CHAT_BRANCH)
+            .expect("a dirty workspace should push");
+
+        assert_eq!(
+            git_says(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            CHAT_BRANCH,
+            "the workspace was left standing on the checkpoint branch"
         );
     }
 

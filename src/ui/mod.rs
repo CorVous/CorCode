@@ -136,6 +136,7 @@ mod tests {
             &[],
             "ghcr.io/corvous/x:2026-08-05",
             &["CorVous/CorCode".to_owned()],
+            2,
         ));
     }
 

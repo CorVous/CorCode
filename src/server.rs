@@ -111,6 +111,7 @@ where
             &survey,
             chats.workspace_image(),
             chats.repos(),
+            chats.warm_pool(),
         ))
         .into_response(),
         Err(failure) => broken_invariant(&failure),

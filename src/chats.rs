@@ -166,6 +166,12 @@ where
         &self.workspace_image
     }
 
+    /// How many containers this deployment keeps warm (ADR-0002 rule 2).
+    #[must_use]
+    pub const fn warm_pool(&self) -> usize {
+        self.warm_pool
+    }
+
     /// The repositories a new chat may be cut from, first one default.
     #[must_use]
     pub fn repos(&self) -> &[String] {
