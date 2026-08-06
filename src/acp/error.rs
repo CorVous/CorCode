@@ -44,4 +44,13 @@ impl AcpError {
     pub const fn spent_the_connection(&self) -> bool {
         !matches!(self, Self::Unrecorded { .. })
     }
+
+    /// Whether the adapter itself said no. A refusal — a method it has never
+    /// heard of among them — is an answer, and a channel that carried one can
+    /// carry the next question (ADR-0007 rule 3). Anything else leaves nothing
+    /// to ask over.
+    #[must_use]
+    pub const fn answered(&self) -> bool {
+        matches!(self, Self::Refused { .. })
+    }
 }

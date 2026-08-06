@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::{AcpChannel, AcpError, AcpTransport};
+use super::{
+    AcpChannel, AcpError, AcpTransport, LOAD_SESSION, NO_SUCH_METHOD, PROMPT, RESUME_SESSION,
+};
 
 /// A notification the fake volunteers before every answer, as a real adapter
 /// does: no client may assume the next line is the one it is waiting for.
@@ -19,6 +21,8 @@ const CHATTER: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"s
 enum Answer {
     Result(Value),
     Refusal(String),
+    /// A method this adapter has never heard of, answered as JSON-RPC says.
+    Unheard,
 }
 
 /// What the fake answers to each method it knows.
@@ -33,14 +37,50 @@ enum Stall {
     Taking,
 }
 
+/// Which of a fake's channels close without answering the turn they are in.
+/// `Once` is a container that outlived one broken pipe: everything opened
+/// after the first channel works.
+#[derive(Clone, Copy)]
+enum Dies {
+    Never,
+    Always,
+    Once,
+}
+
+impl Dies {
+    /// Whether the `nth` channel this adapter opens will close on a turn.
+    const fn takes(self, nth: usize) -> bool {
+        match self {
+            Self::Never => false,
+            Self::Always => true,
+            Self::Once => nth == 1,
+        }
+    }
+}
+
+/// How a channel ends: at the first thing it is asked, in the middle of the
+/// turn it is taking, or not at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Death {
+    None,
+    MidTurn,
+    AtOnce,
+}
+
 /// Answers ACP calls from a canned script and remembers what it was asked.
+///
+/// A clone is the same adapter, not another one: a test that has handed its
+/// fake to the thing under test keeps a copy to read what it heard.
+#[derive(Clone)]
 pub struct ScriptedAdapter {
     answers: Arc<Script>,
     asks: Arc<Vec<Value>>,
+    replay: Arc<Vec<Value>>,
     updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     stall: Stall,
-    hangs_up: bool,
+    dies: Dies,
+    replay_trails: bool,
     dawdle: Duration,
 }
 
@@ -50,6 +90,8 @@ struct Heard {
     containers: Vec<String>,
     requests: Vec<Value>,
     chattered: bool,
+    channels: usize,
+    killed: bool,
 }
 
 impl ScriptedAdapter {
@@ -63,13 +105,50 @@ impl ScriptedAdapter {
     /// An adapter that streams `updates` at every prompt and then ends the
     /// turn. Each update is the params of one `session/update` notification,
     /// so a test can address one at whichever session it likes.
+    ///
+    /// It knows neither rung of ADR-0007's ladder, as an adapter that has
+    /// forgotten the chat does.
     #[must_use]
     pub fn answering(session_id: &str, updates: &[Value]) -> Self {
-        let mut script = working_script(session_id);
-        script.insert(
-            "session/prompt".to_owned(),
-            Answer::Result(json!({"stopReason": "end_turn"})),
-        );
+        Self {
+            updates: Arc::new(updates.to_vec()),
+            ..Self::reading(prompting_script(session_id))
+        }
+    }
+
+    /// An adapter that hands a session back where it left off, replaying
+    /// nothing (ADR-0007 rung 1).
+    #[must_use]
+    pub fn resuming(session_id: &str, updates: &[Value]) -> Self {
+        Self::climbable(session_id, RESUME_SESSION, updates)
+    }
+
+    /// An adapter that will not resume but replays `history` as
+    /// `session/update` notifications when the session is loaded, before it
+    /// answers the load (rung 2).
+    #[must_use]
+    pub fn loading(session_id: &str, history: &[Value], updates: &[Value]) -> Self {
+        Self {
+            replay: Arc::new(history.to_vec()),
+            ..Self::climbable(session_id, LOAD_SESSION, updates)
+        }
+    }
+
+    /// An adapter that replays `history` *after* it answers the load, as one
+    /// whose replay and answer cross on the wire does. ACP fixes no order
+    /// between them, so display-silence may not lean on one.
+    #[must_use]
+    pub fn loading_late(session_id: &str, history: &[Value], updates: &[Value]) -> Self {
+        Self {
+            replay_trails: true,
+            ..Self::loading(session_id, history, updates)
+        }
+    }
+
+    /// An adapter that answers `rung` and then takes prompts.
+    fn climbable(session_id: &str, rung: &str, updates: &[Value]) -> Self {
+        let mut script = prompting_script(session_id);
+        script.insert(rung.to_owned(), Answer::Result(Value::Null));
         Self {
             updates: Arc::new(updates.to_vec()),
             ..Self::reading(script)
@@ -101,10 +180,28 @@ impl ScriptedAdapter {
     /// ending the turn, as one whose container was killed does.
     #[must_use]
     pub fn dying_mid_turn(session_id: &str, updates: &[Value]) -> Self {
+        Self::deathly(session_id, updates, Dies::Always)
+    }
+
+    /// An adapter that loses its first channel mid-turn and answers on every
+    /// channel after it, as a container that outlived one broken pipe does.
+    #[must_use]
+    pub fn dying_once(session_id: &str, updates: &[Value]) -> Self {
+        Self::deathly(session_id, updates, Dies::Once)
+    }
+
+    /// Leave every channel opened from here on closed from the first word, as
+    /// an agent that has died inside a container it is still holding does.
+    pub fn dies(&self) {
+        self.heard().killed = true;
+    }
+
+    /// An adapter that takes prompts on every channel `dies` spares.
+    fn deathly(session_id: &str, updates: &[Value], dies: Dies) -> Self {
         Self {
             updates: Arc::new(updates.to_vec()),
-            hangs_up: true,
-            ..Self::reading(working_script(session_id))
+            dies,
+            ..Self::reading(prompting_script(session_id))
         }
     }
 
@@ -159,10 +256,12 @@ impl ScriptedAdapter {
         Self {
             answers: Arc::new(script),
             asks: Arc::new(Vec::new()),
+            replay: Arc::new(Vec::new()),
             updates: Arc::new(Vec::new()),
             heard: Arc::new(Mutex::new(Heard::default())),
             stall: Stall::Nowhere,
-            hangs_up: false,
+            dies: Dies::Never,
+            replay_trails: false,
             dawdle: Duration::ZERO,
         }
     }
@@ -179,7 +278,8 @@ impl ScriptedAdapter {
     }
 }
 
-/// What every scripted adapter answers before anything goes wrong.
+/// What every scripted adapter answers before anything goes wrong: a
+/// handshake, a new session, and neither rung of ADR-0007's ladder.
 fn working_script(session_id: &str) -> Script {
     Script::from([
         (
@@ -193,25 +293,50 @@ fn working_script(session_id: &str) -> Script {
             "session/new".to_owned(),
             Answer::Result(json!({"sessionId": session_id})),
         ),
+        (RESUME_SESSION.to_owned(), Answer::Unheard),
+        (LOAD_SESSION.to_owned(), Answer::Unheard),
     ])
+}
+
+/// The working script, plus a turn that ends.
+fn prompting_script(session_id: &str) -> Script {
+    let mut script = working_script(session_id);
+    script.insert(
+        PROMPT.to_owned(),
+        Answer::Result(json!({"stopReason": "end_turn"})),
+    );
+    script
 }
 
 impl AcpTransport for ScriptedAdapter {
     type Channel = ScriptedChannel;
 
     async fn open(&self, container: &str) -> Result<Self::Channel, AcpError> {
-        self.heard().containers.push(container.to_owned());
+        let death = {
+            let mut heard = self.heard();
+            heard.containers.push(container.to_owned());
+            heard.channels += 1;
+            if heard.killed {
+                Death::AtOnce
+            } else if self.dies.takes(heard.channels) {
+                Death::MidTurn
+            } else {
+                Death::None
+            }
+        };
         if matches!(self.stall, Stall::Starting) {
             std::future::pending::<()>().await;
         }
         Ok(ScriptedChannel {
             answers: Arc::clone(&self.answers),
             asks: Arc::clone(&self.asks),
+            replay: Arc::clone(&self.replay),
             updates: Arc::clone(&self.updates),
             heard: Arc::clone(&self.heard),
             unread: VecDeque::new(),
             stall: self.stall,
-            hangs_up: self.hangs_up,
+            death,
+            replay_trails: self.replay_trails,
             dawdle: self.dawdle,
         })
     }
@@ -221,12 +346,51 @@ impl AcpTransport for ScriptedAdapter {
 pub struct ScriptedChannel {
     answers: Arc<Script>,
     asks: Arc<Vec<Value>>,
+    replay: Arc<Vec<Value>>,
     updates: Arc<Vec<Value>>,
     heard: Arc<Mutex<Heard>>,
     unread: VecDeque<String>,
     stall: Stall,
-    hangs_up: bool,
+    death: Death,
+    replay_trails: bool,
     dawdle: Duration,
+}
+
+impl ScriptedChannel {
+    /// Line up `params` as `session/update` notifications, each one a whole
+    /// message the client has to read past to reach the answer it waits for.
+    fn stream(&mut self, params: &[Value]) {
+        for update in params {
+            self.unread.push_back(
+                json!({"jsonrpc": "2.0", "method": "session/update", "params": update}).to_string(),
+            );
+        }
+    }
+
+    /// What the script says to `method`, unless this channel dies before it
+    /// gets there.
+    fn answer_to(&self, method: &str, id: &Value) -> Option<String> {
+        let withheld = match self.death {
+            Death::None => false,
+            Death::MidTurn => method == PROMPT,
+            Death::AtOnce => true,
+        };
+        if withheld {
+            return None;
+        }
+        let answer = match self.answers.get(method)? {
+            Answer::Result(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            Answer::Refusal(complaint) => {
+                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": complaint}})
+            }
+            Answer::Unheard => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": NO_SUCH_METHOD, "message": format!("no method {method}")},
+            }),
+        };
+        Some(answer.to_string())
+    }
 }
 
 impl AcpChannel for ScriptedChannel {
@@ -245,26 +409,21 @@ impl AcpChannel for ScriptedChannel {
             return Ok(());
         }
         self.unread.push_back(CHATTER.to_owned());
-        if method == "session/prompt" {
+        if method == PROMPT {
             for ask in self.asks.iter() {
                 self.unread.push_back(ask.to_string());
             }
-            for update in self.updates.iter() {
-                self.unread.push_back(
-                    json!({"jsonrpc": "2.0", "method": "session/update", "params": update})
-                        .to_string(),
-                );
-            }
+            self.stream(&self.updates.clone());
         }
-        match self.answers.get(&method) {
-            Some(Answer::Result(result)) => self
-                .unread
-                .push_back(json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()),
-            Some(Answer::Refusal(complaint)) => self.unread.push_back(
-                json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": complaint}})
-                    .to_string(),
-            ),
-            None => {}
+        let replaying = method == LOAD_SESSION;
+        if replaying && !self.replay_trails {
+            self.stream(&self.replay.clone());
+        }
+        if let Some(answer) = self.answer_to(&method, &id) {
+            self.unread.push_back(answer);
+        }
+        if replaying && self.replay_trails {
+            self.stream(&self.replay.clone());
         }
         Ok(())
     }
@@ -273,7 +432,7 @@ impl AcpChannel for ScriptedChannel {
         tokio::time::sleep(self.dawdle).await;
         match self.unread.pop_front() {
             Some(line) => Ok(line),
-            None if self.hangs_up => Err(AcpError::Closed),
+            None if self.death != Death::None => Err(AcpError::Closed),
             None => std::future::pending().await,
         }
     }

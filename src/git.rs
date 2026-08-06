@@ -199,6 +199,75 @@ pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), G
     .map(drop)
 }
 
+/// Clone `origin`'s `branch` into `dest` and stand it where the chat left
+/// off, answering with the commit it ended up on (ADR-0002 rule 5).
+///
+/// A branch the remote no longer carries `commit` on is left standing at its
+/// tip: the remote is the truth, and the caller is the one who tells the chat
+/// (ADR-0007 rule 4). A branch that is gone altogether fails, and nothing is
+/// recreated.
+pub fn revive_at(
+    origin: &Origin,
+    branch: &str,
+    commit: &str,
+    dest: &Path,
+) -> Result<String, GitError> {
+    clone_at(origin, branch, dest)?;
+    if carries(dest, commit)? {
+        stand_at(dest, commit)?;
+    }
+    head(dest)
+}
+
+/// Whether the branch `workspace` stands on still reaches `commit`. A commit
+/// the clone cannot show at all is one the remote no longer has.
+fn carries(workspace: &Path, commit: &str) -> Result<bool, GitError> {
+    let spelled = workspace.to_string_lossy();
+    let doing = format!("look for {commit} on {}", workspace.display());
+    let known = answers(
+        &doing,
+        &[
+            "-C",
+            &spelled,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{commit}^{{commit}}"),
+        ],
+    )?;
+    if !known {
+        return Ok(false);
+    }
+    answers(
+        &doing,
+        &[
+            "-C",
+            &spelled,
+            "merge-base",
+            "--is-ancestor",
+            commit,
+            "HEAD",
+        ],
+    )
+}
+
+/// Move the branch `workspace` stands on back to `commit`, working tree and
+/// all.
+fn stand_at(workspace: &Path, commit: &str) -> Result<(), GitError> {
+    run(
+        &format!("stand {} at {commit}", workspace.display()),
+        &[
+            "-C",
+            &workspace.to_string_lossy(),
+            "reset",
+            "--hard",
+            commit,
+        ],
+        ToOwned::to_owned,
+    )
+    .map(drop)
+}
+
 /// Cut `branch` off whatever `workspace` has checked out and stand on it.
 /// Nothing is pushed: the branch reaches the remote with its first commit
 /// (ADR-0005).
@@ -297,15 +366,20 @@ pub fn push_for_archive(
     }
 }
 
+/// The commit `workspace` has checked out.
+fn head(workspace: &Path) -> Result<String, GitError> {
+    run(
+        &format!("read where {} stands", workspace.display()),
+        &["-C", &workspace.to_string_lossy(), "rev-parse", "HEAD"],
+        ToOwned::to_owned,
+    )
+}
+
 /// Where `workspace` has HEAD right now.
 fn standing(workspace: &Path) -> Result<Standing, GitError> {
     let spelled = workspace.to_string_lossy();
     let doing = format!("read where {} stands", workspace.display());
-    let head = run(
-        &doing,
-        &["-C", &spelled, "rev-parse", "HEAD"],
-        ToOwned::to_owned,
-    )?;
+    let head = head(workspace)?;
     let branch = run(
         &doing,
         &["-C", &spelled, "branch", "--show-current"],
@@ -491,6 +565,17 @@ fn run(doing: &str, args: &[&str], scrub: impl FnOnce(&str) -> String) -> Result
         doing: doing.to_owned(),
         complaint: scrub(String::from_utf8_lossy(&output.stderr).trim()),
     })
+}
+
+/// Ask git something whose answer is its exit status. Git saying no and git
+/// being unable to tell both come back as no: what is being asked about is a
+/// commit, and one this repository cannot show is one the chat cannot have.
+fn answers(doing: &str, args: &[&str]) -> Result<bool, GitError> {
+    match run(doing, args, ToOwned::to_owned) {
+        Ok(_) => Ok(true),
+        Err(GitError::Refused { .. }) => Ok(false),
+        Err(unusable) => Err(unusable),
+    }
 }
 
 #[cfg(test)]
@@ -818,6 +903,59 @@ mod tests {
             "",
             "an unpushed checkpoint branch was left where the next try will not find it"
         );
+    }
+
+    #[test]
+    fn a_revived_workspace_stands_where_the_chat_last_pushed() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_source, workspace) = chat_workspace(&remotes.origin(REPO));
+        let archived_at = commit_in(&workspace, "third.txt", "the agent's own commit");
+        commit_in(&workspace, "fourth.txt", "a commit made after the archive");
+        run(&workspace, &["push", "origin", CHAT_BRANCH]);
+        let into = TempDir::new().expect("clone target should be created");
+        let revived = into.path().join("workspace");
+
+        let standing = revive_at(&remotes.origin(REPO), CHAT_BRANCH, &archived_at, &revived)
+            .expect("an archived chat's branch should come back");
+
+        assert_eq!(standing, archived_at);
+        assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), archived_at);
+        assert_eq!(
+            git_says(&revived, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            CHAT_BRANCH,
+            "the revived workspace is not standing on the chat's branch"
+        );
+        assert!(
+            !revived.join("fourth.txt").exists(),
+            "the revived workspace carries work the chat never archived"
+        );
+    }
+
+    /// The commit the manifest names can be force-pushed away between the
+    /// archive and the revival. The remote is the truth (ADR-0007 rule 4).
+    #[test]
+    fn a_workspace_whose_commit_the_branch_no_longer_carries_comes_back_at_the_tip() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_source, workspace) = chat_workspace(&remotes.origin(REPO));
+        let tip = commit_in(&workspace, "third.txt", "the agent's own commit");
+        run(&workspace, &["push", "origin", CHAT_BRANCH]);
+        let rewritten_away = commit_in(&workspace, "fourth.txt", "a commit the remote never saw");
+        let into = TempDir::new().expect("clone target should be created");
+        let revived = into.path().join("workspace");
+
+        let standing = revive_at(
+            &remotes.origin(REPO),
+            CHAT_BRANCH,
+            &rewritten_away,
+            &revived,
+        )
+        .expect("a branch that drifted should still come back");
+
+        assert_eq!(
+            standing, tip,
+            "a commit the branch has lost should leave the workspace at the tip"
+        );
+        assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), tip);
     }
 
     #[test]

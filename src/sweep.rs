@@ -16,14 +16,23 @@ pub struct Sweep {
 }
 
 /// Read `workspaces` against the chats that claim one.
+///
+/// The trees `claimed` names are being built right now and are left alone: a
+/// revival writes a working tree before it writes the state that claims one,
+/// and a sweep passing through that gap would delete the clone out from under
+/// itself.
 #[must_use]
 pub fn reconcile<S: BuildHasher>(
     workspaces: &[String],
     open: &HashSet<String, S>,
     live: &HashSet<String, S>,
+    claimed: &HashSet<String, S>,
 ) -> Sweep {
     let mut sweep = Sweep::default();
-    for orphan in workspaces.iter().filter(|dir| !open.contains(*dir)) {
+    for orphan in workspaces
+        .iter()
+        .filter(|dir| !open.contains(*dir) && !claimed.contains(*dir))
+    {
         let landing = if live.contains(orphan) {
             &mut sweep.held
         } else {
@@ -52,6 +61,7 @@ mod tests {
             &dirs(&["archived", "open"]),
             &ids(&["open"]),
             &ids(&["open"]),
+            &ids(&[]),
         );
 
         assert_eq!(sweep.orphaned, ["archived"]);
@@ -60,14 +70,34 @@ mod tests {
 
     #[test]
     fn an_open_chats_working_tree_is_left_where_it_is() {
-        let sweep = reconcile(&dirs(&["open"]), &ids(&["open"]), &ids(&[]));
+        let sweep = reconcile(&dirs(&["open"]), &ids(&["open"]), &ids(&[]), &ids(&[]));
+
+        assert_eq!(sweep, Sweep::default());
+    }
+
+    /// A revival writes a working tree before it writes the state that claims
+    /// one, so a sweep passing through the gap would delete a chat's files out
+    /// from under the clone that is still fetching them.
+    #[test]
+    fn a_working_tree_being_built_right_now_is_nobodys_to_delete() {
+        let sweep = reconcile(
+            &dirs(&["reviving"]),
+            &ids(&[]),
+            &ids(&[]),
+            &ids(&["reviving"]),
+        );
 
         assert_eq!(sweep, Sweep::default());
     }
 
     #[test]
     fn an_orphan_whose_container_is_up_is_nobodys_to_delete() {
-        let sweep = reconcile(&dirs(&["archived"]), &ids(&[]), &ids(&["archived"]));
+        let sweep = reconcile(
+            &dirs(&["archived"]),
+            &ids(&[]),
+            &ids(&["archived"]),
+            &ids(&[]),
+        );
 
         assert_eq!(sweep.held, ["archived"]);
         assert!(

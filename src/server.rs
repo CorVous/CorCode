@@ -234,10 +234,15 @@ where
     };
     match chats.prompt(&chat_id, &form.prompt).await {
         Ok(()) => rendered_log(&chats, &chat_id),
-        Err(refusal @ PromptError::NotConnected) => {
-            (StatusCode::TOO_EARLY, format!("{refusal}.\n")).into_response()
+        Err(failure @ PromptError::Unwoken(_)) => {
+            error!("a chat would not wake: {:#}", anyhow::Error::new(failure));
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The chat could not be woken. The prompt was not sent.\n",
+            )
+                .into_response()
         }
-        Err(refusal @ PromptError::Busy) => {
+        Err(refusal @ (PromptError::Busy | PromptError::Waking)) => {
             (StatusCode::CONFLICT, format!("{refusal}.\n")).into_response()
         }
         Err(failure @ PromptError::Unrecorded(_)) => {
