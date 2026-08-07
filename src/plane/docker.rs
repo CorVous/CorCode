@@ -545,18 +545,22 @@ mod tests {
     }
 
     #[test]
-    fn an_internal_network_with_nothing_on_it_is_the_planes_to_replace() {
-        assert_eq!(
-            network_found(Some(&network(Some(true)))),
-            NetworkFound::WrongShapeAndEmpty
-        );
+    fn an_internal_network_the_daemon_calls_empty_is_the_planes_to_replace() {
         assert_eq!(
             network_found(Some(&NetworkInspect {
                 containers: Some(HashMap::new()),
                 ..network(Some(true))
             })),
-            NetworkFound::WrongShapeAndEmpty,
-            "an empty roster is as empty as none at all"
+            NetworkFound::WrongShapeAndEmpty
+        );
+    }
+
+    #[test]
+    fn an_internal_network_with_no_roster_at_all_is_left_where_it_is() {
+        assert_eq!(
+            network_found(Some(&network(Some(true)))),
+            NetworkFound::WrongShapeAndInUse,
+            "a roster the daemon did not send is no promise that nothing is on it"
         );
     }
 
@@ -640,6 +644,26 @@ mod tests {
         assert!(
             matches!(error, PlaneError::AlreadyLive { ref chat_id } if chat_id == CHAT_ID),
             "a name clash should name the live chat, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_network_something_is_still_on_is_not_the_planes_to_remove() {
+        let error = removal_failure(server_said(403));
+
+        assert!(
+            matches!(error, PlaneError::NetworkInUse { ref network } if network == NETWORK),
+            "a removal the daemon refused should say what to stop, got: {error}"
+        );
+    }
+
+    #[test]
+    fn any_other_refusal_to_remove_says_what_was_being_done() {
+        let error = removal_failure(server_said(500));
+
+        assert!(
+            format!("{error}").contains(&format!("replace the {NETWORK} network")),
+            "error should say what failed, got: {error}"
         );
     }
 
