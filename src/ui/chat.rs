@@ -154,11 +154,14 @@ mod tests {
 
     use super::*;
 
+    /// The chat every test in this module renders.
+    const CHAT_ID: &str = "01K1TESTCHATID0000000000";
+
     fn manifest(status: RuntimeStatus) -> Manifest {
         let now = Utc::now();
         Manifest {
             schema: MANIFEST_SCHEMA,
-            chat_id: "01K1TESTCHATID0000000000".to_owned(),
+            chat_id: CHAT_ID.to_owned(),
             title: "Resume ladder".to_owned(),
             state: match status {
                 RuntimeStatus::Archived => ChatState::Archived,
@@ -202,6 +205,22 @@ mod tests {
     /// An inbound `sessionUpdate` chunk, text inside a content block.
     fn chunk(update: &str, said: &str) -> Value {
         json!({"sessionUpdate": update, "content": {"type": "text", "text": said}})
+    }
+
+    /// A tool call as the adapter first announces it (ADR-0006).
+    fn tool_call(id: &str, title: &str) -> Value {
+        json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": id,
+            "title": title,
+            "kind": "execute",
+            "status": "pending",
+        })
+    }
+
+    /// A later word on the same tool call, carrying only what changed.
+    fn tool_update(id: &str, status: &str) -> Value {
+        json!({"sessionUpdate": "tool_call_update", "toolCallId": id, "status": status})
     }
 
     #[test]
@@ -254,6 +273,168 @@ mod tests {
         let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
 
         assert!(rendered.contains("<b>you:</b> ship the ladder"));
+    }
+
+    /// The adapter splits a sentence mid-word ("I" + "'m at"), so a chunk
+    /// boundary must contribute nothing at all — no space, no break.
+    #[test]
+    fn a_run_of_agent_chunks_reads_as_one_message() {
+        let events = log(&[
+            chunk("agent_message_chunk", "I"),
+            chunk("agent_message_chunk", "'m at"),
+            chunk("agent_message_chunk", " the ladder"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>I&#39;m at the ladder</p>"),
+            "the chunks did not join into one message: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("<p>").count(),
+            1,
+            "the message is still broken into blocks: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_newline_the_agent_wrote_still_breaks_the_line() {
+        let events = log(&[chunk("agent_message_chunk", "first\nsecond")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("first<br>second"),
+            "the agent's own line break was swallowed: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_event_between_chunks_ends_the_message_it_interrupts() {
+        let events = log(&[
+            chunk("agent_message_chunk", "before"),
+            tool_call("call_1", "git commit"),
+            chunk("agent_message_chunk", "after"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>before</p>") && rendered.contains("<p>after</p>"),
+            "the run did not end where the tool call broke it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn two_turns_of_the_user_stay_two_blocks() {
+        let events = log(&[
+            outbound_prompt("ship the ladder"),
+            outbound_prompt("now push"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert_eq!(
+            rendered.matches("<b>you:</b>").count(),
+            2,
+            "two turns ran into one: {rendered}"
+        );
+    }
+
+    #[test]
+    fn updates_to_one_tool_call_coalesce_into_its_line() {
+        let events = log(&[
+            tool_call("call_1", "git commit"),
+            tool_update("call_1", "in_progress"),
+            tool_update("call_1", "completed"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert_eq!(
+            rendered.matches("git commit").count(),
+            1,
+            "the tool call took a line per update: {rendered}"
+        );
+        assert!(
+            rendered.contains("<small>git commit · completed</small>"),
+            "the tool call's line does not carry its last status: {rendered}"
+        );
+        assert!(
+            !rendered.contains("pending") && !rendered.contains("in_progress"),
+            "a superseded status is still on the page: {rendered}"
+        );
+    }
+
+    #[test]
+    fn two_tool_calls_keep_a_line_each() {
+        let events = log(&[
+            tool_call("call_1", "git commit"),
+            tool_call("call_2", "cargo test"),
+            tool_update("call_1", "completed"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<small>git commit · completed</small>")
+                && rendered.contains("<small>cargo test · pending</small>"),
+            "the two calls did not keep their own lines: {rendered}"
+        );
+    }
+
+    #[test]
+    fn bookkeeping_updates_are_left_out_of_the_transcript() {
+        let events = log(&[
+            json!({"sessionUpdate": "usage_update", "usage": {"inputTokens": 12}}),
+            json!({"sessionUpdate": "available_commands_update", "availableCommands": []}),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("usage") && !rendered.contains("available_commands"),
+            "bookkeeping is being read out as if it said something: {rendered}"
+        );
+    }
+
+    #[test]
+    fn chunks_that_join_into_a_tag_are_still_escaped() {
+        let events = log(&[
+            chunk("agent_message_chunk", "<scr"),
+            chunk("agent_message_chunk", "ipt>alert(1)</script>"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<script>"),
+            "joining the chunks let markup through: {rendered}"
+        );
+    }
+
+    /// The page's transcript and the fragment htmx polls are one rendering,
+    /// so a joined run cannot read one way on load and another live.
+    #[test]
+    fn the_page_and_the_polled_log_read_the_same() {
+        let manifest = manifest(RuntimeStatus::Live);
+        let events = log(&[
+            outbound_prompt("ship the ladder"),
+            chunk("agent_message_chunk", "I"),
+            chunk("agent_message_chunk", "'m at it"),
+            tool_call("call_1", "git commit"),
+            json!({"sessionUpdate": "usage_update", "usage": {"inputTokens": 12}}),
+            tool_update("call_1", "completed"),
+            chunk("agent_message_chunk", "done"),
+        ]);
+
+        let rendered = chat_page(&manifest, RuntimeStatus::Live, &events);
+
+        assert!(
+            rendered.contains(&event_log(&manifest.chat_id, &events)),
+            "the page and the poll render the same events differently: {rendered}"
+        );
     }
 
     #[test]
