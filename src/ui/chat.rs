@@ -626,6 +626,30 @@ mod tests {
     }
 
     #[test]
+    fn the_title_the_adapter_settles_on_mid_turn_neither_speaks_nor_breaks_the_message() {
+        let events = log(&[
+            chunk("agent_message_chunk", "ship "),
+            json!({
+                "sessionUpdate": "session_info_update",
+                "title": "Ship the ladder",
+                "updatedAt": "2026-08-07T09:41:00.000Z",
+            }),
+            chunk("agent_message_chunk", "the ladder"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("session_info_update") && !rendered.contains("Ship the ladder"),
+            "the session title is being read out as if it said something: {rendered}"
+        );
+        assert!(
+            rendered.contains("ship the ladder"),
+            "the title broke the message in two: {rendered}"
+        );
+    }
+
+    #[test]
     fn chunks_that_join_into_a_tag_are_still_escaped() {
         let events = log(&[
             chunk("agent_message_chunk", "<scr"),
