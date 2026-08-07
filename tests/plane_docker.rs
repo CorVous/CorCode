@@ -16,7 +16,7 @@ use bollard::query_parameters::{
     StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings, container_name};
-use cor_code::store::{ChatStore, NewChat, Owner};
+use cor_code::store::{ChatStore, NewChat, Owner, hand_tree_to};
 use futures_util::StreamExt as _;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
@@ -143,7 +143,8 @@ async fn a_real_spawned_container_wears_every_hardening_flag() {
 /// both of a chat's trees down as itself, and a container that runs as
 /// somebody else can read a tree it does not own and change nothing in it.
 /// Live, that was an agent whose every commit and every session file failed
-/// (issue #46).
+/// (issue #46). The workspace changes hands here the way it does after a
+/// clone, which this test has no repository to make.
 #[tokio::test]
 async fn a_real_container_can_write_in_both_of_the_trees_it_was_handed() {
     let Some(docker) = reachable_daemon() else {
@@ -176,6 +177,8 @@ async fn a_real_container_can_write_in_both_of_the_trees_it_was_handed() {
         })
         .expect("the chat should be laid down")
         .chat_id;
+    hand_tree_to(&store.workspace_dir(&chat_id), Owner::AGENT)
+        .expect("a tree the core owns should change hands");
 
     let container = plane
         .spawn(

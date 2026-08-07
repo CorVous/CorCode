@@ -153,15 +153,15 @@ impl ChatStore {
         }
     }
 
-    /// Lay down both trees for a new chat, publishing the chat dir whole. Both
-    /// are mounted into the chat's container, so both are handed to the agent
-    /// as they are made.
+    /// Lay down both trees for a new chat, publishing the chat dir whole. The
+    /// memory tree is the agent's as it is made; the workspace stays the
+    /// core's until git has finished writing the clone into it, and whoever
+    /// clones hands it over then (issue #53).
     pub fn create_chat(&self, new_chat: NewChat) -> Result<Manifest, StoreError> {
         let manifest = Manifest::open(new_chat);
         let chat_id = &manifest.chat_id;
         let workspace = self.workspace_dir(chat_id);
         fs::create_dir_all(&workspace).map_err(StoreError::writing(&workspace))?;
-        hand_tree_to(&workspace, self.agent)?;
         let staged = self.staging_dir(chat_id);
         let claude = staged.join(CLAUDE_DIR);
         fs::create_dir_all(&claude).map_err(StoreError::writing(&claude))?;
@@ -539,11 +539,11 @@ mod tests {
         }
     }
 
-    /// Both of a chat's trees are mounted into its container, so both leave
-    /// the store belonging to whoever that container runs as.
+    /// The memory tree is written by nobody but the agent, so it is the
+    /// agent's as the store lays it down.
     #[cfg(unix)]
     #[test]
-    fn both_trees_of_a_new_chat_belong_to_the_agent_the_store_serves() {
+    fn the_memory_tree_of_a_new_chat_belongs_to_the_agent_the_store_serves() {
         let root = TempDir::new().expect("temp dataset root should be created");
         let us = ours(root.path());
         let store = ChatStore::new(root.path()).handing_trees_to(us);
@@ -554,13 +554,14 @@ mod tests {
             .expect("a chat should be created")
             .chat_id;
 
-        assert_eq!(ours(&store.workspace_dir(&chat_id)), us, "workspace");
-        assert_eq!(ours(&store.claude_dir(&chat_id)), us, "claude dir");
+        assert_eq!(ours(&store.claude_dir(&chat_id)), us);
     }
 
     /// A tree the agent does not own is one it can read and change nothing in,
     /// so a chat whose trees will not change hands is no chat: the operator
-    /// hears which tree stopped it and the dataset holds nothing new.
+    /// hears which tree stopped it and the dataset holds nothing new. The tree
+    /// it stops on is the memory tree, because the workspace is left in the
+    /// core's hands for git to clone into (issue #53).
     #[cfg(unix)]
     #[test]
     fn a_chat_whose_trees_will_not_change_hands_is_never_published() {
@@ -577,7 +578,7 @@ mod tests {
             .expect_err("a chat nobody can work in should not be created");
 
         assert!(
-            format!("{error}").contains(&root.path().join(WORKSPACES_DIR).display().to_string()),
+            format!("{error}").contains(&root.path().join(CHATS_DIR).display().to_string()),
             "error should name the tree that would not change hands, got: {error}"
         );
         assert!(
