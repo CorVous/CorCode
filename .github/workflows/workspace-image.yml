@@ -36,6 +36,12 @@ jobs:
             --volume "$PWD/docker/workspace/smoke.sh:/smoke.sh:ro" \
             "$IMAGE:candidate" bash /smoke.sh
 
+      - name: Resolve the baked settings to auto mode
+        run: |
+          docker run --rm \
+            --volume "$PWD/docker/workspace/tests:/opt/corcode-agent/tests:ro" \
+            "$IMAGE:candidate" node /opt/corcode-agent/tests/permission-mode.test.mjs
+
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
