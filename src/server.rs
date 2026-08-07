@@ -1,10 +1,11 @@
 //! HTTP server: routes, the session gate, serving, and graceful shutdown.
 
+use std::error::Error;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Chain, Context as _, Result};
 use axum::Router;
 use axum::extract::{Form, FromRef, FromRequestParts, Path, Request, State};
 use axum::http::request::Parts;
@@ -299,7 +300,7 @@ where
             (StatusCode::BAD_REQUEST, format!("{refusal}\n")).into_response()
         }
         Err(failure) => {
-            error!("a chat could not be created: {failure:#}");
+            error!("a chat could not be created: {}", with_causes(&failure));
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "The chat could not be created.\n",
@@ -387,7 +388,7 @@ where
     match chats.prompt(&chat_id, &form.prompt).await {
         Ok(()) => rendered_log(&chats, &chat_id),
         Err(failure @ PromptError::Unwoken(_)) => {
-            error!("a chat would not wake: {:#}", anyhow::Error::new(failure));
+            error!("a chat would not wake: {}", with_causes(&failure));
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The chat could not be woken. The prompt was not sent.\n",
@@ -398,7 +399,7 @@ where
             (StatusCode::CONFLICT, format!("{refusal}.\n")).into_response()
         }
         Err(failure @ PromptError::Unrecorded(_)) => {
-            error!("a turn was lost: {:#}", anyhow::Error::new(failure));
+            error!("a turn was lost: {}", with_causes(&failure));
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "The turn could not be written down.\n",
@@ -406,7 +407,7 @@ where
                 .into_response()
         }
         Err(failure) => {
-            error!("a turn broke: {:#}", anyhow::Error::new(failure));
+            error!("a turn broke: {}", with_causes(&failure));
             (StatusCode::BAD_GATEWAY, "The turn broke.\n").into_response()
         }
     }
@@ -439,7 +440,7 @@ where
             (StatusCode::CONFLICT, format!("{refusal}.\n")).into_response()
         }
         Err(failure @ ArchiveError::NotPushed(_)) => {
-            error!("a chat was not archived: {:#}", anyhow::Error::new(failure));
+            error!("a chat was not archived: {}", with_causes(&failure));
             (
                 StatusCode::BAD_GATEWAY,
                 "Nothing reached the remote, so nothing was torn down.\n",
@@ -447,7 +448,7 @@ where
                 .into_response()
         }
         Err(failure) => {
-            error!("a chat broke on archive: {:#}", anyhow::Error::new(failure));
+            error!("a chat broke on archive: {}", with_causes(&failure));
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "The chat could not be archived.\n",
@@ -486,6 +487,16 @@ async fn htmx() -> Response {
         ui::HTMX,
     )
         .into_response()
+}
+
+/// A failure and every cause beneath it, as one log line. A typed error
+/// displays its own summary and no more, so without this the log would keep
+/// the one thing the summary was standing in for: what actually went wrong.
+fn with_causes(failure: &(dyn Error + 'static)) -> String {
+    Chain::new(failure)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
 }
 
 /// Show the operator what broke instead of repairing or hiding it
