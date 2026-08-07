@@ -4,7 +4,7 @@
   "private": true,
   "description": "The ACP adapter and Claude Agent SDK baked into the CorCode workspace image.",
   "dependencies": {
-    "@zed-industries/claude-agent-acp": "0.23.1"
+    "@agentclientprotocol/claude-agent-acp": "0.66.0"
   },
   "overrides": {
     "@anthropic-ai/claude-agent-sdk": "0.3.223"
