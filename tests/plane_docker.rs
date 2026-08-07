@@ -8,8 +8,13 @@ use std::time::Duration;
 use bollard::Docker;
 use bollard::errors::Error as DockerError;
 use bollard::exec::StartExecResults;
-use bollard::models::{ContainerInspectResponse, ExecConfig, NetworkCreateRequest};
-use bollard::query_parameters::{StopContainerOptionsBuilder, WaitContainerOptionsBuilder};
+use bollard::models::{
+    ContainerCreateBody, ContainerInspectResponse, ExecConfig, HostConfig, NetworkCreateRequest,
+};
+use bollard::query_parameters::{
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder,
+    StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
+};
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings, container_name};
 use futures_util::StreamExt as _;
 use tempfile::TempDir;
@@ -26,6 +31,9 @@ const TEST_IMAGE: &str = "alpine:3.22";
 const CHAT_ID: &str = "01K1DOCKERGATEDTEST00000";
 const KEEP_ALIVE_CHAT_ID: &str = "01K1DOCKERKEEPALIVE00000";
 const MIGRATION_CHAT_ID: &str = "01K1DOCKERMIGRATION00000";
+const IN_USE_CHAT_ID: &str = "01K1DOCKERNETWORKINUSE00";
+/// A container the plane did not spawn and must not throw away.
+const INTERLOPER: &str = "corcode-test-interloper";
 const MEMORY_MB: u32 = 512;
 const CPUS: u32 = 1;
 /// Long enough for an image command to have run out: the adapter reading EOF
@@ -36,6 +44,8 @@ const SETTLE: Duration = Duration::from_secs(3);
 const TEST_STOP_GRACE_SECONDS: i32 = 1;
 /// The state the daemon has finished committing an exit into.
 const NOT_RUNNING: &str = "not-running";
+/// How the daemon says it has never heard of a container or a network.
+const NOT_FOUND: u16 = 404;
 
 /// The daemon, taken one test at a time. The migration case replaces the agent
 /// network wholesale, which the daemon refuses while another test's container
@@ -165,15 +175,77 @@ async fn a_spawn_replaces_the_internal_network_an_older_deployment_left() {
     );
 }
 
+/// The one thing a spawn will not do to an old internal network: take it away
+/// from something already running on it. The remedy has to reach the operator
+/// as an error, since the plane cannot tell whose container that is.
+#[tokio::test]
+async fn a_spawn_refuses_an_internal_network_with_a_container_on_it() {
+    let Some(docker) = reachable_daemon() else {
+        eprintln!(
+            "SKIPPED a_spawn_refuses_an_internal_network_with_a_container_on_it: no docker daemon"
+        );
+        return;
+    };
+    let _daemon = the_daemon_to_ourselves().await;
+    let plane = DockerPlane::connect(settings()).expect("the daemon should be reachable");
+    put_back_the_internal_network(&docker).await;
+    put_a_container_on_the_network(&docker).await;
+    let workspace = TempDir::new().expect("workspace dir should be created");
+    let claude = TempDir::new().expect("claude dir should be created");
+
+    let refusal = plane
+        .spawn(
+            IN_USE_CHAT_ID,
+            workspace.path(),
+            claude.path(),
+            &BTreeMap::new(),
+        )
+        .await;
+
+    let network = docker.inspect_network(AGENT_NETWORK, None).await;
+    let interloper = docker.inspect_container(INTERLOPER, None).await;
+    force_remove(&docker, INTERLOPER).await;
+    clear_any_leftover(&plane, IN_USE_CHAT_ID).await;
+
+    let refusal = refusal.expect_err("a spawn should refuse a network it cannot replace");
+    assert!(
+        matches!(refusal, PlaneError::NetworkInUse { ref network } if network == AGENT_NETWORK),
+        "the refusal should name the network and what to stop, got: {refusal}"
+    );
+    assert_eq!(
+        network
+            .expect("the network in use should still be there")
+            .internal,
+        Some(true),
+        "the network someone is on should have survived the refused spawn"
+    );
+    assert_eq!(
+        interloper
+            .ok()
+            .and_then(|interloper| interloper.state)
+            .and_then(|state| state.running),
+        Some(true),
+        "the container the plane refused to cut off should still be running"
+    );
+}
+
 /// The daemon state an upgraded deployment wakes up in: the agents' name held
-/// by an internal network, with nothing on it.
+/// by an internal network, with nothing on it. Whatever an earlier run left
+/// attached goes first — a leaked container would otherwise fail the migration
+/// cases here as though the plane were at fault.
 async fn put_back_the_internal_network(docker: &Docker) {
+    for attached in attached_to_the_network(docker).await {
+        force_remove(docker, &attached).await;
+    }
     match docker.remove_network(AGENT_NETWORK).await {
         Ok(())
         | Err(DockerError::DockerResponseServerError {
-            status_code: 404, ..
+            status_code: NOT_FOUND,
+            ..
         }) => {}
-        Err(error) => panic!("the agent network should be ours to remove: {error}"),
+        Err(error) => panic!(
+            "the agent network should be ours to remove, so something outside these tests is on {AGENT_NETWORK}: {error}"
+        ),
     }
     docker
         .create_network(NetworkCreateRequest {
@@ -184,6 +256,73 @@ async fn put_back_the_internal_network(docker: &Docker) {
         })
         .await
         .expect("an internal network should be creatable");
+}
+
+/// Every container the daemon says is on the agent network, by id. A network
+/// it has never heard of holds nothing.
+async fn attached_to_the_network(docker: &Docker) -> Vec<String> {
+    docker
+        .inspect_network(AGENT_NETWORK, None)
+        .await
+        .ok()
+        .and_then(|network| network.containers)
+        .map(|attached| attached.into_keys().collect())
+        .unwrap_or_default()
+}
+
+/// Someone else's container on the agents' network: what makes the old
+/// internal network one the plane must refuse rather than replace.
+async fn put_a_container_on_the_network(docker: &Docker) {
+    pull_the_test_image(docker).await;
+    force_remove(docker, INTERLOPER).await;
+    let options = CreateContainerOptionsBuilder::new()
+        .name(INTERLOPER)
+        .build();
+    let created = docker
+        .create_container(
+            Some(options),
+            ContainerCreateBody {
+                image: Some(TEST_IMAGE.to_owned()),
+                entrypoint: Some(vec![String::new()]),
+                cmd: Some(vec!["sleep".to_owned(), "infinity".to_owned()]),
+                host_config: Some(HostConfig {
+                    network_mode: Some(AGENT_NETWORK.to_owned()),
+                    ..HostConfig::default()
+                }),
+                ..ContainerCreateBody::default()
+            },
+        )
+        .await
+        .expect("a container should be creatable on the agent network");
+    docker
+        .start_container(&created.id, None)
+        .await
+        .expect("the container on the agent network should start");
+}
+
+/// The plane pulls the image it spawns from, but a spawn that never gets past
+/// the network has pulled nothing.
+async fn pull_the_test_image(docker: &Docker) {
+    let options = CreateImageOptionsBuilder::new()
+        .from_image(TEST_IMAGE)
+        .build();
+    let mut pull = docker.create_image(Some(options), None, None);
+    while let Some(progress) = pull.next().await {
+        progress.expect("the test image should pull");
+    }
+}
+
+/// Force, because a container in the way of a test is in the way running.
+async fn force_remove(docker: &Docker, container: &str) {
+    let force = RemoveContainerOptionsBuilder::new().force(true).build();
+    match docker.remove_container(container, Some(force)).await {
+        Ok(())
+        | Err(DockerError::DockerResponseServerError {
+            status_code: NOT_FOUND,
+            ..
+        }) => {}
+        Err(error) => panic!("a container in the way should be removable: {error}"),
+    }
 }
 
 /// The image's own command exits at once; the chat's container may not go with
