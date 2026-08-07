@@ -620,6 +620,56 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_is_named_by_the_shorthand_or_by_an_https_url_of_its_own() {
+        for named in [
+            "CorVous/CorCode",
+            "cor_vous/cor.code-1",
+            "https://gitea.example/cor/thing.git",
+            "https://gitea.example:8443/cor/thing",
+            "https://github.com/CorVous/CorCode",
+        ] {
+            assert!(names_a_repository(named), "{named} is a repository");
+        }
+        for unnamed in [
+            "",
+            "-flag",
+            "owner/name/extra",
+            "owner/",
+            "/name",
+            "file:///x",
+            "ssh://git@example/cor/thing",
+            "git://example/cor/thing",
+            "ext::sh -c id",
+            "example.com:cor/thing",
+            "https://user:pass@example/cor/thing",
+            "https://user@example/cor/thing",
+            "https:///cor/thing",
+            "http://example/cor/thing",
+            "https://exa mple/cor/thing",
+        ] {
+            assert!(!names_a_repository(unnamed), "{unnamed} is not a repository");
+        }
+    }
+
+    /// `CORCODE_REPOS` is a list of GitHub repositories and nothing else: a
+    /// URL there is a misconfiguration, however well a typed one would work.
+    #[test]
+    fn the_shorthand_is_the_only_thing_the_configured_list_may_hold() {
+        assert!(names_a_github_repository("CorVous/CorCode"));
+        for unnamed in [
+            "https://github.com/CorVous/CorCode",
+            "-flag",
+            "owner/name/extra",
+            "./x",
+        ] {
+            assert!(
+                !names_a_github_repository(unnamed),
+                "{unnamed} is not an owner/name repository"
+            );
+        }
+    }
+
+    #[test]
     fn a_clone_url_names_the_repository_on_github() {
         let origin = Remotes::new(GITHUB).origin("CorVous/CorCode", None);
 
