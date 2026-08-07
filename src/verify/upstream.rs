@@ -12,7 +12,7 @@ use ureq::http::header::{ACCEPT, AUTHORIZATION, HeaderValue, InvalidHeaderValue,
 use ureq::http::{Request, Response};
 use ureq::{Agent, Body};
 
-use crate::secrets::Secret;
+use crate::secrets::{AnthropicCredential, Secret};
 
 use super::{Verified, VerifyClient};
 
@@ -38,6 +38,16 @@ const REPO_SCOPE: &str = "repo";
 
 /// The cheapest authenticated call the Anthropic API has.
 const ANTHROPIC_MODELS: &str = "https://api.anthropic.com/v1/models";
+
+/// The API version every Anthropic call is made against.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// The beta a subscription token is authenticated under. Taken from the SDK
+/// the agent itself runs on, which appends exactly this to every request it
+/// makes under token auth: `OAUTH_API_BETA_HEADER` in
+/// `@anthropic-ai/sdk/src/lib/credentials/types.ts`, applied in
+/// `client.ts::prepareRequest`.
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 
 /// Checks credentials against the real services.
 #[derive(Clone)]
@@ -111,11 +121,18 @@ fn request(secret: Secret, value: &str) -> Result<Request<()>, ureq::http::Error
             .header("x-github-api-version", "2022-11-28")
             .header(AUTHORIZATION, credential(&format!("Bearer {value}"))?)
             .body(()),
-        Secret::AnthropicKey => Request::get(ANTHROPIC_MODELS)
-            .header(USER_AGENT, ASKING)
-            .header("anthropic-version", "2023-06-01")
-            .header("x-api-key", credential(value)?)
-            .body(()),
+        Secret::AnthropicKey => {
+            let asking = Request::get(ANTHROPIC_MODELS)
+                .header(USER_AGENT, ASKING)
+                .header("anthropic-version", ANTHROPIC_VERSION);
+            match AnthropicCredential::of(value) {
+                AnthropicCredential::ApiKey => asking.header("x-api-key", credential(value)?),
+                AnthropicCredential::OauthToken => asking
+                    .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
+                    .header(AUTHORIZATION, credential(&format!("Bearer {value}"))?),
+            }
+            .body(())
+        }
     }
 }
 
@@ -187,6 +204,9 @@ mod tests {
     /// Distinctive enough that a leak into any rendering is unmistakable.
     const CREDENTIAL: &str = "sk-a-credential-that-must-not-be-printed";
 
+    /// The same, carrying the prefix of a subscription token.
+    const SUBSCRIPTION: &str = "sk-ant-oat01-a-token-that-must-not-be-printed";
+
     fn asked(secret: Secret) -> Request<()> {
         request(secret, CREDENTIAL).expect("an ordinary credential should be spellable")
     }
@@ -247,6 +267,41 @@ mod tests {
         );
     }
 
+    /// A subscription token is not a key, and the API only reads it as one
+    /// thing: an OAuth bearer under the beta the agent's own SDK sends on
+    /// every request it authenticates that way.
+    #[test]
+    fn the_anthropic_check_puts_a_subscription_token_the_way_a_subscription_is_put() {
+        let request =
+            request(Secret::AnthropicKey, SUBSCRIPTION).expect("a token should be spellable");
+
+        assert_eq!(request.method(), "GET");
+        assert_eq!(
+            request.uri().to_string(),
+            "https://api.anthropic.com/v1/models"
+        );
+        assert_eq!(
+            header(&request, "authorization"),
+            format!("Bearer {SUBSCRIPTION}")
+        );
+        assert_eq!(header(&request, "anthropic-beta"), "oauth-2025-04-20");
+        assert_eq!(header(&request, "anthropic-version"), "2023-06-01");
+        assert!(
+            request.headers().get("x-api-key").is_none(),
+            "a subscription token was offered as a key as well"
+        );
+    }
+
+    /// The reverse: a key is never dressed up as a bearer, and never carries a
+    /// beta it has no business asking for.
+    #[test]
+    fn the_anthropic_check_puts_a_key_the_way_a_key_is_put() {
+        let request = asked(Secret::AnthropicKey);
+
+        assert_eq!(header(&request, "x-api-key"), CREDENTIAL);
+        assert!(request.headers().get("anthropic-beta").is_none());
+    }
+
     /// GitHub turns away a request that does not say who is asking.
     #[test]
     fn every_check_says_which_program_is_asking() {
@@ -259,13 +314,20 @@ mod tests {
 
     #[test]
     fn no_check_ever_prints_the_credential_it_carries() {
-        for secret in Secret::ALL {
-            let printed = format!("{:?}", asked(secret));
+        let mut asked: Vec<Request<()>> = Secret::ALL.into_iter().map(asked).collect();
+        asked.push(
+            request(Secret::AnthropicKey, SUBSCRIPTION).expect("a token should be spellable"),
+        );
 
-            assert!(
-                !printed.contains(CREDENTIAL),
-                "the credential leaked: {printed}"
-            );
+        for request in &asked {
+            let printed = format!("{request:?}");
+
+            for carried in [CREDENTIAL, SUBSCRIPTION] {
+                assert!(
+                    !printed.contains(carried),
+                    "the credential leaked: {printed}"
+                );
+            }
         }
     }
 

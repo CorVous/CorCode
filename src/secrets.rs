@@ -23,12 +23,66 @@ const SECRETS_DIR: &str = "secrets";
 /// mid-write cannot leave half a credential behind.
 const PENDING: &str = "tmp";
 
+/// What Anthropic starts a subscription token with, and nothing else.
+const SUBSCRIPTION_PREFIX: &str = "sk-ant-oat";
+
+/// Which of the two things the Anthropic slot takes is in it. The slot is one
+/// slot: a value says which it is by the prefix it carries, and no other part
+/// of it is ever looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnthropicCredential {
+    /// A subscription token, which authenticates as an OAuth bearer.
+    OauthToken,
+    /// A key issued by the console, which authenticates as itself.
+    ApiKey,
+}
+
+impl AnthropicCredential {
+    /// What `value` is, by its prefix.
+    #[must_use]
+    pub fn of(value: &str) -> Self {
+        if value.starts_with(SUBSCRIPTION_PREFIX) {
+            Self::OauthToken
+        } else {
+            Self::ApiKey
+        }
+    }
+
+    /// The variable the agent reads this kind from (ADR-0001). Each kind has
+    /// its own, so a container handed one is never handed the other.
+    #[must_use]
+    pub const fn variable(self) -> &'static str {
+        match self {
+            Self::OauthToken => "CLAUDE_CODE_OAUTH_TOKEN",
+            Self::ApiKey => "ANTHROPIC_API_KEY",
+        }
+    }
+}
+
+/// How one secret stands, as everything that is not allowed the value is told
+/// it: where the value in force came from, and — for a slot that takes more
+/// than one kind of credential — which kind is in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Standing {
+    pub source: Source,
+    pub kind: Option<AnthropicCredential>,
+}
+
+impl From<Source> for Standing {
+    /// A secret whose slot takes one kind of credential stands for where its
+    /// value came from and nothing else.
+    fn from(source: Source) -> Self {
+        Self { source, kind: None }
+    }
+}
+
 /// One operational secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Secret {
     /// Opens the private repositories a chat is cut from (ADR-0005).
     GithubToken,
-    /// Handed to the agent as `ANTHROPIC_API_KEY` (ADR-0001).
+    /// Handed to the agent under whichever name its kind is read from
+    /// (ADR-0001). One slot takes either an API key or a subscription token.
     AnthropicKey,
 }
 
@@ -120,15 +174,27 @@ impl Secrets {
         Ok(self.in_force(secret)?.map(|(_, value)| value))
     }
 
-    /// What the console says about `secret` without ever saying it.
-    pub fn source(&self, secret: Secret) -> Result<Source, SecretsError> {
-        Ok(self
-            .in_force(secret)?
-            .map_or(Source::Unset, |(source, _)| source))
+    /// What the console says about `secret` without ever saying it. One read
+    /// answers both halves, so a rotation cannot land between them and leave
+    /// the panel describing two different values.
+    pub fn standing(&self, secret: Secret) -> Result<Standing, SecretsError> {
+        let Some((source, value)) = self.in_force(secret)? else {
+            return Ok(Source::Unset.into());
+        };
+        Ok(match secret {
+            Secret::GithubToken => source.into(),
+            Secret::AnthropicKey => Standing {
+                source,
+                kind: Some(AnthropicCredential::of(&value)),
+            },
+        })
     }
 
     /// The value in force for `secret` and where it came from: what was last
-    /// written for it, else what the environment bootstrapped.
+    /// written for it, else what the environment bootstrapped. Neither
+    /// carries the whitespace around it — a variable quoted by hand in a
+    /// compose file keeps what the quoting left, and a prefix that is not at
+    /// the front reads as the wrong kind of credential.
     fn in_force(&self, secret: Secret) -> Result<Option<(Source, String)>, SecretsError> {
         if let Some(written) = self.written(secret)? {
             return Ok(Some((Source::Settings, written)));
@@ -136,7 +202,7 @@ impl Secrets {
         Ok(self
             .from_env
             .get(&secret)
-            .map(|value| (Source::Environment, value.clone())))
+            .map(|value| (Source::Environment, value.trim().to_owned())))
     }
 
     /// Put `value` in force for every read after this one, without the
@@ -244,6 +310,89 @@ mod tests {
     const TOKEN: &str = "ghs-clone-secret";
     const ROTATED: &str = "ghs-rotated-secret";
     const FROM_ENV: &str = "ghs-bootstrapped";
+    const SUBSCRIPTION: &str = "sk-ant-oat01-subscription-secret";
+
+    /// Anthropic issues subscription tokens under a prefix of their own, and
+    /// what opens the service with one is not what opens it with a key.
+    #[test]
+    fn an_anthropic_credential_is_whatever_its_prefix_says_it_is() {
+        assert_eq!(
+            AnthropicCredential::of(SUBSCRIPTION),
+            AnthropicCredential::OauthToken
+        );
+        assert_eq!(
+            AnthropicCredential::of("sk-ant-api03-key"),
+            AnthropicCredential::ApiKey
+        );
+        assert_eq!(AnthropicCredential::of(""), AnthropicCredential::ApiKey);
+    }
+
+    /// The agent reads each kind from a name of its own, so a container that
+    /// is handed one is never handed the other (ADR-0001).
+    #[test]
+    fn each_kind_of_anthropic_credential_is_read_from_a_name_of_its_own() {
+        assert_eq!(
+            AnthropicCredential::OauthToken.variable(),
+            "CLAUDE_CODE_OAUTH_TOKEN"
+        );
+        assert_eq!(AnthropicCredential::ApiKey.variable(), "ANTHROPIC_API_KEY");
+    }
+
+    /// A variable is quoted by hand in a compose file, and the whitespace
+    /// that survives that is not part of the credential. A read takes it off
+    /// a file already; the environment is no different, and a prefix that is
+    /// not at the front reads as the wrong kind entirely.
+    #[test]
+    fn a_bootstrapped_credential_is_read_without_the_whitespace_around_it() {
+        let dir = tempdir().expect("temp dir should be creatable");
+        let secrets = Secrets::new(
+            dir.path(),
+            [(Secret::AnthropicKey, format!("  {SUBSCRIPTION}\n"))],
+        );
+
+        assert_eq!(
+            read(&secrets, Secret::AnthropicKey).as_deref(),
+            Some(SUBSCRIPTION)
+        );
+        assert_eq!(
+            standing(&secrets, Secret::AnthropicKey),
+            Standing {
+                source: Source::Environment,
+                kind: Some(AnthropicCredential::OauthToken),
+            }
+        );
+    }
+
+    /// The Anthropic slot takes either kind, and which one is in it is the
+    /// only thing about the value anything else is told.
+    #[test]
+    fn only_the_anthropic_slot_stands_for_a_kind_of_credential() {
+        let (_dir, secrets) = bootstrapped();
+        secrets
+            .write(Secret::AnthropicKey, SUBSCRIPTION)
+            .expect("a secret should be writable");
+
+        assert_eq!(
+            standing(&secrets, Secret::AnthropicKey),
+            Standing {
+                source: Source::Settings,
+                kind: Some(AnthropicCredential::OauthToken),
+            }
+        );
+        assert_eq!(
+            standing(&secrets, Secret::GithubToken),
+            Standing {
+                source: Source::Environment,
+                kind: None,
+            }
+        );
+    }
+
+    fn standing(secrets: &Secrets, secret: Secret) -> Standing {
+        secrets
+            .standing(secret)
+            .expect("a secret should be readable")
+    }
 
     #[test]
     fn a_secret_says_whether_it_is_set_and_what_set_it() {
@@ -572,7 +721,7 @@ mod tests {
     }
 
     fn source(secrets: &Secrets, secret: Secret) -> Source {
-        secrets.source(secret).expect("a secret should be readable")
+        standing(secrets, secret).source
     }
 
     /// Secrets over an empty dataset, with nothing bootstrapped.

@@ -28,11 +28,15 @@ const REPO: &str = "CorVous/fixture";
 const BARE: &str = "CorVous/fixture.git";
 const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
 
-/// The variable the agent reads its Anthropic credentials from (ADR-0001).
+/// The variable the agent reads an Anthropic API key from (ADR-0001).
 const API_KEY: &str = "ANTHROPIC_API_KEY";
+
+/// The variable it reads a subscription token from instead.
+const OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
 const BOOTSTRAPPED_KEY: &str = "sk-ant-bootstrapped";
 const ROTATED_KEY: &str = "sk-ant-rotated";
+const SUBSCRIPTION: &str = "sk-ant-oat01-subscription-secret";
 const TOKEN: &str = "ghs-clone-secret";
 const ROTATED_TOKEN: &str = "ghs-rotated-secret";
 
@@ -43,6 +47,41 @@ async fn a_container_is_spawned_with_the_key_the_environment_bootstrapped() {
     let chat = dataset.create("first").await;
 
     assert_eq!(dataset.key_of(&chat).as_deref(), Some(BOOTSTRAPPED_KEY));
+}
+
+/// A subscription token is not a key, and the agent reads it from somewhere
+/// else. Handing it over as a key is how it gets turned away mid-chat.
+#[tokio::test]
+async fn a_container_spawned_over_a_subscription_token_carries_it_as_one() {
+    let dataset = Dataset::bootstrapped_with(None);
+    dataset.write(Secret::AnthropicKey, SUBSCRIPTION);
+
+    let chat = dataset.create("subscribed").await;
+
+    assert_eq!(
+        dataset.env_of(&chat, OAUTH_TOKEN).as_deref(),
+        Some(SUBSCRIPTION)
+    );
+    assert_eq!(
+        dataset.env_of(&chat, API_KEY),
+        None,
+        "the token was handed over as a key as well"
+    );
+}
+
+/// The reverse: a key is a key, and nothing tells the agent to look for a
+/// subscription it has not got.
+#[tokio::test]
+async fn a_container_spawned_over_a_key_carries_no_subscription_token() {
+    let dataset = Dataset::bootstrapped_with(Some(BOOTSTRAPPED_KEY));
+
+    let chat = dataset.create("keyed").await;
+
+    assert_eq!(
+        dataset.env_of(&chat, API_KEY).as_deref(),
+        Some(BOOTSTRAPPED_KEY)
+    );
+    assert_eq!(dataset.env_of(&chat, OAUTH_TOKEN), None);
 }
 
 #[tokio::test]
@@ -191,10 +230,16 @@ impl Dataset {
     /// The Anthropic key the chat's container was spawned with, if it holds
     /// one.
     fn key_of(&self, chat_id: &str) -> Option<String> {
+        self.env_of(chat_id, API_KEY)
+    }
+
+    /// What the chat's container was spawned with under `variable`, if it was
+    /// spawned with anything under it at all.
+    fn env_of(&self, chat_id: &str, variable: &str) -> Option<String> {
         self.plane
             .env_of(chat_id)
             .expect("the chat should be holding a container")
-            .get(API_KEY)
+            .get(variable)
             .cloned()
     }
 

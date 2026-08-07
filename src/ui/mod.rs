@@ -179,8 +179,8 @@ mod tests {
             },
             &["CorVous/CorCode".to_owned()],
             &[
-                (Secret::GithubToken, Source::Environment),
-                (Secret::AnthropicKey, Source::Unset),
+                (Secret::GithubToken, Source::Environment.into()),
+                (Secret::AnthropicKey, Source::Unset.into()),
             ],
         ));
     }

@@ -4,7 +4,7 @@
 //! No function here is ever handed a secret's value, which is how none of
 //! them can render one.
 
-use crate::secrets::{Secret, Source};
+use crate::secrets::{AnthropicCredential, Secret, Source, Standing};
 use crate::settings::Outcome;
 use crate::verify::Verified;
 
@@ -17,10 +17,10 @@ const SHORT_OF_REPO_SCOPE: &str =
 
 /// The whole panel, as the console draws it with nothing just done to it.
 #[must_use]
-pub fn settings_panel(secrets: &[(Secret, Source)]) -> String {
+pub fn settings_panel(secrets: &[(Secret, Standing)]) -> String {
     let sections: String = secrets
         .iter()
-        .map(|&(secret, source)| secret_settings(secret, source, &Outcome::Untouched))
+        .map(|&(secret, standing)| secret_settings(secret, standing, &Outcome::Untouched))
         .collect();
     format!("<details id=\"settings\"><summary>Settings</summary>{sections}</details>")
 }
@@ -30,7 +30,7 @@ pub fn settings_panel(secrets: &[(Secret, Source)]) -> String {
 /// Only the section is replaced: the panel around it holds whether the reader
 /// has it open.
 #[must_use]
-pub fn secret_settings(secret: Secret, source: Source, outcome: &Outcome) -> String {
+pub fn secret_settings(secret: Secret, standing: Standing, outcome: &Outcome) -> String {
     let name = secret.name();
     let swap = format!(
         "hx-target=\"#{}\" hx-swap=\"outerHTML\"",
@@ -46,7 +46,7 @@ pub fn secret_settings(secret: Secret, source: Source, outcome: &Outcome) -> Str
          </section>",
         section_id(secret),
         label(secret),
-        reads(source),
+        reads(standing),
         told(outcome),
         secret_path(name),
         secret_clear_path(name),
@@ -67,12 +67,25 @@ const fn label(secret: Secret) -> &'static str {
     }
 }
 
-/// How a secret's status line reads.
-const fn reads(source: Source) -> &'static str {
-    match source {
+/// How a secret's status line reads: where its value came from, and — where
+/// the slot takes more than one kind of credential — what it was read as.
+fn reads(standing: Standing) -> String {
+    let source = match standing.source {
         Source::Unset => "not set",
         Source::Environment => "set (from environment)",
         Source::Settings => "set (from settings)",
+    };
+    standing.kind.map_or_else(
+        || source.to_owned(),
+        |kind| format!("{source} — {}", named(kind)),
+    )
+}
+
+/// What the panel calls each kind of Anthropic credential out loud.
+const fn named(kind: AnthropicCredential) -> &'static str {
+    match kind {
+        AnthropicCredential::OauthToken => "OAuth token",
+        AnthropicCredential::ApiKey => "API key",
     }
 }
 
@@ -147,6 +160,46 @@ mod tests {
         }
     }
 
+    /// The Anthropic slot takes either kind, and the two are opened with in
+    /// different ways. Which one is in there is the operator's to see, from
+    /// wherever it came.
+    #[test]
+    fn a_slot_that_takes_more_than_one_kind_of_credential_names_the_one_in_it() {
+        for (source, set) in [
+            (Source::Settings, "set (from settings)"),
+            (Source::Environment, "set (from environment)"),
+        ] {
+            for (kind, named) in [
+                (AnthropicCredential::OauthToken, "OAuth token"),
+                (AnthropicCredential::ApiKey, "API key"),
+            ] {
+                let rendered = secret_settings(
+                    Secret::AnthropicKey,
+                    Standing {
+                        source,
+                        kind: Some(kind),
+                    },
+                    &Outcome::Untouched,
+                );
+
+                assert!(
+                    rendered.contains(&format!("{set} — {named}")),
+                    "a {kind:?} from {source:?} does not read as one: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_secret_that_stands_for_no_kind_of_credential_names_none() {
+        let rendered = untouched(Source::Settings);
+
+        assert!(
+            rendered.contains("<p>set (from settings)</p>"),
+            "{rendered}"
+        );
+    }
+
     #[test]
     fn the_box_a_secret_is_typed_into_never_carries_one_back() {
         let rendered = untouched(Source::Settings);
@@ -186,8 +239,8 @@ mod tests {
     #[test]
     fn nothing_in_the_panel_checks_a_credential_on_a_clock() {
         let rendered = settings_panel(&[
-            (Secret::GithubToken, Source::Settings),
-            (Secret::AnthropicKey, Source::Environment),
+            (Secret::GithubToken, Source::Settings.into()),
+            (Secret::AnthropicKey, Source::Environment.into()),
         ]);
 
         assert!(
@@ -199,8 +252,8 @@ mod tests {
     #[test]
     fn the_panel_holds_every_secret_this_deployment_keeps() {
         let rendered = settings_panel(&[
-            (Secret::GithubToken, Source::Settings),
-            (Secret::AnthropicKey, Source::Unset),
+            (Secret::GithubToken, Source::Settings.into()),
+            (Secret::AnthropicKey, Source::Unset.into()),
         ]);
 
         assert!(
@@ -317,11 +370,11 @@ mod tests {
 
     /// One secret's section, with nothing just done to it.
     fn untouched(source: Source) -> String {
-        secret_settings(Secret::GithubToken, source, &Outcome::Untouched)
+        secret_settings(Secret::GithubToken, source.into(), &Outcome::Untouched)
     }
 
     /// One secret's section, reporting what was just done to it.
     fn after(outcome: &Outcome) -> String {
-        secret_settings(Secret::GithubToken, Source::Settings, outcome)
+        secret_settings(Secret::GithubToken, Source::Settings.into(), outcome)
     }
 }

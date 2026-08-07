@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use chrono::TimeDelta;
 
 use crate::git::chat_branch;
-use crate::secrets::{Secret, Source};
+use crate::secrets::{Secret, Standing};
 use crate::status::{Slot, Status};
 use crate::store::RuntimeStatus;
 use crate::sweep::Swept;
@@ -38,7 +38,7 @@ pub fn console_page(
     chats: &[Chat],
     status: &Status,
     repos: &[String],
-    secrets: &[(Secret, Source)],
+    secrets: &[(Secret, Standing)],
 ) -> String {
     page(
         "CorCode",
@@ -259,6 +259,7 @@ fn image_tag(workspace_image: &str) -> &str {
 mod tests {
     use chrono::Utc;
 
+    use crate::secrets::Source;
     use crate::store::{ChatState, MANIFEST_SCHEMA, Manifest};
 
     use super::super::status_word;
@@ -272,10 +273,10 @@ mod tests {
 
     /// A deployment whose environment carried a GitHub token in and which was
     /// given no Anthropic key at all.
-    fn secrets() -> [(Secret, Source); 2] {
+    fn secrets() -> [(Secret, Standing); 2] {
         [
-            (Secret::GithubToken, Source::Environment),
-            (Secret::AnthropicKey, Source::Unset),
+            (Secret::GithubToken, Source::Environment.into()),
+            (Secret::AnthropicKey, Source::Unset.into()),
         ]
     }
 

@@ -37,6 +37,11 @@ const SENTINEL: &str = "ghp-sentinel-set-from-the-console";
 /// The same, for the value the environment bootstrapped.
 const FROM_ENV: &str = "ghp-sentinel-bootstrapped";
 
+/// The same again, carrying the prefix that makes the Anthropic slot read a
+/// value as a subscription token. The prefix is looked at; nothing after it
+/// may ever reach a page.
+const SUBSCRIPTION_SENTINEL: &str = "sk-ant-oat01-sentinel-set-from-the-console";
+
 /// Every path the settings panel posts to.
 const MUTATING: [&str; 6] = [
     "/settings/github_token",
@@ -153,6 +158,33 @@ async fn clearing_the_only_value_there_ever_was_leaves_the_secret_unset() {
     app.stop().await;
 }
 
+/// The Anthropic slot takes either a key or a subscription token, and the two
+/// open the service in different ways. The panel says which one is in there
+/// without saying any of it.
+#[tokio::test]
+async fn the_anthropic_slot_says_which_kind_of_credential_it_is_holding() {
+    let app = TestApp::bare().await;
+
+    let subscribed = app.save("anthropic_key", SUBSCRIPTION_SENTINEL).await;
+    let keyed = app.save("anthropic_key", SENTINEL).await;
+
+    assert!(
+        subscribed.contains("set (from settings) — OAuth token"),
+        "a subscription token does not read as one: {subscribed}"
+    );
+    assert!(
+        keyed.contains("set (from settings) — API key"),
+        "a key does not read as one: {keyed}"
+    );
+    assert!(
+        app.console()
+            .await
+            .contains("set (from settings) — API key"),
+        "the console does not name the kind in the slot"
+    );
+    app.stop().await;
+}
+
 /// The one thing the panel exists to handle is the one thing it must never
 /// say back, in any state, on any page, in any fragment.
 #[tokio::test]
@@ -163,6 +195,8 @@ async fn no_page_and_no_fragment_ever_renders_a_secret() {
     let mut rendered = vec![
         app.save("github_token", SENTINEL).await,
         app.save("anthropic_key", SENTINEL).await,
+        app.save("anthropic_key", SUBSCRIPTION_SENTINEL).await,
+        app.act("/settings/anthropic_key/verify").await,
         app.act("/settings/github_token/verify").await,
         app.act("/settings/github_token/clear").await,
     ];
@@ -171,7 +205,9 @@ async fn no_page_and_no_fragment_ever_renders_a_secret() {
     }
 
     for body in &rendered {
-        assert!(!body.contains(SENTINEL), "a set secret leaked: {body}");
+        for leaked in [SENTINEL, SUBSCRIPTION_SENTINEL] {
+            assert!(!body.contains(leaked), "a set secret leaked: {body}");
+        }
         assert!(
             !body.contains(FROM_ENV),
             "a bootstrapped secret leaked: {body}"
