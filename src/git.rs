@@ -1304,7 +1304,8 @@ mod tests {
     /// `GIT_TEST_ASSUME_DIFFERENT_OWNER` is git's own way of being told to read
     /// a tree as another user's, which is what root reading a 1000:1000
     /// workspace amounts to and what no unprivileged test could otherwise
-    /// arrange.
+    /// arrange. A git that will not be told reads the tree as its own, and
+    /// there is no failure here to show.
     #[test]
     fn a_command_works_in_a_tree_read_as_somebody_elses_because_it_says_that_tree_is_safe() {
         let (_origin_dir, remotes) = seeded_repository();
@@ -1315,10 +1316,17 @@ mod tests {
         let reached_in = as_another_user(&args_of(["-C", &spelled], &asking));
         let declared = as_another_user(&args_in(&spelled, &asking));
 
+        if reached_in.status.success() {
+            eprintln!(
+                "SKIPPED a_command_works_in_a_tree_read_as_somebody_elses_because_it_says_that_\
+                 tree_is_safe: this git will not read a tree as another user's"
+            );
+            return;
+        }
         assert!(
-            !reached_in.status.success()
-                && String::from_utf8_lossy(&reached_in.stderr).contains("dubious ownership"),
-            "this git will not read a tree as another user's, so it cannot show the failure"
+            String::from_utf8_lossy(&reached_in.stderr).contains("dubious ownership"),
+            "the tree was refused for something other than who owns it: {}",
+            String::from_utf8_lossy(&reached_in.stderr)
         );
         assert!(
             declared.status.success(),
@@ -1368,11 +1376,17 @@ mod tests {
         );
     }
 
-    /// Git the way a root core reads a workspace that belongs to the agent.
+    /// Git the way a root core reads a workspace that belongs to the agent,
+    /// and reading no config but the command's own: whoever runs this suite may
+    /// have declared trees safe for themselves, and a tree already trusted is a
+    /// tree this test cannot watch being refused.
     fn as_another_user(args: &[String]) -> std::process::Output {
         Command::new("git")
             .args(args)
             .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .output()
             .expect("git should run")
     }
