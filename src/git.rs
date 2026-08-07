@@ -1347,13 +1347,25 @@ mod tests {
         );
     }
 
-    /// Reaching into a workspace without declaring it is the bug this hotfix
-    /// is for, so a call site that tries it never reaches git.
+    /// A command reaches into a tree by naming one, and the clone that makes a
+    /// workspace names none: it has nothing to declare and nothing to forget.
     #[test]
-    fn a_command_reaching_into_a_tree_it_has_not_declared_safe_is_refused_before_git_sees_it() {
+    fn only_a_command_that_names_a_tree_has_anything_to_declare() {
         assert!(declares_what_it_reaches_into(&args_in("/w", &["status"])));
         assert!(declares_what_it_reaches_into(&["clone", "--", "url", "/w"]));
         assert!(!declares_what_it_reaches_into(&["-C", "/w", "status"]));
+    }
+
+    /// Reaching into a workspace without declaring it is the bug this hotfix
+    /// is for, so a call site that spells its own way in never reaches git.
+    #[test]
+    #[should_panic(expected = "without declaring it safe")]
+    fn a_command_reaching_into_a_tree_it_has_not_declared_safe_is_refused_before_git_sees_it() {
+        let _ = super::run(
+            "reach in the old way",
+            &["-C", "/w", "status"],
+            ToOwned::to_owned,
+        );
     }
 
     /// Git the way a root core reads a workspace that belongs to the agent.
