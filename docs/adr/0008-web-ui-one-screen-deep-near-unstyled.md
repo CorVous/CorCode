@@ -24,9 +24,13 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
      picture — warm-pool slots with per-chat idle times, parked count,
      pinned image tag (ADR-0004), orphan-sweep result. There is no
      separate machines page.
-   - **New chat** as an inline collapsed form, not a page: repo select,
-     base-branch select, slug input with a live `chat/<date>-<slug>`
-     branch preview, and the direct-on-base opt-out (ADR-0005).
+   - **New chat** as an inline collapsed form, not a page: repo input
+     over a `<datalist>` of the configured repositories, the first of
+     them its default value; base-branch select, slug input with a live
+     `chat/<date>-<slug>` branch preview, and the direct-on-base opt-out
+     (ADR-0005). _(Amended 2026-08-06: the repo select became a free
+     input — any `owner/name` or `https://` clone URL is accepted, and
+     `CORCODE_REPOS` only suggests.)_
    - **Chat list** grouped by state — live / parked / archived
      (ADR-0002) — each row linking to the chat view, with branch and
      last-push shown small.
