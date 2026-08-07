@@ -13,8 +13,12 @@ pub enum PlaneError {
     AlreadyLive { chat_id: String },
     #[error("{} cannot be spelled as a mount", path.display())]
     UnmountablePath { path: PathBuf },
-    #[error("the {network} network is not internal-only: agents would have a route out")]
+    #[error("the {network} network routes nowhere: agents on it could not reach the API")]
     UnusableNetwork { network: String },
+    #[error(
+        "the {network} network routes nowhere and has containers on it: stop them, then start a chat again to have it replaced"
+    )]
+    NetworkInUse { network: String },
     #[error("the container runtime failed to {action}")]
     Runtime {
         action: String,
