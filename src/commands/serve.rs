@@ -14,7 +14,7 @@ use crate::plane::{DockerPlane, PlaneSettings};
 use crate::secrets::Secrets;
 use crate::server;
 use crate::settings::Settings;
-use crate::store::ChatStore;
+use crate::store::{ChatStore, Owner};
 use crate::verify::UpstreamVerifier;
 
 /// Execute the serve command.
@@ -60,6 +60,7 @@ fn chats(config: &Config, secrets: Arc<Secrets>) -> Result<Chats<DockerPlane, Do
     })?;
     Ok(Chats::new(
         config,
+        Owner::AGENT,
         plane,
         DockerExec::connect()?,
         Remotes::new(GITHUB),

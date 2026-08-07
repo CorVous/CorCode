@@ -107,7 +107,7 @@ impl ChatStore {
 
     /// Who the trees this store lays down are handed to.
     #[must_use]
-    pub fn agent(&self) -> Owner {
+    pub const fn agent(&self) -> Owner {
         self.agent
     }
 
@@ -161,11 +161,11 @@ impl ChatStore {
         let chat_id = &manifest.chat_id;
         let workspace = self.workspace_dir(chat_id);
         fs::create_dir_all(&workspace).map_err(StoreError::writing(&workspace))?;
-        hand_tree_to(&workspace, Owner::AGENT)?;
+        hand_tree_to(&workspace, self.agent)?;
         let staged = self.staging_dir(chat_id);
         let claude = staged.join(CLAUDE_DIR);
         fs::create_dir_all(&claude).map_err(StoreError::writing(&claude))?;
-        hand_tree_to(&claude, Owner::AGENT)?;
+        hand_tree_to(&claude, self.agent)?;
         let events = staged.join(EVENTS_FILE);
         File::create_new(&events).map_err(StoreError::writing(&events))?;
         write_manifest_in(&staged, &manifest)?;

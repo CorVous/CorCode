@@ -16,7 +16,7 @@ use bollard::query_parameters::{
     StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings, container_name};
-use cor_code::store::{ChatStore, NewChat};
+use cor_code::store::{ChatStore, NewChat, Owner};
 use futures_util::StreamExt as _;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
@@ -34,13 +34,17 @@ const KEEP_ALIVE_CHAT_ID: &str = "01K1DOCKERKEEPALIVE00000";
 const MIGRATION_CHAT_ID: &str = "01K1DOCKERMIGRATION00000";
 const IN_USE_CHAT_ID: &str = "01K1DOCKERNETWORKINUSE00";
 const OWNERSHIP_CHAT_ID: &str = "01K1DOCKEROWNERSHIP00000";
-/// The two writes an agent cannot get through its first turn without: a commit
-/// into the workspace, and the session state the adapter keeps beside it.
+/// A shell making the two writes an agent cannot get through its first turn
+/// without: a file in the workspace it commits from, and the session state the
+/// adapter keeps beside it.
 const AGENTS_OWN_WORK: [&str; 3] = [
     "sh",
     "-c",
     "touch /workspace/committed /home/agent/.claude/session-env",
 ];
+/// The only user that can give a tree away, and so the only one this suite can
+/// prove a handover to the agent under.
+const ROOT: u32 = 0;
 /// A container the plane did not spawn and must not throw away.
 const INTERLOPER: &str = "corcode-test-interloper";
 const MEMORY_MB: u32 = 512;
@@ -148,10 +152,19 @@ async fn a_real_container_can_write_in_both_of_the_trees_it_was_handed() {
         );
         return;
     };
+    let dataset = TempDir::new().expect("dataset root should be created");
+    let us = Owner::of(dataset.path()).expect("we own what we just made");
+    if us.uid != ROOT && us != Owner::AGENT {
+        eprintln!(
+            "SKIPPED a_real_container_can_write_in_both_of_the_trees_it_was_handed: \
+             {us} can hand no tree to {}",
+            Owner::AGENT
+        );
+        return;
+    }
     let _daemon = the_daemon_to_ourselves().await;
     let plane = DockerPlane::connect(settings()).expect("the daemon should be reachable");
     clear_any_leftover(&plane, OWNERSHIP_CHAT_ID).await;
-    let dataset = TempDir::new().expect("dataset root should be created");
     let store = ChatStore::new(dataset.path());
     store.prepare().expect("the dataset should prepare");
     let chat_id = store
