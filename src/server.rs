@@ -682,21 +682,41 @@ pub async fn shutdown_signal() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_logged_failure_says_everything_under_it() {
-        let failure = PromptError::Unwoken(
+    use crate::chats::CreateError;
+
+    /// The shape the operator actually met: a summary standing in for a
+    /// runtime refusal two levels down.
+    fn a_chat_that_would_not_spawn() -> CreateError {
+        CreateError::Broke(
             anyhow::anyhow!("the container runtime failed to start the container")
                 .context("chat 01K1TESTCHATID0000000000 would not spawn"),
-        );
+        )
+    }
+
+    #[test]
+    fn a_logged_failure_says_everything_under_it() {
+        let failure = a_chat_that_would_not_spawn();
 
         let logged = with_causes(&failure);
 
         assert_eq!(
             logged,
-            "this chat could not be woken: \
+            "the chat could not be built: \
              chat 01K1TESTCHATID0000000000 would not spawn: \
              the container runtime failed to start the container",
             "the summary alone names nothing the operator can act on"
         );
+    }
+
+    #[test]
+    fn displaying_the_failure_would_lose_every_cause() {
+        let failure = a_chat_that_would_not_spawn();
+
+        assert_eq!(
+            format!("{failure:#}"),
+            "the chat could not be built",
+            "a typed error has no alternate form: this is what the log used to get"
+        );
+        assert_ne!(with_causes(&failure), format!("{failure:#}"));
     }
 }

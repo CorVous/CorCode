@@ -6,6 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use bollard::Docker;
+use bollard::errors::Error as DockerError;
 use bollard::exec::StartExecResults;
 use bollard::models::{ContainerInspectResponse, ExecConfig};
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings, container_name};
@@ -127,15 +128,16 @@ async fn a_container_outlives_the_command_its_image_would_have_run() {
         "the container took the image's command with it instead of parking"
     );
     assert_eq!(
-        exec_exit_code,
+        exec_exit_code.expect("the daemon should answer an exec"),
         Some(0),
         "the adapter's transport is an exec into a container that is still there"
     );
 }
 
 /// What the ACP transport does to a chat's container, reduced to the smallest
-/// process there is.
-async fn exec_exit_code(docker: &Docker, name: &str) -> Option<i64> {
+/// process there is. Answered rather than asserted, so a refused exec is
+/// reported by a test that has already torn its container down.
+async fn exec_exit_code(docker: &Docker, name: &str) -> Result<Option<i64>, DockerError> {
     let exec = docker
         .create_exec(
             name,
@@ -145,21 +147,12 @@ async fn exec_exit_code(docker: &Docker, name: &str) -> Option<i64> {
                 ..ExecConfig::default()
             },
         )
-        .await
-        .expect("a live container should take an exec");
-    let StartExecResults::Attached { mut output, .. } = docker
-        .start_exec(&exec.id, None)
-        .await
-        .expect("the exec should start")
-    else {
-        panic!("an exec asked to attach should attach");
-    };
-    while output.next().await.is_some() {}
-    docker
-        .inspect_exec(&exec.id)
-        .await
-        .expect("the exec should be inspectable")
-        .exit_code
+        .await?;
+    if let StartExecResults::Attached { mut output, .. } = docker.start_exec(&exec.id, None).await?
+    {
+        while output.next().await.is_some() {}
+    }
+    Ok(docker.inspect_exec(&exec.id).await?.exit_code)
 }
 
 /// Every flag ADR-0001 makes mandatory, as the daemon recorded it.
