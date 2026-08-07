@@ -117,8 +117,9 @@ async fn a_prompt_lands_on_disk_and_in_the_log_the_browser_reads() {
         &app.body(&format!("/chats/{chat_id}")).await,
     ] {
         assert!(
-            rendered.contains("<b>you:</b> ship the ladder") && rendered.contains("<p>on it</p>"),
-            "the turn is not in the rendered log: {rendered}"
+            rendered.contains("<b>you:</b> ship the ladder")
+                && rendered.contains("<p>on it — done</p>"),
+            "the turn is not in the rendered log as one message: {rendered}"
         );
     }
     app.stop().await;
