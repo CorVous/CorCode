@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use cor_code::acp::ScriptedAdapter;
-use cor_code::chats::Chats;
+use cor_code::chats::{Chats, WantedChat};
 use cor_code::config::{
     Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_WARM_POOL,
 };
@@ -38,6 +38,65 @@ const BARE: &str = "CorVous/fixture.git";
 /// A repository this deployment was never configured with.
 const UNLISTED: &str = "Someone/else";
 const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
+/// The only user that can give a tree away, and so the only one this suite
+/// can watch a handover under.
+#[cfg(unix)]
+const ROOT: Owner = Owner { uid: 0, gid: 0 };
+
+/// The core clones as itself and the container runs as the agent (ADR-0001),
+/// so a workspace still in the core's hands when the chat opens is an agent
+/// that can commit nothing in it (issue #46). Nothing between the clone and
+/// the container hands it over but this, and the handover waits for git to
+/// finish so that git is never refused the tree it is writing (issue #53).
+///
+/// Only a core that can hand a tree to somebody else can be watched doing it,
+/// which is the root this runs as in production and nowhere else.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_workspace_a_new_chat_is_given_belongs_to_the_agent_that_will_work_in_it() {
+    let data_dir = TempDir::new().expect("temp dir should be creatable");
+    let us = Owner::of(data_dir.path()).expect("we own the dataset we just made");
+    if us != ROOT {
+        eprintln!(
+            "SKIPPED the_workspace_a_new_chat_is_given_belongs_to_the_agent_that_will_work_in_it: \
+             {us} can hand a tree to nobody but itself"
+        );
+        return;
+    }
+    let (_origin, remotes) = seeded_repository();
+    let config = test_config(data_dir.path().to_path_buf(), data_dir.path().to_path_buf());
+    ChatStore::new(data_dir.path())
+        .prepare()
+        .expect("the dataset should prepare, as serving does");
+    let secrets = Arc::new(Secrets::from_config(&config));
+    let chats = Chats::new(
+        &config,
+        Owner::AGENT,
+        MemoryPlane::default(),
+        ScriptedAdapter::opening(SESSION),
+        remotes,
+        secrets,
+    );
+
+    let chat_id = chats
+        .create(WantedChat {
+            repo: REPO.to_owned(),
+            base_branch: "main".to_owned(),
+            slug: "handed over".to_owned(),
+            direct_on_base: false,
+        })
+        .await
+        .expect("the chat should be created");
+
+    let workspace = data_dir.path().join("workspaces").join(&chat_id);
+    for tree in [&workspace, &workspace.join(".git")] {
+        assert_eq!(
+            Owner::of(tree).expect("the clone should be there"),
+            Owner::AGENT,
+            "{tree:?} was left where the agent can change nothing"
+        );
+    }
+}
 
 #[tokio::test]
 async fn a_new_chat_arrives_live_with_a_checked_out_workspace_and_a_session() {
