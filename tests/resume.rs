@@ -17,6 +17,7 @@ use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_
 use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
+use cor_code::store::Owner;
 use cor_code::store::{ChatStore, RuntimeStatus};
 use cor_code::ui;
 
@@ -451,6 +452,38 @@ async fn a_parked_chat_whose_workspace_is_gone_fails_loudly_and_touches_nothing(
     );
 }
 
+/// The core writes in an open chat's own workspace — archiving it leaves a
+/// commit message and refs in `.git` that git wrote as the core — so the tree
+/// goes back into the agent's hands before a container opens on it again. A
+/// tree only half handed over is one the agent cannot commit from, and no
+/// prompt is worth leaving it in.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_parked_chat_whose_workspace_will_not_change_hands_is_not_woken() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dataset = Dataset::of(ScriptedAdapter::resuming(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ));
+    let chat = dataset.create("unhandable").await;
+    dataset.park(&chat).await;
+    let sealed = dataset.workspace(&chat).join(".git");
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000))
+        .expect("a dir should be sealable");
+
+    let woken = dataset.prompt(&chat, SAID).await;
+
+    fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755))
+        .expect("a dir should be unsealable");
+    woken.expect_err("a workspace that will not change hands cannot be woken");
+    assert_eq!(
+        dataset.status(&chat).await,
+        RuntimeStatus::Parked,
+        "a container was started over a workspace the agent cannot work in"
+    );
+}
+
 /// One dataset, its remote, and the fake adapter every chat in it talks to.
 struct Dataset {
     chats: Chats<MemoryPlane, ScriptedAdapter>,
@@ -469,6 +502,7 @@ impl Dataset {
             .expect("the dataset should prepare, as serving does");
         let chats = Chats::new(
             &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
             MemoryPlane::default(),
             adapter.clone(),
             remotes,

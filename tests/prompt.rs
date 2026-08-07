@@ -28,6 +28,7 @@ use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
+use cor_code::store::Owner;
 use cor_code::store::{ChatStore, NewChat};
 use cor_code::verify::ScriptedVerifier;
 
@@ -334,6 +335,7 @@ impl TestApp {
         let secrets = Arc::new(Secrets::from_config(&config));
         let chats = Chats::new(
             &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
             MemoryPlane::default(),
             transport.clone(),
             remotes,

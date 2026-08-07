@@ -18,6 +18,7 @@ use cor_code::config::{
 use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::{ContainerPlane as _, MemoryPlane};
 use cor_code::secrets::Secrets;
+use cor_code::store::Owner;
 use cor_code::store::{ChatStore, Manifest, NewChat};
 use cor_code::ui;
 
@@ -155,6 +156,7 @@ impl Dataset {
         let secrets = Arc::new(Secrets::from_config(&config));
         Chats::new(
             &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
             plane,
             ScriptedAdapter::silent(),
             Remotes::new(GITHUB),

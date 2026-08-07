@@ -23,6 +23,7 @@ use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::{Secret, Secrets};
 use cor_code::store::ChatStore;
+use cor_code::store::Owner;
 
 const REPO: &str = "CorVous/fixture";
 const BARE: &str = "CorVous/fixture.git";
@@ -175,6 +176,7 @@ impl Dataset {
         let secrets = Arc::new(Secrets::from_config(&config));
         let chats = Chats::new(
             &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
             plane.clone(),
             ScriptedAdapter::opening(SESSION),
             remotes,

@@ -24,6 +24,7 @@ use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
+use cor_code::store::Owner;
 use cor_code::store::{ChatStore, NewChat};
 use cor_code::verify::{ScriptedVerifier, Verified};
 
@@ -420,6 +421,7 @@ impl TestApp {
             &config,
             Chats::new(
                 &config,
+                Owner::of(&config.data_dir).expect("we own the dataset we just made"),
                 MemoryPlane::default(),
                 ScriptedAdapter::silent(),
                 Remotes::new(GITHUB),

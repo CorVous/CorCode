@@ -26,6 +26,7 @@ use cor_code::secrets::Secrets;
 use cor_code::server::{self, SESSION_COOKIE};
 use cor_code::settings::Settings;
 use cor_code::store::ChatStore;
+use cor_code::store::Owner;
 use cor_code::verify::ScriptedVerifier;
 
 const USERNAME: &str = "cassidy";
@@ -301,6 +302,7 @@ impl TestApp {
             &config,
             Chats::new(
                 &config,
+                Owner::of(&config.data_dir).expect("we own the dataset we just made"),
                 MemoryPlane::default(),
                 ScriptedAdapter::silent(),
                 Remotes::new(GITHUB),
