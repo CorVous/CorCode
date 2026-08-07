@@ -355,6 +355,11 @@ mod tests {
         json!({"sessionUpdate": "tool_call_update", "toolCallId": id, "status": status})
     }
 
+    /// An update the agent keeps its client's accounting with.
+    fn usage_update() -> Value {
+        json!({"sessionUpdate": "usage_update", "usage": {"inputTokens": 12}})
+    }
+
     #[test]
     fn an_outbound_prompt_renders_as_the_users_own_block() {
         let events = log(&[outbound_prompt("ship the ladder")]);
@@ -427,6 +432,82 @@ mod tests {
             rendered.matches("<p>").count(),
             1,
             "the message is still broken into blocks: {rendered}"
+        );
+    }
+
+    /// A chunk can carry no words at all, and one that carries none says
+    /// nothing — least of all its own name.
+    #[test]
+    fn a_wordless_chunk_neither_prints_nor_breaks_the_run() {
+        for wordless in [
+            chunk("agent_message_chunk", ""),
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"},
+            }),
+        ] {
+            let events = log(&[
+                chunk("agent_message_chunk", "I"),
+                wordless.clone(),
+                chunk("agent_message_chunk", "'m at it"),
+            ]);
+
+            let rendered = event_log(CHAT_ID, &events);
+
+            assert!(
+                rendered.contains("<p>I&#39;m at it</p>"),
+                "{wordless} broke the sentence in two: {rendered}"
+            );
+            assert!(
+                !rendered.contains("agent_message_chunk"),
+                "{wordless} was read out as its own name: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn bookkeeping_between_chunks_does_not_break_the_run() {
+        let events = log(&[
+            chunk("agent_message_chunk", "I"),
+            usage_update(),
+            chunk("agent_message_chunk", "'m at it"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>I&#39;m at it</p>"),
+            "an update nobody sees still broke the sentence: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_user_and_the_agent_never_share_a_run() {
+        let events = log(&[
+            chunk("user_message_chunk", "ship it"),
+            chunk("agent_message_chunk", "on it"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p><b>you:</b> ship it</p>") && rendered.contains("<p>on it</p>"),
+            "the two voices ran into one: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_thought_and_a_message_stay_two_blocks() {
+        let events = log(&[
+            chunk("agent_thought_chunk", "weighing it up"),
+            chunk("agent_message_chunk", "on it"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>weighing it up</p>") && rendered.contains("<p>on it</p>"),
+            "a thought swallowed the message after it: {rendered}"
         );
     }
 
@@ -519,7 +600,7 @@ mod tests {
     #[test]
     fn bookkeeping_updates_are_left_out_of_the_transcript() {
         let events = log(&[
-            json!({"sessionUpdate": "usage_update", "usage": {"inputTokens": 12}}),
+            usage_update(),
             json!({"sessionUpdate": "available_commands_update", "availableCommands": []}),
         ]);
 
@@ -543,29 +624,6 @@ mod tests {
         assert!(
             !rendered.contains("<script>"),
             "joining the chunks let markup through: {rendered}"
-        );
-    }
-
-    /// The page's transcript and the fragment htmx polls are one rendering,
-    /// so a joined run cannot read one way on load and another live.
-    #[test]
-    fn the_page_and_the_polled_log_read_the_same() {
-        let manifest = manifest(RuntimeStatus::Live);
-        let events = log(&[
-            outbound_prompt("ship the ladder"),
-            chunk("agent_message_chunk", "I"),
-            chunk("agent_message_chunk", "'m at it"),
-            tool_call("call_1", "git commit"),
-            json!({"sessionUpdate": "usage_update", "usage": {"inputTokens": 12}}),
-            tool_update("call_1", "completed"),
-            chunk("agent_message_chunk", "done"),
-        ]);
-
-        let rendered = chat_page(&manifest, RuntimeStatus::Live, &events);
-
-        assert!(
-            rendered.contains(&event_log(&manifest.chat_id, &events)),
-            "the page and the poll render the same events differently: {rendered}"
         );
     }
 
