@@ -549,14 +549,23 @@ mod tests {
         }
     }
 
+    /// The configured repositories are suggestions now: any repository can be
+    /// typed in, and the first configured one is what the field starts on.
     #[test]
-    fn the_new_chat_form_offers_the_repositories_this_deployment_was_given() {
+    fn the_new_chat_form_suggests_the_repositories_this_deployment_was_given() {
         let rendered = console_page(&every_state(), &status(), &repos(), &secrets());
 
         assert!(
-            rendered
-                .contains("<option>CorVous/CorCode</option><option>CorVous/zenni-tools</option>"),
-            "the repositories are not offered in the order given: {rendered}"
+            rendered.contains("<input name=\"repo\" list=\"repos\" value=\"CorVous/CorCode\">"),
+            "the repository is not typed into a field defaulting to the first: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "<datalist id=\"repos\">\
+                 <option value=\"CorVous/CorCode\"></option>\
+                 <option value=\"CorVous/zenni-tools\"></option></datalist>"
+            ),
+            "the repositories are not suggested in the order given: {rendered}"
         );
         assert!(
             rendered.contains("name=\"base_branch\" value=\"main\""),
