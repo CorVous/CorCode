@@ -45,6 +45,8 @@ const BYTES_PER_MB: i64 = 1024 * 1024;
 const NANOS_PER_CPU: i64 = 1_000_000_000;
 const STOP_GRACE_SECONDS: i32 = 10;
 const NOT_FOUND: u16 = 404;
+/// How the daemon refuses to remove a network that still has endpoints on it.
+const STILL_IN_USE: u16 = 403;
 const NAME_TAKEN: u16 = 409;
 
 /// What every spawn is the same about: the image and the box it runs in.
@@ -143,9 +145,7 @@ impl DockerPlane {
                 status_code: NOT_FOUND,
                 ..
             }) => Ok(()),
-            Err(source) => Err(PlaneError::runtime(format!(
-                "replace the {NETWORK} network"
-            ))(source)),
+            Err(source) => Err(removal_failure(source)),
         }
     }
 
@@ -250,6 +250,21 @@ fn spawn_failure(chat_id: &str) -> impl FnOnce(DockerError) -> PlaneError + use<
     }
 }
 
+/// A container can attach between the look and the removal, and the daemon is
+/// the one that knows: endpoints it still holds turn a replacement into the
+/// same refusal the inspection would have given.
+fn removal_failure(source: DockerError) -> PlaneError {
+    match source {
+        DockerError::DockerResponseServerError {
+            status_code: STILL_IN_USE,
+            ..
+        } => PlaneError::NetworkInUse {
+            network: NETWORK.to_owned(),
+        },
+        source => PlaneError::runtime(format!("replace the {NETWORK} network"))(source),
+    }
+}
+
 fn teardown_failure(chat_id: &str) -> impl FnOnce(DockerError) -> PlaneError + use<> {
     let chat_id = chat_id.to_owned();
     move |source| match source {
@@ -336,13 +351,15 @@ fn network_found(network: Option<&NetworkInspect>) -> NetworkFound {
     match network {
         None => NetworkFound::Nothing,
         Some(network) if routes_out(network) => NetworkFound::RoutesOut,
-        Some(network) if nothing_is_attached(network) => NetworkFound::WrongShapeAndEmpty,
+        Some(network) if said_to_hold_nothing(network) => NetworkFound::WrongShapeAndEmpty,
         Some(_) => NetworkFound::WrongShapeAndInUse,
     }
 }
 
-fn nothing_is_attached(network: &NetworkInspect) -> bool {
-    network.containers.as_ref().is_none_or(HashMap::is_empty)
+/// An empty roster is the daemon saying nobody is on the network; a roster it
+/// left out says nothing at all, and a spawn deletes on the answer it has.
+fn said_to_hold_nothing(network: &NetworkInspect) -> bool {
+    network.containers.as_ref().is_some_and(HashMap::is_empty)
 }
 
 /// Ask for the chats' containers that are running: an exited one is a chat
