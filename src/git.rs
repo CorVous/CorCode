@@ -16,6 +16,10 @@ use crate::config::REDACTED;
 /// Where the repositories named in `CORCODE_REPOS` actually live.
 pub const GITHUB: &str = "https://github.com";
 
+/// The only scheme a typed clone URL may carry: a chat is cut from a remote
+/// over TLS or not at all.
+const HTTPS: &str = "https://";
+
 /// The user half of a token-bearing https clone URL, as GitHub wants it.
 const TOKEN_USER: &str = "x-access-token";
 
@@ -147,6 +151,64 @@ pub fn slugify(typed: &str) -> String {
         }
     }
     slug.trim_matches('-').to_owned()
+}
+
+/// Whether a chat could be cut from `repo` at all: the `owner/name`
+/// shorthand, or an https URL of its own.
+///
+/// A URL is taken as typed, so it has to be one this core can read as well as
+/// git can: the scheme is https and nothing else, the authority is a host and
+/// at most a port, and no credential is smuggled in ahead of it.
+#[must_use]
+pub fn names_a_repository(repo: &str) -> bool {
+    names_a_github_repository(repo)
+        || repo.bytes().all(|byte| byte.is_ascii_graphic())
+            && authority(repo).is_some_and(names_a_host)
+}
+
+/// Whether `repo` is the `owner/name` shorthand for a repository on the site
+/// this deployment clones from.
+///
+/// Both halves there, neither of them a path trick, and nothing a command
+/// line would read as an option.
+#[must_use]
+pub fn names_a_github_repository(repo: &str) -> bool {
+    let mut halves = repo.split('/');
+    let named = |half: Option<&str>| {
+        half.is_some_and(|half| {
+            !half.is_empty()
+                && !half.bytes().all(|byte| byte == b'.')
+                && half
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+    };
+    !repo.starts_with('-')
+        && named(halves.next())
+        && named(halves.next())
+        && halves.next().is_none()
+}
+
+/// The host and port of an https URL, or nothing at all for anything else —
+/// another scheme, or an authority carrying userinfo, which is a credential
+/// this core will not put in a manifest or a log.
+fn authority(url: &str) -> Option<&str> {
+    let authority = url.strip_prefix(HTTPS)?.split(['/', '?', '#']).next()?;
+    (!authority.is_empty() && !authority.contains('@')).then_some(authority)
+}
+
+/// Whether `authority` is a host and at most a port, spelled out rather than
+/// hinted at.
+fn names_a_host(authority: &str) -> bool {
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-.".contains(&byte))
+        && port
+            .is_none_or(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Whether git would take `branch` as a branch name — and whether a command
@@ -647,7 +709,10 @@ mod tests {
             "http://example/cor/thing",
             "https://exa mple/cor/thing",
         ] {
-            assert!(!names_a_repository(unnamed), "{unnamed} is not a repository");
+            assert!(
+                !names_a_repository(unnamed),
+                "{unnamed} is not a repository"
+            );
         }
     }
 
