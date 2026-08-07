@@ -306,6 +306,100 @@ mod tests {
         fs::metadata(path).expect("manifest should exist").ino()
     }
 
+    /// The uid and gid this process writes as, read off something it wrote:
+    /// the one owner a test is allowed to hand a tree to.
+    #[cfg(unix)]
+    fn ours(path: &Path) -> (u32, u32) {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let owner = fs::symlink_metadata(path).expect("what we wrote should be there");
+        (owner.uid(), owner.gid())
+    }
+
+    /// A clone the core wrote as itself: nested dirs, files, and a link
+    /// pointing out of the tree the way a checked-out repository may.
+    #[cfg(unix)]
+    fn tree_with_a_link_to(elsewhere: &Path, root: &Path) -> PathBuf {
+        let tree = root.join("workspace");
+        fs::create_dir_all(tree.join("nested").join("deeper")).expect("a tree should be writable");
+        fs::write(tree.join("top.txt"), "").expect("a file should be writable");
+        fs::write(tree.join("nested").join("deeper").join("bottom.txt"), "")
+            .expect("a file should be writable");
+        std::os::unix::fs::symlink(elsewhere, tree.join("elsewhere"))
+            .expect("a link should be creatable");
+        tree
+    }
+
+    /// Every entry has to change hands, and none of them is the way to
+    /// somebody else's tree.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_is_walked_to_every_entry_and_never_through_a_link_out_of_it() {
+        let root = TempDir::new().expect("temp dir should be created");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(outside.join("theirs")).expect("a tree should be writable");
+        let tree = tree_with_a_link_to(&outside, root.path());
+
+        let mut walked = tree_at(&tree).expect("a tree should walk");
+
+        walked.sort();
+        assert_eq!(
+            walked,
+            [
+                tree.clone(),
+                tree.join("elsewhere"),
+                tree.join("nested"),
+                tree.join("nested").join("deeper"),
+                tree.join("nested").join("deeper").join("bottom.txt"),
+                tree.join("top.txt"),
+            ]
+        );
+    }
+
+    /// A link out of the tree is handed over as the link it is: what it points
+    /// at belongs to whoever owns it, and may not even be there.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_tree_changes_hands_and_what_it_points_at_does_not() {
+        let root = TempDir::new().expect("temp dir should be created");
+        let nowhere = root.path().join("nowhere");
+        let tree = tree_with_a_link_to(&nowhere, root.path());
+        let (uid, gid) = ours(&tree);
+
+        hand_tree_to(&tree, uid, gid).expect("a tree with a link out of it should change hands");
+
+        assert_eq!(
+            fs::read_link(tree.join("elsewhere")).expect("the link should still be a link"),
+            nowhere,
+            "the link was followed rather than handed over"
+        );
+    }
+
+    /// Half a tree in the agent's hands is a workspace it cannot work in, so
+    /// the caller hears which entry stopped the handover.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_cannot_be_walked_names_what_stopped_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().expect("temp dir should be created");
+        let tree = tree_with_a_link_to(root.path(), root.path());
+        let sealed = tree.join("nested");
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000))
+            .expect("a dir should be sealable");
+        let (uid, gid) = ours(&tree);
+
+        let error =
+            hand_tree_to(&tree, uid, gid).expect_err("a sealed dir should stop the handover");
+
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700))
+            .expect("a dir should be unsealable");
+        assert!(
+            format!("{error}").contains(&sealed.display().to_string()),
+            "error should name the entry it stopped on, got: {error}"
+        );
+    }
+
     fn new_chat(title: &str) -> NewChat {
         NewChat {
             title: title.to_owned(),
