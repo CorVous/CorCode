@@ -666,3 +666,26 @@ pub async fn shutdown_signal() {
         .await
         .expect("Ctrl-C handler should install");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_logged_failure_says_everything_under_it() {
+        let failure = PromptError::Unwoken(
+            anyhow::anyhow!("the container runtime failed to start the container")
+                .context("chat 01K1TESTCHATID0000000000 would not spawn"),
+        );
+
+        let logged = with_causes(&failure);
+
+        assert_eq!(
+            logged,
+            "this chat could not be woken: \
+             chat 01K1TESTCHATID0000000000 would not spawn: \
+             the container runtime failed to start the container",
+            "the summary alone names nothing the operator can act on"
+        );
+    }
+}
