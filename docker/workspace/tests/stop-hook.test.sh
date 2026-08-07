@@ -20,7 +20,9 @@ run_hook() {
   local workspace=$1 hook_input=$2
   local err_file="$tmp_root/stderr"
   hook_status=0
-  CORCODE_WORKSPACE="$workspace" bash "$hook_script" <<<"$hook_input" \
+  env --unset=GIT_ASKPASS --unset=SSH_ASKPASS \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    CORCODE_WORKSPACE="$workspace" bash "$hook_script" <<<"$hook_input" \
     >/dev/null 2>"$err_file" || hook_status=$?
   hook_stderr="$(cat "$err_file")"
 }
@@ -64,12 +66,27 @@ pushed_repo() {
   printf '%s' "$repo"
 }
 
+readonly web_origin='https://git.example.invalid/agent/work.git'
+
+point_at_web_origin() {
+  git -C "$1" remote set-url origin "$web_origin"
+}
+
+hold_a_credential() {
+  git -C "$1" config credential.helper \
+    '!f() { echo username=agent; echo password=token; }; f'
+}
+
+edit_a_tracked_file() {
+  printf 'work in progress\n' >>"$1/seed.txt"
+}
+
 clean="$(pushed_repo clean)"
 run_hook "$clean" '{"stop_hook_active": false}'
 expect_status 'clean and pushed workspace allows the stop' 0
 
 dirty="$(pushed_repo dirty)"
-printf 'work in progress\n' >"$dirty/scratch.txt"
+edit_a_tracked_file "$dirty"
 run_hook "$dirty" '{"stop_hook_active": false}'
 expect_status 'uncommitted changes block the stop' 2
 expect_stderr_mentions 'uncommitted changes are named in the block reason' 'uncommitted'
@@ -94,6 +111,35 @@ expect_status 'a workspace that is not a git repository allows the stop' 0
 
 run_hook "$clean" '{}'
 expect_status 'a hook input without stop_hook_active is treated as the first stop' 0
+
+untracked="$(pushed_repo untracked)"
+printf 'scratch\n' >"$untracked/scratch.txt"
+run_hook "$untracked" '{"stop_hook_active": false}'
+expect_status 'untracked files alone are not work git is missing' 0
+
+credentialed="$(pushed_repo credentialed)"
+point_at_web_origin "$credentialed"
+hold_a_credential "$credentialed"
+edit_a_tracked_file "$credentialed"
+run_hook "$credentialed" '{"stop_hook_active": false}'
+expect_status 'a workspace that can push still has to' 2
+expect_stderr_mentions 'the tracked edit is named in the block reason' 'uncommitted'
+
+uncredentialed="$(pushed_repo uncredentialed)"
+point_at_web_origin "$uncredentialed"
+edit_a_tracked_file "$uncredentialed"
+git -C "$uncredentialed" commit --quiet --all -m 'Extend the seed'
+edit_a_tracked_file "$uncredentialed"
+run_hook "$uncredentialed" '{"stop_hook_active": false}'
+expect_status 'no credential for the origin host stands the hook down' 0
+expect_stderr_mentions 'the missing credential is named' 'git.example.invalid'
+
+remoteless="$(pushed_repo remoteless)"
+git -C "$remoteless" remote remove origin
+edit_a_tracked_file "$remoteless"
+run_hook "$remoteless" '{"stop_hook_active": false}'
+expect_status 'no origin remote at all stands the hook down' 0
+expect_stderr_mentions 'the missing remote is named' 'no origin remote'
 
 if [ "$failures" -gt 0 ]; then
   printf '%d test(s) failed\n' "$failures" >&2
