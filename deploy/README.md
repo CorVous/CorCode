@@ -77,7 +77,8 @@ Edit [`compose.yaml`](compose.yaml) in the checkout:
   gets an empty workspace.
 - `CORCODE_USERNAME` and `CORCODE_PASSWORD_HASH` from step 3.
 - `CORCODE_REPOS`, the comma-separated `owner/name` list the new-chat form
-  offers, first entry the default.
+  suggests, first entry the default. Any other `owner/name` repository, or any
+  `https://` clone URL, can be typed over it.
 - the credentials from step 4, and any of the optional tokens you want.
   Delete the lines you do not want rather than leaving a placeholder in them.
 

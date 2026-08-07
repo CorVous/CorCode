@@ -8,6 +8,8 @@ use std::str::FromStr;
 
 use anyhow::{Context as _, Result, bail};
 
+use crate::git::names_a_github_repository;
+
 /// Address served when `CORCODE_BIND_ADDR` is unset.
 pub const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8080";
 /// Memory ceiling of a workspace container when `CORCODE_CONTAINER_MEMORY_MB`
@@ -152,7 +154,7 @@ where
     })
 }
 
-/// The repositories the new-chat form offers. Each is checked here rather
+/// The repositories the new-chat form suggests. Each is checked here rather
 /// than where it becomes a URL: a boot is the right time to learn about a
 /// typo.
 fn repos(vars: &HashMap<String, String>) -> Result<Vec<String>> {
@@ -160,28 +162,13 @@ fn repos(vars: &HashMap<String, String>) -> Result<Vec<String>> {
         .split(',')
         .map(str::trim)
         .map(|repo| {
-            if names_a_repository(repo) {
+            if names_a_github_repository(repo) {
                 Ok(repo.to_owned())
             } else {
                 bail!("CORCODE_REPOS holds {repo}, which is not an owner/name repository")
             }
         })
         .collect()
-}
-
-/// `owner/name`, both halves there and neither of them a path trick.
-fn names_a_repository(repo: &str) -> bool {
-    let mut halves = repo.split('/');
-    let named = |half: Option<&str>| {
-        half.is_some_and(|half| {
-            !half.is_empty()
-                && !half.bytes().all(|byte| byte == b'.')
-                && half
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-        })
-    };
-    named(halves.next()) && named(halves.next()) && halves.next().is_none()
 }
 
 /// The registry login is optional, but half of one is a misconfiguration.

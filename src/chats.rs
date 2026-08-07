@@ -40,8 +40,8 @@ pub struct WantedChat {
 pub enum CreateError {
     #[error("that leaves no slug a branch could carry")]
     Unnamed,
-    #[error("this deployment does not offer {repo}")]
-    UnknownRepo { repo: String },
+    #[error("{repo} is neither an owner/name repository nor an https clone URL")]
+    UnusableRepo { repo: String },
     #[error("{branch} is not a branch name")]
     UnusableBranch { branch: String },
     #[error("the chat could not be built")]
@@ -271,7 +271,8 @@ where
         }
     }
 
-    /// The repositories a new chat may be cut from, first one default.
+    /// The repositories the new-chat form suggests, first one default. A chat
+    /// can be cut from any repository [`git::names_a_repository`] takes.
     #[must_use]
     pub fn repos(&self) -> &[String] {
         &self.repos
@@ -524,9 +525,9 @@ where
         ))
     }
 
-    /// Where one of this deployment's repositories is reached, over the
-    /// credential as it stands right now: a token rotated since the last
-    /// operation is the one this operation goes out on.
+    /// Where a chat's repository is reached, over the credential as it stands
+    /// right now: a token rotated since the last operation is the one this
+    /// operation goes out on. Only github.com is handed it (`crate::git`).
     fn origin(&self, repo: &str) -> Result<git::Origin, SecretsError> {
         let token = self.secrets.read(Secret::GithubToken)?;
         Ok(self.remotes.origin(repo, token.as_deref()))
@@ -820,14 +821,22 @@ where
     /// base branch, the chat's own branch, a container, and the ACP session
     /// they will talk over. A step that fails leaves what came before it on
     /// disk for the operator to look at (ADR-0007 rule 5).
+    ///
+    /// The repository is trimmed the way `CORCODE_REPOS` entries are, and the
+    /// manifest holds what is left: a URL pasted out of a browser carries
+    /// whitespace nobody typed and no repository wants.
     pub async fn create(&self, wanted: WantedChat) -> Result<String, CreateError> {
+        let wanted = WantedChat {
+            repo: wanted.repo.trim().to_owned(),
+            ..wanted
+        };
         let typed = wanted.slug.trim();
         let slug = git::slugify(typed);
         if slug.is_empty() {
             return Err(CreateError::Unnamed);
         }
-        if !self.repos.contains(&wanted.repo) {
-            return Err(CreateError::UnknownRepo { repo: wanted.repo });
+        if !git::names_a_repository(&wanted.repo) {
+            return Err(CreateError::UnusableRepo { repo: wanted.repo });
         }
         if !git::names_a_branch(&wanted.base_branch) {
             return Err(CreateError::UnusableBranch {

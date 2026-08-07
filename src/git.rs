@@ -16,6 +16,10 @@ use crate::config::REDACTED;
 /// Where the repositories named in `CORCODE_REPOS` actually live.
 pub const GITHUB: &str = "https://github.com";
 
+/// The only scheme a typed clone URL may carry: a chat is cut from a remote
+/// over TLS or not at all.
+const HTTPS: &str = "https://";
+
 /// The user half of a token-bearing https clone URL, as GitHub wants it.
 const TOKEN_USER: &str = "x-access-token";
 
@@ -43,28 +47,46 @@ impl Remotes {
         Self { base: base.into() }
     }
 
-    /// Where one `owner/name` repository is cloned from, over `token` if the
-    /// caller holds one. A token is put into the URL only for https, so no
-    /// local or ssh URL can carry one.
+    /// Where one repository is cloned from, over `token` if the caller holds
+    /// one. The credential is spliced in only for github.com itself, so a URL
+    /// leading anywhere else — another forge, a local path, an ssh host —
+    /// cannot carry one.
     ///
     /// The credential is the caller's to read for each operation rather than
     /// this site's to keep, so a rotated one is in force for the next clone
     /// or push (`crate::secrets`).
     #[must_use]
     pub fn origin(&self, repo: &str, token: Option<&str>) -> Origin {
-        let base = &self.base;
-        let token = token
-            .filter(|_| base.starts_with("https://"))
-            .map(ToOwned::to_owned);
-        let authority = token.as_ref().map_or_else(
-            || base.clone(),
-            |token| base.replacen("https://", &format!("https://{TOKEN_USER}:{token}@"), 1),
-        );
+        let url = self.clone_url(repo);
+        let token = token.filter(|_| github_hosted(&url)).map(ToOwned::to_owned);
         Origin {
-            url: format!("{authority}/{repo}.git"),
+            url: token.as_ref().map_or_else(
+                || url.clone(),
+                |token| url.replacen(HTTPS, &format!("{HTTPS}{TOKEN_USER}:{token}@"), 1),
+            ),
             token,
         }
     }
+
+    /// The URL git is given: a repository spelled as a URL is cloned from
+    /// exactly that, and the `owner/name` shorthand from under this site's
+    /// base.
+    fn clone_url(&self, repo: &str) -> String {
+        if names_a_github_repository(repo) {
+            format!("{}/{repo}.git", self.base)
+        } else {
+            repo.to_owned()
+        }
+    }
+}
+
+/// Whether `url` leads to github.com itself, which is the one host this core
+/// will hand a credential to. The authority is read rather than searched for:
+/// `github.com.evil.example` and `evil.example/github.com` are other people's
+/// hosts, and so is github.com reached over a port of somebody's choosing.
+fn github_hosted(url: &str) -> bool {
+    let github = authority(GITHUB).expect("this site's own base is an https URL");
+    authority(url).is_some_and(|authority| authority.eq_ignore_ascii_case(github))
 }
 
 /// One repository's clone URL, credentials and all.
@@ -147,6 +169,64 @@ pub fn slugify(typed: &str) -> String {
         }
     }
     slug.trim_matches('-').to_owned()
+}
+
+/// Whether a chat could be cut from `repo` at all: the `owner/name`
+/// shorthand, or an https URL of its own.
+///
+/// A URL is taken as typed, so it has to be one this core can read as well as
+/// git can: the scheme is https and nothing else, the authority is a host and
+/// at most a port, and no credential is smuggled in ahead of it.
+#[must_use]
+pub fn names_a_repository(repo: &str) -> bool {
+    names_a_github_repository(repo)
+        || repo.bytes().all(|byte| byte.is_ascii_graphic())
+            && authority(repo).is_some_and(names_a_host)
+}
+
+/// Whether `repo` is the `owner/name` shorthand for a repository on the site
+/// this deployment clones from.
+///
+/// Both halves there, neither of them a path trick, and nothing a command
+/// line would read as an option.
+#[must_use]
+pub fn names_a_github_repository(repo: &str) -> bool {
+    let mut halves = repo.split('/');
+    let named = |half: Option<&str>| {
+        half.is_some_and(|half| {
+            !half.is_empty()
+                && !half.bytes().all(|byte| byte == b'.')
+                && half
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+    };
+    !repo.starts_with('-')
+        && named(halves.next())
+        && named(halves.next())
+        && halves.next().is_none()
+}
+
+/// The host and port of an https URL, or nothing at all for anything else —
+/// another scheme, or an authority carrying userinfo, which is a credential
+/// this core will not put in a manifest or a log.
+fn authority(url: &str) -> Option<&str> {
+    let authority = url.strip_prefix(HTTPS)?.split(['/', '?', '#']).next()?;
+    (!authority.is_empty() && !authority.contains('@')).then_some(authority)
+}
+
+/// Whether `authority` is a host and at most a port, spelled out rather than
+/// hinted at.
+fn names_a_host(authority: &str) -> bool {
+    let (host, port) = authority
+        .split_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    !host.is_empty()
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-.".contains(&byte))
+        && port
+            .is_none_or(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 /// Whether git would take `branch` as a branch name — and whether a command
@@ -620,6 +700,90 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_is_named_by_the_shorthand_or_by_an_https_url_of_its_own() {
+        for named in [
+            "CorVous/CorCode",
+            "cor_vous/cor.code-1",
+            "https://gitea.example/cor/thing.git",
+            "https://gitea.example:8443/cor/thing",
+            "https://github.com/CorVous/CorCode",
+        ] {
+            assert!(names_a_repository(named), "{named} is a repository");
+        }
+        for unnamed in [
+            "",
+            "-flag",
+            "-a/b",
+            "owner/name/extra",
+            "owner/",
+            "/name",
+            "file:///x",
+            "ssh://git@example/cor/thing",
+            "git://example/cor/thing",
+            "ext::sh -c id",
+            "example.com:cor/thing",
+            "https://user:pass@example/cor/thing",
+            "https://user@example/cor/thing",
+            "https:///cor/thing",
+            "http://example/cor/thing",
+            "https://exa mple/cor/thing",
+            "https://gitea.example/cor/ thing",
+            "https://ho|st/x",
+            "https://host:80x/x",
+        ] {
+            assert!(
+                !names_a_repository(unnamed),
+                "{unnamed} is not a repository"
+            );
+        }
+    }
+
+    /// Userinfo is refused where the authority is read, rather than left for
+    /// the host rule to trip over: a credential in a URL is never this core's
+    /// to carry into a manifest, a log or a clone.
+    #[test]
+    fn a_url_carrying_userinfo_has_no_authority_to_read() {
+        assert_eq!(
+            authority("https://gitea.example/cor/thing"),
+            Some("gitea.example")
+        );
+        assert_eq!(
+            authority("https://gitea.example:8443/cor/thing"),
+            Some("gitea.example:8443")
+        );
+        for credentialed in [
+            "https://user@gitea.example/cor/thing",
+            "https://user:pass@gitea.example/cor/thing",
+            "https://user@github.com/CorVous/CorCode",
+        ] {
+            assert_eq!(
+                authority(credentialed),
+                None,
+                "{credentialed} carries userinfo"
+            );
+        }
+    }
+
+    /// `CORCODE_REPOS` is a list of GitHub repositories and nothing else: a
+    /// URL there is a misconfiguration, however well a typed one would work.
+    #[test]
+    fn the_shorthand_is_the_only_thing_the_configured_list_may_hold() {
+        assert!(names_a_github_repository("CorVous/CorCode"));
+        for unnamed in [
+            "https://github.com/CorVous/CorCode",
+            "-flag",
+            "-a/b",
+            "owner/name/extra",
+            "./x",
+        ] {
+            assert!(
+                !names_a_github_repository(unnamed),
+                "{unnamed} is not an owner/name repository"
+            );
+        }
+    }
+
+    #[test]
     fn a_clone_url_names_the_repository_on_github() {
         let origin = Remotes::new(GITHUB).origin("CorVous/CorCode", None);
 
@@ -642,6 +806,79 @@ mod tests {
             origin.tokenless(),
             "https://github.com/CorVous/CorCode.git",
             "what the workspace is left pointing at should still be fetchable"
+        );
+    }
+
+    /// A typed URL is cloned from exactly as it was typed: this core cannot
+    /// know whether a host wants `.git` on the end, and a URL that already
+    /// carries one would be broken by adding another.
+    #[test]
+    fn a_typed_url_is_cloned_from_as_it_was_typed() {
+        let remotes = Remotes::new(GITHUB);
+
+        for typed in [
+            "https://gitea.example/cor/thing.git",
+            "https://gitea.example:8443/cor/thing",
+        ] {
+            assert_eq!(remotes.origin(typed, None).url(), typed);
+        }
+    }
+
+    /// The credential is GitHub's and nobody else's: a typed URL leads
+    /// wherever the operator says, and a token spliced into it would be handed
+    /// to whoever is listening there. Clone, revival and the archive push all
+    /// go out over this one URL.
+    #[test]
+    fn no_host_but_github_itself_is_handed_the_credential() {
+        let remotes = Remotes::new(GITHUB);
+
+        for foreign in [
+            "https://gitea.example/cor/thing.git",
+            "https://github.com:443/CorVous/CorCode.git",
+            "https://github.com.evil.example/CorVous/CorCode.git",
+            "https://evil.example/github.com/CorVous/CorCode.git",
+            "https://notgithub.com/CorVous/CorCode.git",
+        ] {
+            let origin = remotes.origin(foreign, Some(TOKEN));
+
+            assert_eq!(origin.url(), foreign);
+            assert_eq!(origin.tokenless(), foreign);
+            assert!(
+                !format!("{origin}{origin:?}").contains(TOKEN),
+                "{foreign} was handed the credential: {origin:?}"
+            );
+        }
+    }
+
+    /// A host that is not github.com is one no credential reaches, whichever
+    /// operation asks for the URL. The URL is asserted on rather than the
+    /// failure alone: a scrubbed message says nothing about what git was
+    /// handed, only about what it said back.
+    #[test]
+    fn an_archive_push_to_a_foreign_host_carries_no_credential() {
+        const FOREIGN: &str = "https://127.0.0.1:1/cor/thing.git";
+
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        let foreign = Remotes::new(GITHUB).origin(FOREIGN, Some(TOKEN));
+
+        let failure = push_for_archive(&foreign, &workspace, CHAT_BRANCH)
+            .expect_err("a push to a host that is not listening should fail");
+
+        assert_eq!(
+            foreign.url(),
+            FOREIGN,
+            "the push went out over a URL that is not the one it was given"
+        );
+        assert_eq!(foreign.tokenless(), FOREIGN);
+        let said = format!("{failure}{failure:?}");
+        assert!(
+            said.contains(FOREIGN),
+            "the failure does not quote the URL git was handed: {said}"
+        );
+        assert!(
+            !said.contains("github.com"),
+            "the push was aimed at github rather than at the URL it was given: {said}"
         );
     }
 
