@@ -206,6 +206,7 @@ async fn a_repository_that_is_neither_shorthand_nor_an_https_url_is_refused() {
     for unnamed in [
         "",
         "-flag",
+        "-a/b",
         "owner/name/extra",
         "file:///etc",
         "ssh://git@example/cor/thing",

@@ -713,6 +713,7 @@ mod tests {
         for unnamed in [
             "",
             "-flag",
+            "-a/b",
             "owner/name/extra",
             "owner/",
             "/name",
@@ -726,10 +727,39 @@ mod tests {
             "https:///cor/thing",
             "http://example/cor/thing",
             "https://exa mple/cor/thing",
+            "https://gitea.example/cor/ thing",
+            "https://ho|st/x",
+            "https://host:80x/x",
         ] {
             assert!(
                 !names_a_repository(unnamed),
                 "{unnamed} is not a repository"
+            );
+        }
+    }
+
+    /// Userinfo is refused where the authority is read, rather than left for
+    /// the host rule to trip over: a credential in a URL is never this core's
+    /// to carry into a manifest, a log or a clone.
+    #[test]
+    fn a_url_carrying_userinfo_has_no_authority_to_read() {
+        assert_eq!(
+            authority("https://gitea.example/cor/thing"),
+            Some("gitea.example")
+        );
+        assert_eq!(
+            authority("https://gitea.example:8443/cor/thing"),
+            Some("gitea.example:8443")
+        );
+        for credentialed in [
+            "https://user@gitea.example/cor/thing",
+            "https://user:pass@gitea.example/cor/thing",
+            "https://user@github.com/CorVous/CorCode",
+        ] {
+            assert_eq!(
+                authority(credentialed),
+                None,
+                "{credentialed} carries userinfo"
             );
         }
     }
@@ -742,6 +772,7 @@ mod tests {
         for unnamed in [
             "https://github.com/CorVous/CorCode",
             "-flag",
+            "-a/b",
             "owner/name/extra",
             "./x",
         ] {
@@ -806,6 +837,7 @@ mod tests {
             "https://github.com:443/CorVous/CorCode.git",
             "https://github.com.evil.example/CorVous/CorCode.git",
             "https://evil.example/github.com/CorVous/CorCode.git",
+            "https://notgithub.com/CorVous/CorCode.git",
         ] {
             let origin = remotes.origin(foreign, Some(TOKEN));
 
@@ -819,21 +851,30 @@ mod tests {
     }
 
     /// A host that is not github.com is one no credential reaches, whichever
-    /// operation asks for the URL — and the words git comes back with cannot
-    /// carry what was never put in.
+    /// operation asks for the URL. The URL is asserted on rather than the
+    /// failure alone: a scrubbed message says nothing about what git was
+    /// handed, only about what it said back.
     #[test]
     fn an_archive_push_to_a_foreign_host_carries_no_credential() {
+        const FOREIGN: &str = "https://127.0.0.1:1/cor/thing.git";
+
         let (_origin_dir, remotes) = seeded_repository();
         let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
-        let foreign = Remotes::new(GITHUB).origin("https://127.0.0.1:1/cor/thing.git", Some(TOKEN));
+        let foreign = Remotes::new(GITHUB).origin(FOREIGN, Some(TOKEN));
 
         let failure = push_for_archive(&foreign, &workspace, CHAT_BRANCH)
             .expect_err("a push to a host that is not listening should fail");
 
+        assert_eq!(
+            foreign.url(),
+            FOREIGN,
+            "the push went out over a URL that is not the one it was given"
+        );
+        assert_eq!(foreign.tokenless(), FOREIGN);
         let said = format!("{failure}{failure:?}");
         assert!(
-            !said.contains(TOKEN),
-            "the credential went to a foreign host: {said}"
+            said.contains(FOREIGN),
+            "the failure does not quote the URL git was handed: {said}"
         );
         assert!(
             !said.contains("github.com"),
