@@ -4,6 +4,7 @@ set -uo pipefail
 install_dir="${1:-/opt/corcode-agent}"
 readonly adapter='@agentclientprotocol/claude-agent-acp'
 readonly sdk='@anthropic-ai/claude-agent-sdk'
+readonly bin='claude-agent-acp'
 
 cd "$install_dir" || exit 1
 
@@ -30,3 +31,11 @@ verify() {
 
 verify "dependencies.$adapter" "$adapter" || exit 1
 verify "overrides.$sdk" "$sdk" || exit 1
+
+if [ ! -x "node_modules/.bin/$bin" ]; then
+  printf 'the adapter installs no %s for the core to exec; node_modules/.bin holds [%s]\n' \
+    "$bin" "$(echo node_modules/.bin/*)" >&2
+  exit 1
+fi
+
+printf 'the adapter installs the %s the core execs\n' "$bin"

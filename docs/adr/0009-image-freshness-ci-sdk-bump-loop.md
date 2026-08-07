@@ -19,7 +19,13 @@ the wrong thing to watch: `@zed-industries/claude-agent-acp` has been quiet
 since 2026-03-26 (0.23.1) and pins `@anthropic-ai/claude-agent-sdk`
 **exactly** at 0.2.83 (March), while the SDK is at 0.3.222 with near-weekly
 releases. Rebuilding on the latest adapter still bakes in a four-month-stale
-agent.
+agent. _(Corrected 2026-08-07: the quiet was a rename, not abandonment.
+0.23.1 was the last release under the Zed name; the same series continued as
+`@agentclientprotocol/claude-agent-acp` and is now at 0.66.0, declaring
+`@anthropic-ai/claude-agent-sdk` 0.3.220. The image installs the living name;
+the override still forces the SDK forward, at 0.3.223. Whether a maintained
+adapter is now worth watching as well is an open question this correction
+leaves open.)_
 
 ## Decision
 

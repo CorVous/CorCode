@@ -11,7 +11,10 @@ Every chat spawns a workspace container (ADR-0001: hardened sibling, read-only
 rootfs, non-root user). The image must carry Claude Code behind the ACP
 adapter — Zed's `@zed-industries/claude-agent-acp`, a Node package wrapping
 Anthropic's Claude Agent SDK (renamed from `claude-code-acp`; 0.23.1 as of
-2026-08-05, historically several releases/month, quiet since March). TrueNAS
+2026-08-05, historically several releases/month, quiet since March).
+_(Corrected 2026-08-07: the quiet was a third rename. The package lives on as
+`@agentclientprotocol/claude-agent-acp`, 0.66.0, and the image installs
+that.)_ TrueNAS
 hosting research settled the mechanics: `docker build` works on-box, local
 tags resolve without a registry when compose's pull policy never pulls, and
 the Dockerfile — not the image store — is the artifact to preserve.
