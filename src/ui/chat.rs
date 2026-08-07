@@ -201,8 +201,8 @@ enum Entry<'a> {
 
 /// The store has already refused anything unreadable, so a shape this build
 /// does not know is a newer ACP, not damage: it names itself as an aside
-/// rather than disappearing. Bookkeeping is the exception — it is a shape this
-/// build knows says nothing to read.
+/// rather than disappearing. A shape this build knows carries nothing to read
+/// — bookkeeping, or a chunk of pictures rather than words — is the exception.
 fn entry(event: &Value) -> Entry<'_> {
     if let Some(said) = event.get("prompt").and_then(blocks_text) {
         return Entry::Turn(said);
@@ -214,16 +214,29 @@ fn entry(event: &Value) -> Entry<'_> {
     if BOOKKEEPING.contains(&kind) {
         return Entry::Bookkeeping;
     }
-    match (kind, event.get("content").and_then(blocks_text)) {
-        ("user_message_chunk", Some(said)) => Entry::Chunk(Voice::User, said),
-        ("agent_message_chunk", Some(said)) => Entry::Chunk(Voice::Agent, said),
-        ("agent_thought_chunk", Some(said)) => Entry::Chunk(Voice::Thought, said),
-        ("tool_call" | "tool_call_update", _) => Entry::Tool(ToolCall {
+    if let Some(voice) = voice(kind) {
+        return event
+            .get("content")
+            .and_then(blocks_text)
+            .map_or(Entry::Bookkeeping, |said| Entry::Chunk(voice, said));
+    }
+    match kind {
+        "tool_call" | "tool_call_update" => Entry::Tool(ToolCall {
             id: owned(event, "toolCallId"),
             title: owned(event, "title"),
             status: owned(event, "status"),
         }),
         _ => Entry::Aside(kind),
+    }
+}
+
+/// Whose words a chunk of this kind carries, if it is a chunk at all.
+fn voice(kind: &str) -> Option<Voice> {
+    match kind {
+        "user_message_chunk" => Some(Voice::User),
+        "agent_message_chunk" => Some(Voice::Agent),
+        "agent_thought_chunk" => Some(Voice::Thought),
+        _ => None,
     }
 }
 
