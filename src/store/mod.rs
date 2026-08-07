@@ -398,7 +398,7 @@ mod tests {
 
     fn store() -> (TempDir, ChatStore) {
         let root = TempDir::new().expect("temp dataset root should be created");
-        let store = ChatStore::new(root.path());
+        let store = ChatStore::new(root.path()).handing_trees_to(ours(root.path()));
         (root, store)
     }
 
@@ -424,6 +424,13 @@ mod tests {
     #[cfg(unix)]
     fn ours(path: &Path) -> Owner {
         Owner::of(path).expect("what we wrote should be there")
+    }
+
+    /// Nowhere but unix has an owner to read, and nowhere but unix is one
+    /// changed.
+    #[cfg(not(unix))]
+    fn ours(_path: &Path) -> Owner {
+        Owner::AGENT
     }
 
     /// A clone the core wrote as itself: nested dirs, files, and a link

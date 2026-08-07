@@ -22,8 +22,7 @@ use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_
 use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::{Secret, Secrets};
-use cor_code::store::ChatStore;
-use cor_code::store::Owner;
+use cor_code::store::{ChatStore, Owner};
 
 const REPO: &str = "CorVous/fixture";
 const BARE: &str = "CorVous/fixture.git";

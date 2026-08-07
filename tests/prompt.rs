@@ -28,8 +28,7 @@ use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
-use cor_code::store::Owner;
-use cor_code::store::{ChatStore, NewChat};
+use cor_code::store::{ChatStore, NewChat, Owner};
 use cor_code::verify::ScriptedVerifier;
 
 const USERNAME: &str = "cassidy";
@@ -394,6 +393,9 @@ impl TestApp {
     /// connection are long gone reads on a restart.
     fn chat_on_disk_alone(&self) -> String {
         ChatStore::new(self.data_dir.path())
+            .handing_trees_to(
+                Owner::of(self.data_dir.path()).expect("we own the dataset we just made"),
+            )
             .create_chat(NewChat {
                 title: "parked".to_owned(),
                 repo: REPO.to_owned(),

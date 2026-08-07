@@ -17,8 +17,7 @@ use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_
 use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
-use cor_code::store::Owner;
-use cor_code::store::{ChatStore, RuntimeStatus};
+use cor_code::store::{ChatStore, Owner, RuntimeStatus};
 use cor_code::ui;
 
 const REPO: &str = "CorVous/fixture";
@@ -637,6 +636,9 @@ impl Dataset {
     /// The chat's log as the browser is served it.
     fn rendered_log(&self, chat_id: &str) -> String {
         let events = ChatStore::new(self.data_dir.path())
+            .handing_trees_to(
+                Owner::of(self.data_dir.path()).expect("we own the dataset we just made"),
+            )
             .read_events(chat_id)
             .expect("the event log should read back");
         ui::event_log(chat_id, &events)

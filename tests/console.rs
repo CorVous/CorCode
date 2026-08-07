@@ -24,8 +24,7 @@ use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
-use cor_code::store::Owner;
-use cor_code::store::{ChatStore, Manifest, NewChat};
+use cor_code::store::{ChatStore, Manifest, NewChat, Owner};
 use cor_code::verify::ScriptedVerifier;
 
 const USERNAME: &str = "cassidy";
@@ -211,7 +210,8 @@ async fn an_unknown_chat_id_says_nothing_about_the_filesystem() {
 /// ADR-0006 records.
 fn fixture_chat() -> (TempDir, String) {
     let data_dir = TempDir::new().expect("temp dir should be creatable");
-    let store = ChatStore::new(data_dir.path());
+    let store = ChatStore::new(data_dir.path())
+        .handing_trees_to(Owner::of(data_dir.path()).expect("we own the dataset we just made"));
     let manifest = store
         .create_chat(NewChat {
             title: "Resume ladder".to_owned(),
@@ -267,7 +267,8 @@ fn plant_secret(data_dir: &TempDir) {
 
 /// A well-formed chat id with nothing behind it: minted, then removed.
 fn vanished_chat(data_dir: &TempDir) -> String {
-    let store = ChatStore::new(data_dir.path());
+    let store = ChatStore::new(data_dir.path())
+        .handing_trees_to(Owner::of(data_dir.path()).expect("we own the dataset we just made"));
     let manifest = store
         .create_chat(NewChat {
             title: "Gone".to_owned(),

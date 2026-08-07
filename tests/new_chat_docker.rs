@@ -27,8 +27,7 @@ use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings};
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
-use cor_code::store::ChatStore;
-use cor_code::store::Owner;
+use cor_code::store::{ChatStore, Owner};
 use cor_code::verify::ScriptedVerifier;
 
 const DOCKER_SOCKET: &str = "/var/run/docker.sock";
