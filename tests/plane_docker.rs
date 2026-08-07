@@ -9,6 +9,7 @@ use bollard::Docker;
 use bollard::errors::Error as DockerError;
 use bollard::exec::StartExecResults;
 use bollard::models::{ContainerInspectResponse, ExecConfig};
+use bollard::query_parameters::{StopContainerOptionsBuilder, WaitContainerOptionsBuilder};
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings, container_name};
 use futures_util::StreamExt as _;
 use tempfile::TempDir;
@@ -25,6 +26,11 @@ const CPUS: u32 = 1;
 /// Long enough for an image command to have run out: the adapter reading EOF
 /// off a closed stdin took about a second to bring its container down.
 const SETTLE: Duration = Duration::from_secs(3);
+/// The parked keep-alive discards SIGTERM, so every second of grace is a
+/// second of test; nothing in a test container has anything to finish.
+const TEST_STOP_GRACE_SECONDS: i32 = 1;
+/// The state the daemon has finished committing an exit into.
+const NOT_RUNNING: &str = "not-running";
 
 #[tokio::test]
 async fn a_real_spawned_container_wears_every_hardening_flag() {
@@ -226,11 +232,23 @@ fn settings() -> PlaneSettings {
 
 /// The plane's containers stay up on their own, so an exited one is now
 /// something a test has to arrange — and liveness must still not count it.
+/// The stop call answers while the daemon may still be committing the exit, so
+/// the wait is the barrier that makes "exited" true before anything asks. Its
+/// answer is discarded either way: a keep-alive that had to be killed exits by
+/// a signal, and that is the arrangement working.
 async fn stop(docker: &Docker, name: &str) {
+    let grace = StopContainerOptionsBuilder::new()
+        .t(TEST_STOP_GRACE_SECONDS)
+        .build();
     docker
-        .stop_container(name, None)
+        .stop_container(name, Some(grace))
         .await
         .expect("a live container should stop");
+    let exited = WaitContainerOptionsBuilder::new()
+        .condition(NOT_RUNNING)
+        .build();
+    let mut settling = docker.wait_container(name, Some(exited));
+    while settling.next().await.is_some() {}
 }
 
 /// A run that died mid-test leaves the fixed-name container behind; it would
