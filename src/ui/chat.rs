@@ -1,4 +1,9 @@
 //! The chat view: `events.jsonl` rendered as an event log (ADR-0006).
+//!
+//! The log is read rather than replayed: a run of chunks is one message, a
+//! tool call is one line however many updates it took, and bookkeeping is left
+//! out. One rendering serves both the page and the fragment htmx polls, so a
+//! chat reads the same on load as it does while it streams.
 
 use serde_json::Value;
 
@@ -14,6 +19,13 @@ const UNTYPED: &str = "event";
 
 /// The key on a line the core wrote in its own voice rather than relaying.
 const CORE_LINE: &str = "corcode";
+
+/// What a tool call that names neither itself nor an id is called.
+const UNNAMED_TOOL: &str = "tool call";
+
+/// Updates the agent keeps its client's accounting with. They carry no words
+/// for the operator, so the transcript is quieter without them.
+const BOOKKEEPING: [&str; 2] = ["usage_update", "available_commands_update"];
 
 /// How often an open chat asks for the log again. A turn streams for minutes,
 /// so this is what "live" means here: polling, not a second connection.
@@ -51,7 +63,7 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
 /// reads the same whether the chat is live or was live last week (ADR-0006).
 #[must_use]
 pub fn event_log(chat_id: &str, events: &[Event]) -> String {
-    let lines: String = events.iter().map(|event| line(&event.event)).collect();
+    let lines: String = blocks(events).iter().map(line).collect();
     format!(
         "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {POLL_SECONDS}s\" \
          hx-swap=\"outerHTML\">{lines}</section>",
@@ -88,43 +100,159 @@ const fn first_prompt_hint(status: RuntimeStatus) -> &'static str {
     }
 }
 
-/// One line of the log, in the on-disk shapes ADR-0006 fixes.
-fn line(event: &Value) -> String {
-    match entry(event) {
-        Entry::Prompt(said) => format!("<p><b>you:</b> {}</p>", text(&said)),
-        Entry::AgentText(said) => format!("<p>{}</p>", text(&said)),
-        Entry::Notice(said) => format!("<blockquote>{}</blockquote>", text(said)),
-        Entry::Aside(said) => format!("<p><small>{}</small></p>", text(said)),
+/// The log as it is read rather than as it arrived: a run of chunks is one
+/// message, and a tool call is one line however many updates it took.
+fn blocks(events: &[Event]) -> Vec<Block> {
+    let mut blocks: Vec<Block> = Vec::new();
+    for event in events.iter().map(|event| &event.event) {
+        match entry(event) {
+            Entry::Bookkeeping => {}
+            Entry::Turn(said) => blocks.push(Block::Turn(said)),
+            Entry::Chunk(voice, said) => join(&mut blocks, voice, said),
+            Entry::Notice(said) => blocks.push(Block::Notice(said.to_owned())),
+            Entry::Aside(said) => blocks.push(Block::Aside(said.to_owned())),
+            Entry::Tool(call) => amend(&mut blocks, call),
+        }
+    }
+    blocks
+}
+
+/// A chunk continues the run it belongs to, seam and all: the adapter splits
+/// its text mid-word, so a boundary is not a space and not a break.
+fn join(blocks: &mut Vec<Block>, voice: Voice, said: String) {
+    match blocks.last_mut() {
+        Some(Block::Run(run, text)) if *run == voice => text.push_str(&said),
+        _ => blocks.push(Block::Run(voice, said)),
+    }
+}
+
+/// A tool call keeps the line it first took, wherever the log has since gone;
+/// an update replaces what it says rather than adding a line of its own.
+fn amend(blocks: &mut Vec<Block>, call: ToolCall) {
+    for block in blocks.iter_mut().rev() {
+        if let Block::Tool(shown) = block
+            && shown.is_amended_by(&call)
+        {
+            shown.amend(call);
+            return;
+        }
+    }
+    blocks.push(Block::Tool(call));
+}
+
+/// One block of the log as it will be read.
+enum Block {
+    Turn(String),
+    Run(Voice, String),
+    Notice(String),
+    Aside(String),
+    Tool(ToolCall),
+}
+
+/// Whose words a run carries. A message and a thought read the same but are
+/// separate utterances, so a run of one never swallows the other.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum Voice {
+    User,
+    Agent,
+    Thought,
+}
+
+/// One tool call as the transcript shows it: what to call it and where it has
+/// got to (ADR-0006).
+struct ToolCall {
+    id: Option<String>,
+    title: Option<String>,
+    status: Option<String>,
+}
+
+impl ToolCall {
+    /// Whether a later event is another word on this same call. A call the
+    /// adapter left unidentified can be nobody else's line.
+    fn is_amended_by(&self, later: &Self) -> bool {
+        self.id.is_some() && self.id == later.id
+    }
+
+    /// Fold a later word on the same call in: an update carries only what
+    /// changed, so a field it leaves out is not a field it cleared.
+    fn amend(&mut self, later: Self) {
+        self.title = later.title.or_else(|| self.title.take());
+        self.status = later.status.or_else(|| self.status.take());
+    }
+
+    /// What the operator can recognise the call by.
+    fn name(&self) -> &str {
+        self.title
+            .as_deref()
+            .or(self.id.as_deref())
+            .unwrap_or(UNNAMED_TOOL)
     }
 }
 
 /// How a log line reads once its shape is known.
 enum Entry<'a> {
-    Prompt(String),
-    AgentText(String),
+    Turn(String),
+    Chunk(Voice, String),
     Notice(&'a str),
     Aside(&'a str),
+    Tool(ToolCall),
+    Bookkeeping,
 }
 
 /// The store has already refused anything unreadable, so a shape this build
 /// does not know is a newer ACP, not damage: it names itself as an aside
-/// rather than disappearing.
+/// rather than disappearing. Bookkeeping is the exception — it is a shape this
+/// build knows says nothing to read.
 fn entry(event: &Value) -> Entry<'_> {
     if let Some(said) = event.get("prompt").and_then(blocks_text) {
-        return Entry::Prompt(said);
+        return Entry::Turn(said);
     }
     if let Some(kind) = field(event, CORE_LINE) {
         return Entry::Notice(field(event, "text").unwrap_or(kind));
     }
     let kind = field(event, "sessionUpdate").unwrap_or(UNTYPED);
+    if BOOKKEEPING.contains(&kind) {
+        return Entry::Bookkeeping;
+    }
     match (kind, event.get("content").and_then(blocks_text)) {
-        ("user_message_chunk", Some(said)) => Entry::Prompt(said),
-        ("agent_message_chunk" | "agent_thought_chunk", Some(said)) => Entry::AgentText(said),
-        ("tool_call" | "tool_call_update", _) => {
-            Entry::Aside(field(event, "title").unwrap_or(kind))
-        }
+        ("user_message_chunk", Some(said)) => Entry::Chunk(Voice::User, said),
+        ("agent_message_chunk", Some(said)) => Entry::Chunk(Voice::Agent, said),
+        ("agent_thought_chunk", Some(said)) => Entry::Chunk(Voice::Thought, said),
+        ("tool_call" | "tool_call_update", _) => Entry::Tool(ToolCall {
+            id: owned(event, "toolCallId"),
+            title: owned(event, "title"),
+            status: owned(event, "status"),
+        }),
         _ => Entry::Aside(kind),
     }
+}
+
+/// One block of the log as HTML.
+fn line(block: &Block) -> String {
+    match block {
+        Block::Turn(said) | Block::Run(Voice::User, said) => {
+            format!("<p><b>you:</b> {}</p>", said_html(said))
+        }
+        Block::Run(_, said) => format!("<p>{}</p>", said_html(said)),
+        Block::Notice(said) => format!("<blockquote>{}</blockquote>", said_html(said)),
+        Block::Aside(said) => format!("<p><small>{}</small></p>", text(said)),
+        Block::Tool(call) => format!("<p><small>{}</small></p>", tool_line(call)),
+    }
+}
+
+/// A tool call in one line: what it is, and where it last got to.
+fn tool_line(call: &ToolCall) -> String {
+    let status = call
+        .status
+        .as_deref()
+        .map(|status| format!(" · {}", text(status)))
+        .unwrap_or_default();
+    format!("{}{status}", text(call.name()))
+}
+
+/// Said words as HTML: escaped, keeping the line breaks the speaker meant.
+fn said_html(said: &str) -> String {
+    text(said).to_string().replace('\n', "<br>")
 }
 
 /// The words in one content block or a run of them; blocks that carry no text
@@ -143,6 +271,10 @@ fn block_text(block: &Value) -> Option<&str> {
 
 fn field<'a>(event: &'a Value, name: &str) -> Option<&'a str> {
     event.get(name).and_then(Value::as_str)
+}
+
+fn owned(event: &Value, name: &str) -> Option<String> {
+    field(event, name).map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -454,18 +586,12 @@ mod tests {
 
     #[test]
     fn a_tool_call_renders_as_a_small_inline_line() {
-        let events = log(&[json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "call_1",
-            "title": "git commit",
-            "kind": "execute",
-            "status": "pending",
-        })]);
+        let events = log(&[tool_call("call_1", "git commit")]);
 
         let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
 
         assert!(
-            rendered.contains("<small>git commit</small>"),
+            rendered.contains("<small>git commit · pending</small>"),
             "the tool call is not a small inline line: {rendered}"
         );
     }
