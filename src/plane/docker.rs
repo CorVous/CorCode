@@ -32,6 +32,15 @@ const SCRATCH_OPTIONS: &str = "rw,nosuid,nodev,noexec,size=256m";
 /// The workspace image's `agent` user, spelled numerically so the plane
 /// enforces non-root whatever image it is handed.
 const AGENT_USER: &str = "1000:1000";
+/// What PID 1 does for a living: nothing, until the container is torn down.
+/// The agent is started by `docker exec` (ADR-0001), so an image's own command
+/// running as PID 1 would only be a second, stdin-less adapter — one that
+/// reads EOF, exits, and takes the whole container down with it.
+const KEEP_ALIVE: [&str; 2] = ["sleep", "infinity"];
+/// No entrypoint at all, which the daemon spells as one empty string: the
+/// keep-alive is the container's whole process, wrapped by nothing the image
+/// brought with it.
+const NO_ENTRYPOINT: [&str; 1] = [""];
 const BYTES_PER_MB: i64 = 1024 * 1024;
 const NANOS_PER_CPU: i64 = 1_000_000_000;
 const STOP_GRACE_SECONDS: i32 = 10;
@@ -241,6 +250,8 @@ fn create_body(
     let memory = i64::from(settings.memory_mb) * BYTES_PER_MB;
     Ok(ContainerCreateBody {
         image: Some(settings.image.clone()),
+        entrypoint: Some(NO_ENTRYPOINT.map(str::to_owned).into()),
+        cmd: Some(KEEP_ALIVE.map(str::to_owned).into()),
         user: Some(AGENT_USER.to_owned()),
         env: Some(
             env.iter()
