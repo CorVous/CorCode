@@ -821,7 +821,15 @@ where
     /// base branch, the chat's own branch, a container, and the ACP session
     /// they will talk over. A step that fails leaves what came before it on
     /// disk for the operator to look at (ADR-0007 rule 5).
+    ///
+    /// The repository is trimmed the way `CORCODE_REPOS` entries are, and the
+    /// manifest holds what is left: a URL pasted out of a browser carries
+    /// whitespace nobody typed and no repository wants.
     pub async fn create(&self, wanted: WantedChat) -> Result<String, CreateError> {
+        let wanted = WantedChat {
+            repo: wanted.repo.trim().to_owned(),
+            ..wanted
+        };
         let typed = wanted.slug.trim();
         let slug = git::slugify(typed);
         if slug.is_empty() {
