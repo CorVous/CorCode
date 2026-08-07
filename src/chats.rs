@@ -40,8 +40,8 @@ pub struct WantedChat {
 pub enum CreateError {
     #[error("that leaves no slug a branch could carry")]
     Unnamed,
-    #[error("this deployment does not offer {repo}")]
-    UnknownRepo { repo: String },
+    #[error("{repo} is neither an owner/name repository nor an https clone URL")]
+    UnusableRepo { repo: String },
     #[error("{branch} is not a branch name")]
     UnusableBranch { branch: String },
     #[error("the chat could not be built")]
@@ -271,7 +271,8 @@ where
         }
     }
 
-    /// The repositories a new chat may be cut from, first one default.
+    /// The repositories the new-chat form suggests, first one default. A chat
+    /// can be cut from any repository [`git::names_a_repository`] takes.
     #[must_use]
     pub fn repos(&self) -> &[String] {
         &self.repos
@@ -524,9 +525,9 @@ where
         ))
     }
 
-    /// Where one of this deployment's repositories is reached, over the
-    /// credential as it stands right now: a token rotated since the last
-    /// operation is the one this operation goes out on.
+    /// Where a chat's repository is reached, over the credential as it stands
+    /// right now: a token rotated since the last operation is the one this
+    /// operation goes out on. Only github.com is handed it (`crate::git`).
     fn origin(&self, repo: &str) -> Result<git::Origin, SecretsError> {
         let token = self.secrets.read(Secret::GithubToken)?;
         Ok(self.remotes.origin(repo, token.as_deref()))
@@ -826,8 +827,8 @@ where
         if slug.is_empty() {
             return Err(CreateError::Unnamed);
         }
-        if !self.repos.contains(&wanted.repo) {
-            return Err(CreateError::UnknownRepo { repo: wanted.repo });
+        if !git::names_a_repository(&wanted.repo) {
+            return Err(CreateError::UnusableRepo { repo: wanted.repo });
         }
         if !git::names_a_branch(&wanted.base_branch) {
             return Err(CreateError::UnusableBranch {
