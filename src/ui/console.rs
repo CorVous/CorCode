@@ -18,6 +18,10 @@ use super::{
 /// The branch a chat is cut from when the operator says nothing else.
 const DEFAULT_BASE_BRANCH: &str = "main";
 
+/// What the repository field's completions are called, so the field and the
+/// list it reads are named once.
+const REPOS_LIST: &str = "repos";
+
 /// How often the console asks for the container picture again. Slots and
 /// idle times move with the turns other pages are taking, so the line has to
 /// be polled to stay true; nothing here is worth the chat log's cadence.
@@ -195,7 +199,8 @@ fn new_chat_form(repos: &[String]) -> String {
     format!(
         "<details><summary>New chat</summary>\
          <form method=\"post\" action=\"{CHATS_PATH}\">\
-         <p><label>Repository <select name=\"repo\">{}</select></label></p>\
+         <p><label>Repository <input name=\"repo\" list=\"{REPOS_LIST}\" value=\"{}\">\
+         </label>{}</p>\
          <p><label>Base branch <input name=\"base_branch\" value=\"{DEFAULT_BASE_BRANCH}\">\
          </label><br><small>Typed, not listed: naming a repository's branches would cost \
          a call to GitHub on every page.</small></p>\
@@ -207,17 +212,28 @@ fn new_chat_form(repos: &[String]) -> String {
          <p><label><input type=\"checkbox\" name=\"direct_on_base\"> \
          Work directly on the base branch</label></p>\
          <p><button type=\"submit\">Create</button></p></form></details>",
-        offered(repos),
+        text(default_repo(repos)),
+        suggested(repos),
     )
 }
 
-/// One `<option>` per repository this deployment was configured with, in the
-/// order it was given them: the first is the default (ADR-0005).
-fn offered(repos: &[String]) -> String {
-    repos.iter().fold(String::new(), |mut markup, repo| {
-        write!(markup, "<option>{}</option>", text(repo)).expect("writing to a string cannot fail");
-        markup
-    })
+/// What the repository field starts on: the first repository this deployment
+/// was configured with (ADR-0005), and nothing when it was given none.
+fn default_repo(repos: &[String]) -> &str {
+    repos.first().map_or("", String::as_str)
+}
+
+/// The repositories this deployment was configured with, offered as
+/// completions rather than as the only answers: any repository can be typed
+/// over them.
+fn suggested(repos: &[String]) -> String {
+    let mut markup = format!("<datalist id=\"{REPOS_LIST}\">");
+    for repo in repos {
+        write!(markup, "<option value=\"{}\"></option>", text(repo))
+            .expect("writing to a string cannot fail");
+    }
+    markup.push_str("</datalist>");
+    markup
 }
 
 /// The chats in one group, most recently active first as the store scanned
