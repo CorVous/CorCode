@@ -413,6 +413,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_container_is_parked_on_the_planes_own_keep_alive() {
+        let body = body();
+
+        assert_eq!(
+            body.cmd,
+            Some(vec!["sleep".to_owned(), "infinity".to_owned()]),
+            "whatever the image would run, the plane's container waits for exec"
+        );
+        assert_eq!(
+            body.entrypoint,
+            Some(vec![String::new()]),
+            "an image entrypoint left in place could divert or outlive the keep-alive"
+        );
+    }
+
     fn network(internal: Option<bool>) -> NetworkInspect {
         NetworkInspect {
             name: Some(NETWORK.to_owned()),
