@@ -35,6 +35,8 @@ const USERNAME: &str = "cassidy";
 const PASSWORD: &str = "correct horse battery staple";
 const REPO: &str = "CorVous/fixture";
 const BARE: &str = "CorVous/fixture.git";
+/// A repository this deployment was never configured with.
+const UNLISTED: &str = "Someone/else";
 const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
 
 #[tokio::test]
@@ -169,20 +171,64 @@ async fn a_slug_that_names_nothing_is_refused_before_anything_is_built() {
     app.stop().await;
 }
 
+/// The configured list is a suggestion, not a gate: anything git could be
+/// pointed at is a chat waiting to be cut.
 #[tokio::test]
-async fn a_repository_this_deployment_does_not_offer_is_refused() {
+async fn a_repository_this_deployment_never_listed_is_cut_from_all_the_same() {
     let app = TestApp::start().await;
 
     let response = app
         .create(&[
-            ("repo", "someone/else"),
+            ("repo", UNLISTED),
             ("base_branch", "main"),
             ("slug", "elsewhere"),
         ])
         .await;
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(app.chats_on_disk(), 0, "a refused chat was still built");
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let chat_id = chat_id_of(&response);
+    assert_eq!(
+        app.manifest(&chat_id)["repo"],
+        UNLISTED,
+        "the manifest should hold the repository as it was typed"
+    );
+    assert!(
+        app.workspace(&chat_id).join("README.md").is_file(),
+        "the unlisted repository was not cloned"
+    );
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_repository_that_is_neither_shorthand_nor_an_https_url_is_refused() {
+    let app = TestApp::start().await;
+
+    for unnamed in [
+        "",
+        "-flag",
+        "owner/name/extra",
+        "file:///etc",
+        "ssh://git@example/cor/thing",
+        "git://example/cor/thing",
+        "ext::sh -c id",
+        "example.com:cor/thing",
+        "https://user:pass@example/cor/thing",
+    ] {
+        let response = app
+            .create(&[
+                ("repo", unnamed),
+                ("base_branch", "main"),
+                ("slug", "elsewhere"),
+            ])
+            .await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{unnamed} was not refused"
+        );
+        assert_eq!(app.chats_on_disk(), 0, "{unnamed} still built a chat");
+    }
     app.stop().await;
 }
 
@@ -468,16 +514,12 @@ impl TestApp {
     }
 }
 
-/// A bare repository with a commit on `main`, reachable over `file://` so
-/// that no test needs the network.
+/// Bare repositories with a commit on `main` — the one this deployment
+/// offers and one it has never heard of — reachable over `file://` so that no
+/// test needs the network.
 fn seeded_repository() -> (TempDir, Remotes) {
     let dir = TempDir::new().expect("origin dir should be created");
-    let bare = dir.path().join(BARE);
     let work = dir.path().join("seed");
-    run(
-        dir.path(),
-        &["init", "--bare", "--initial-branch=main", &spelled(&bare)],
-    );
     run(
         dir.path(),
         &["init", "--initial-branch=main", &spelled(&work)],
@@ -487,8 +529,14 @@ fn seeded_repository() -> (TempDir, Remotes) {
     fs::write(work.join("README.md"), "fixture").expect("seed file should be writable");
     run(&work, &["add", "."]);
     run(&work, &["commit", "-m", "first"]);
-    run(&work, &["remote", "add", "origin", &spelled(&bare)]);
-    run(&work, &["push", "origin", "main"]);
+    for offered in [BARE, &format!("{UNLISTED}.git")] {
+        let bare = spelled(&dir.path().join(offered));
+        run(
+            dir.path(),
+            &["init", "--bare", "--initial-branch=main", &bare],
+        );
+        run(&work, &["push", &bare, "main"]);
+    }
     let served_from = format!("file://{}", spelled(dir.path()));
     (dir, Remotes::new(served_from))
 }
