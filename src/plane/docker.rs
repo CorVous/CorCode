@@ -19,7 +19,7 @@ use super::{ContainerPlane, ContainerRef, PlaneError, WORKSPACE_MOUNT, container
 use crate::config::RegistryCredentials;
 use crate::store::ContainerLiveness;
 
-/// Agent containers talk to nothing but each other (ADR-0001).
+/// A bridge of the agents' own, off whatever the core is on (ADR-0001).
 const NETWORK: &str = "corcode-agents";
 /// Stamped on every container so liveness is a label query.
 const CHAT_ID_LABEL: &str = "corcode.chat-id";
@@ -45,6 +45,8 @@ const BYTES_PER_MB: i64 = 1024 * 1024;
 const NANOS_PER_CPU: i64 = 1_000_000_000;
 const STOP_GRACE_SECONDS: i32 = 10;
 const NOT_FOUND: u16 = 404;
+/// How the daemon refuses to remove a network that still has endpoints on it.
+const STILL_IN_USE: u16 = 403;
 const NAME_TAKEN: u16 = 409;
 
 /// What every spawn is the same about: the image and the box it runs in.
@@ -70,13 +72,26 @@ impl DockerPlane {
         Ok(Self { docker, settings })
     }
 
-    /// The agents' own network, cut off from the core and the wider host
-    /// (ADR-0001). Whatever answers to the name is judged, created or not.
+    /// The agents' own network, off the core's own but routing out to the API
+    /// (ADR-0001). Whatever answers to the name is judged, and one of the
+    /// wrong shape is replaced where nobody is on it.
     async fn ensure_network(&self) -> Result<(), PlaneError> {
-        if self.agent_network().await?.is_none() {
-            self.create_agent_network().await?;
+        match network_found(self.agent_network().await?.as_ref()) {
+            NetworkFound::RoutesOut => return Ok(()),
+            NetworkFound::Nothing => {}
+            NetworkFound::WrongShapeAndEmpty => self.remove_agent_network().await?,
+            NetworkFound::WrongShapeAndInUse => {
+                return Err(PlaneError::NetworkInUse {
+                    network: NETWORK.to_owned(),
+                });
+            }
         }
-        if routes_nowhere(self.agent_network().await?.as_ref()) {
+        self.create_agent_network().await?;
+        if self
+            .agent_network()
+            .await?
+            .is_some_and(|created| routes_out(&created))
+        {
             Ok(())
         } else {
             Err(PlaneError::UnusableNetwork {
@@ -105,7 +120,7 @@ impl DockerPlane {
             .create_network(NetworkCreateRequest {
                 name: NETWORK.to_owned(),
                 driver: Some("bridge".to_owned()),
-                internal: Some(true),
+                internal: Some(false),
                 ..NetworkCreateRequest::default()
             })
             .await
@@ -118,6 +133,19 @@ impl DockerPlane {
             Err(source) => {
                 Err(PlaneError::runtime(format!("create the {NETWORK} network"))(source))
             }
+        }
+    }
+
+    /// Make room for the bridge by dropping an empty network of the wrong
+    /// shape. Another core getting there first is a win, not a failure.
+    async fn remove_agent_network(&self) -> Result<(), PlaneError> {
+        match self.docker.remove_network(NETWORK).await {
+            Ok(())
+            | Err(DockerError::DockerResponseServerError {
+                status_code: NOT_FOUND,
+                ..
+            }) => Ok(()),
+            Err(source) => Err(removal_failure(source)),
         }
     }
 
@@ -222,6 +250,21 @@ fn spawn_failure(chat_id: &str) -> impl FnOnce(DockerError) -> PlaneError + use<
     }
 }
 
+/// A container can attach between the look and the removal, and the daemon is
+/// the one that knows: endpoints it still holds turn a replacement into the
+/// same refusal the inspection would have given.
+fn removal_failure(source: DockerError) -> PlaneError {
+    match source {
+        DockerError::DockerResponseServerError {
+            status_code: STILL_IN_USE,
+            ..
+        } => PlaneError::NetworkInUse {
+            network: NETWORK.to_owned(),
+        },
+        source => PlaneError::runtime(format!("replace the {NETWORK} network"))(source),
+    }
+}
+
 fn teardown_failure(chat_id: &str) -> impl FnOnce(DockerError) -> PlaneError + use<> {
     let chat_id = chat_id.to_owned();
     move |source| match source {
@@ -284,11 +327,39 @@ fn create_body(
     })
 }
 
-/// A network the agents may be put on: it is there, and it routes nowhere
-/// (ADR-0001). Anything else — a leftover bridge, a compose-declared network —
-/// would hand every agent a way out.
-fn routes_nowhere(network: Option<&NetworkInspect>) -> bool {
-    network.is_some_and(|network| network.internal == Some(true))
+/// A network the agents may be put on: the plane's own bridge, routing out to
+/// the API the agents work through (ADR-0001). An internal one — or one that
+/// will not say — is a network no turn could ever run on.
+fn routes_out(network: &NetworkInspect) -> bool {
+    network.internal == Some(false)
+}
+
+/// What answers to the agent network's name, and so what a spawn must do about
+/// it first.
+#[derive(Debug, PartialEq, Eq)]
+enum NetworkFound {
+    Nothing,
+    RoutesOut,
+    WrongShapeAndEmpty,
+    WrongShapeAndInUse,
+}
+
+/// A network of the wrong shape is the plane's to replace exactly while
+/// nothing is on it: containers on an internal network belong to someone, and
+/// pulling it out from under them is not a spawn's business.
+fn network_found(network: Option<&NetworkInspect>) -> NetworkFound {
+    match network {
+        None => NetworkFound::Nothing,
+        Some(network) if routes_out(network) => NetworkFound::RoutesOut,
+        Some(network) if said_to_hold_nothing(network) => NetworkFound::WrongShapeAndEmpty,
+        Some(_) => NetworkFound::WrongShapeAndInUse,
+    }
+}
+
+/// An empty roster is the daemon saying nobody is on the network; a roster it
+/// left out says nothing at all, and a spawn deletes on the answer it has.
+fn said_to_hold_nothing(network: &NetworkInspect) -> bool {
+    network.containers.as_ref().is_some_and(HashMap::is_empty)
 }
 
 /// Ask for the chats' containers that are running: an exited one is a chat
@@ -327,6 +398,8 @@ fn bind(host_dir: &Path, container_path: &str) -> Result<String, PlaneError> {
 
 #[cfg(test)]
 mod tests {
+    use bollard::models::EndpointResource;
+
     use super::*;
 
     const CHAT_ID: &str = "01K1TESTCHATID0000000000";
@@ -448,26 +521,73 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_internal_network_is_the_only_one_agents_may_join() {
-        assert!(routes_nowhere(Some(&network(Some(true)))));
+    fn network_holding(internal: Option<bool>, container: &str) -> NetworkInspect {
+        NetworkInspect {
+            containers: Some(HashMap::from([(
+                container.to_owned(),
+                EndpointResource::default(),
+            )])),
+            ..network(internal)
+        }
     }
 
     #[test]
-    fn a_routable_network_of_the_same_name_is_refused() {
+    fn a_routing_bridge_is_the_only_network_agents_may_join() {
+        assert!(routes_out(&network(Some(false))));
+    }
+
+    #[test]
+    fn an_internal_network_of_the_same_name_is_refused() {
         assert!(
-            !routes_nowhere(Some(&network(Some(false)))),
-            "a routable network would give every agent a way out"
+            !routes_out(&network(Some(true))),
+            "an internal network leaves every agent unable to reach the API"
         );
         assert!(
-            !routes_nowhere(Some(&network(None))),
+            !routes_out(&network(None)),
             "a network that will not say is no better"
         );
     }
 
     #[test]
-    fn a_missing_network_is_refused() {
-        assert!(!routes_nowhere(None));
+    fn nothing_under_the_name_is_the_networks_to_create() {
+        assert_eq!(network_found(None), NetworkFound::Nothing);
+    }
+
+    #[test]
+    fn a_routing_bridge_is_taken_as_it_stands() {
+        assert_eq!(
+            network_found(Some(&network(Some(false)))),
+            NetworkFound::RoutesOut
+        );
+    }
+
+    #[test]
+    fn an_internal_network_the_daemon_calls_empty_is_the_planes_to_replace() {
+        assert_eq!(
+            network_found(Some(&NetworkInspect {
+                containers: Some(HashMap::new()),
+                ..network(Some(true))
+            })),
+            NetworkFound::WrongShapeAndEmpty
+        );
+    }
+
+    #[test]
+    fn an_internal_network_with_no_roster_at_all_is_left_where_it_is() {
+        assert_eq!(
+            network_found(Some(&network(Some(true)))),
+            NetworkFound::WrongShapeAndInUse,
+            "a roster the daemon did not send is no promise that nothing is on it"
+        );
+    }
+
+    #[test]
+    fn an_internal_network_with_a_container_on_it_is_nobodys_to_delete() {
+        assert_eq!(
+            network_found(Some(&network_holding(Some(true), &container_name(CHAT_ID)))),
+            NetworkFound::WrongShapeAndInUse,
+            "replacing it would cut off whatever is running on it"
+        );
     }
 
     const OTHER_CHAT_ID: &str = "01K1OTHERCHATID000000000";
@@ -541,6 +661,26 @@ mod tests {
         assert!(
             matches!(error, PlaneError::AlreadyLive { ref chat_id } if chat_id == CHAT_ID),
             "a name clash should name the live chat, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_network_something_is_still_on_is_not_the_planes_to_remove() {
+        let error = removal_failure(server_said(403));
+
+        assert!(
+            matches!(error, PlaneError::NetworkInUse { ref network } if network == NETWORK),
+            "a removal the daemon refused should say what to stop, got: {error}"
+        );
+    }
+
+    #[test]
+    fn any_other_refusal_to_remove_says_what_was_being_done() {
+        let error = removal_failure(server_said(500));
+
+        assert!(
+            format!("{error}").contains(&format!("replace the {NETWORK} network")),
+            "error should say what failed, got: {error}"
         );
     }
 
