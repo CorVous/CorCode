@@ -199,6 +199,34 @@ async fn a_repository_this_deployment_never_listed_is_cut_from_all_the_same() {
     app.stop().await;
 }
 
+/// A repository pasted out of a browser comes with whitespace nobody typed,
+/// and a chat is not worth refusing over a trailing newline.
+#[tokio::test]
+async fn a_pasted_repository_is_taken_with_the_whitespace_trimmed_off() {
+    let app = TestApp::start().await;
+
+    let response = app
+        .create(&[
+            ("repo", &format!("  {UNLISTED}\n")),
+            ("base_branch", "main"),
+            ("slug", "pasted"),
+        ])
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let chat_id = chat_id_of(&response);
+    assert_eq!(
+        app.manifest(&chat_id)["repo"],
+        UNLISTED,
+        "the manifest should hold the repository without the whitespace"
+    );
+    assert!(
+        app.workspace(&chat_id).join("README.md").is_file(),
+        "the pasted repository was not cloned"
+    );
+    app.stop().await;
+}
+
 #[tokio::test]
 async fn a_repository_that_is_neither_shorthand_nor_an_https_url_is_refused() {
     let app = TestApp::start().await;
