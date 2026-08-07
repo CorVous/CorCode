@@ -1,6 +1,7 @@
 //! Git as the git command line sees it: clone a base branch, cut the chat's
 //! branch off it (ADR-0005).
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::iter;
@@ -26,6 +27,9 @@ const TOKEN_USER: &str = "x-access-token";
 /// Git is never given a terminal to ask for credentials on: a chat that
 /// cannot be cloned must fail, not hang holding a request open.
 const NO_PROMPTS: (&str, &str) = ("GIT_TERMINAL_PROMPT", "0");
+
+/// The one config a command against a workspace carries.
+const SAFE_DIRECTORY: &str = "safe.directory";
 
 /// Who the core commits as on the one commit it authors itself (ADR-0005).
 const CORE_COMMITTER: (&str, &str) = ("CorCode core", "corcode@local");
@@ -622,6 +626,26 @@ fn undo_checkpoint(
         run(&doing, &args, ToOwned::to_owned)?;
     }
     Ok(())
+}
+
+/// The arguments a git command against `workspace` is run with.
+fn args_in(workspace: &str, args: &[&str]) -> Vec<String> {
+    ["-C", workspace]
+        .iter()
+        .chain(args)
+        .map(|arg| (*arg).to_owned())
+        .collect()
+}
+
+/// Whether a command that reaches into a tree has said that tree is one it may
+/// work in.
+fn declares_what_it_reaches_into<S: AsRef<OsStr>>(args: &[S]) -> bool {
+    !args.iter().any(|arg| arg.as_ref() == "-C")
+        || args.iter().any(|arg| {
+            arg.as_ref()
+                .to_string_lossy()
+                .starts_with(&format!("{SAFE_DIRECTORY}="))
+        })
 }
 
 /// Run one git command, answering with what it wrote on its way out. A
@@ -1255,6 +1279,85 @@ mod tests {
                 "a credential was left where the agent can read it: {config}"
             );
         }
+    }
+
+    /// The core clones, commits and pushes in trees it has handed to the agent
+    /// (ADR-0001), and git refuses a repository it reads as somebody else's.
+    /// Live, that was every new chat: the clone landed and the credential
+    /// could not be taken back out of it (issue #53).
+    ///
+    /// `GIT_TEST_ASSUME_DIFFERENT_OWNER` is git's own way of being told to read
+    /// a tree as another user's, which is what root reading a 1000:1000
+    /// workspace amounts to and what no unprivileged test could otherwise
+    /// arrange.
+    #[test]
+    fn a_command_works_in_a_tree_read_as_somebody_elses_because_it_says_that_tree_is_safe() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        let spelled = spelled(&workspace);
+        let asking = ["status", "--porcelain"];
+
+        let reached_in = as_another_user(&args_of(["-C", &spelled], &asking));
+        let declared = as_another_user(&args_in(&spelled, &asking));
+
+        assert!(
+            !reached_in.status.success()
+                && String::from_utf8_lossy(&reached_in.stderr).contains("dubious ownership"),
+            "this git will not read a tree as another user's, so it cannot show the failure"
+        );
+        assert!(
+            declared.status.success(),
+            "the core cannot work in a tree it handed to the agent: {}",
+            String::from_utf8_lossy(&declared.stderr)
+        );
+    }
+
+    /// The declaration covers the one tree the command runs in, for the length
+    /// of that command: nowhere else is trusted, and nothing is left behind in
+    /// a gitconfig for the next process to read.
+    #[test]
+    fn the_declaration_names_the_one_tree_and_outlives_nothing() {
+        let args = args_in("/data/workspaces/01K", &["status", "--porcelain"]);
+
+        assert_eq!(
+            args,
+            [
+                "-c",
+                "safe.directory=/data/workspaces/01K",
+                "-C",
+                "/data/workspaces/01K",
+                "status",
+                "--porcelain",
+            ]
+        );
+    }
+
+    /// Reaching into a workspace without declaring it is the bug this hotfix
+    /// is for, so a call site that tries it never reaches git.
+    #[test]
+    fn a_command_reaching_into_a_tree_it_has_not_declared_safe_is_refused_before_git_sees_it() {
+        assert!(declares_what_it_reaches_into(&args_in("/w", &["status"])));
+        assert!(declares_what_it_reaches_into(&["clone", "--", "url", "/w"]));
+        assert!(!declares_what_it_reaches_into(&["-C", "/w", "status"]));
+    }
+
+    /// Git the way a root core reads a workspace that belongs to the agent.
+    fn as_another_user(args: &[String]) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+            .output()
+            .expect("git should run")
+    }
+
+    /// The arguments of a command that reaches into a tree the old way, which
+    /// is what the declaration has to be measured against.
+    fn args_of(reaching: [&str; 2], asking: &[&str]) -> Vec<String> {
+        reaching
+            .iter()
+            .chain(asking)
+            .map(|arg| (*arg).to_owned())
+            .collect()
     }
 
     /// A cloned workspace standing on its chat branch, ready to commit as the
