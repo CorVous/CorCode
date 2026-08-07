@@ -760,6 +760,69 @@ mod tests {
         );
     }
 
+    /// A typed URL is cloned from exactly as it was typed: this core cannot
+    /// know whether a host wants `.git` on the end, and a URL that already
+    /// carries one would be broken by adding another.
+    #[test]
+    fn a_typed_url_is_cloned_from_as_it_was_typed() {
+        let remotes = Remotes::new(GITHUB);
+
+        for typed in [
+            "https://gitea.example/cor/thing.git",
+            "https://gitea.example:8443/cor/thing",
+        ] {
+            assert_eq!(remotes.origin(typed, None).url(), typed);
+        }
+    }
+
+    /// The credential is GitHub's and nobody else's: a typed URL leads
+    /// wherever the operator says, and a token spliced into it would be handed
+    /// to whoever is listening there. Clone, revival and the archive push all
+    /// go out over this one URL.
+    #[test]
+    fn no_host_but_github_itself_is_handed_the_credential() {
+        let remotes = Remotes::new(GITHUB);
+
+        for foreign in [
+            "https://gitea.example/cor/thing.git",
+            "https://github.com:443/CorVous/CorCode.git",
+            "https://github.com.evil.example/CorVous/CorCode.git",
+            "https://evil.example/github.com/CorVous/CorCode.git",
+        ] {
+            let origin = remotes.origin(foreign, Some(TOKEN));
+
+            assert_eq!(origin.url(), foreign);
+            assert_eq!(origin.tokenless(), foreign);
+            assert!(
+                !format!("{origin}{origin:?}").contains(TOKEN),
+                "{foreign} was handed the credential: {origin:?}"
+            );
+        }
+    }
+
+    /// A host that is not github.com is one no credential reaches, whichever
+    /// operation asks for the URL — and the words git comes back with cannot
+    /// carry what was never put in.
+    #[test]
+    fn an_archive_push_to_a_foreign_host_carries_no_credential() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        let foreign = Remotes::new(GITHUB).origin("https://127.0.0.1:1/cor/thing.git", Some(TOKEN));
+
+        let failure = push_for_archive(&foreign, &workspace, CHAT_BRANCH)
+            .expect_err("a push to a host that is not listening should fail");
+
+        let said = format!("{failure}{failure:?}");
+        assert!(
+            !said.contains(TOKEN),
+            "the credential went to a foreign host: {said}"
+        );
+        assert!(
+            !said.contains("github.com"),
+            "the push was aimed at github rather than at the URL it was given: {said}"
+        );
+    }
+
     /// The credential is the caller's to read afresh for every operation, so
     /// a token rotated a moment ago is in the very next URL.
     #[test]
