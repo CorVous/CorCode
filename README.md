@@ -51,8 +51,10 @@ Serving (the default action) reads its configuration from the environment:
 | `CORCODE_ANTHROPIC_API_KEY` | no       | -              |
 
 `CORCODE_REPOS` is the comma-separated `owner/name` list the new-chat form
-offers, first entry the default. `CORCODE_GITHUB_TOKEN` clones private
-repositories and pushes at archive; `CORCODE_ANTHROPIC_API_KEY` takes either
+suggests, first entry the default; a chat can be cut from any other
+`owner/name` repository, or from any `https://` clone URL, by typing it in.
+`CORCODE_GITHUB_TOKEN` clones private repositories and pushes at archive, and
+reaches github.com and no other host; `CORCODE_ANTHROPIC_API_KEY` takes either
 an API key, which reaches the agent as `ANTHROPIC_API_KEY`, or an `sk-ant-oat`
 subscription token, which reaches it as `CLAUDE_CODE_OAUTH_TOKEN`, and the
 settings panel holds one too. `CORCODE_WARM_POOL` is how many chats keep a
