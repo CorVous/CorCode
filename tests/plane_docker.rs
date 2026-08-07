@@ -143,7 +143,9 @@ async fn a_real_spawned_container_wears_every_hardening_flag() {
 #[tokio::test]
 async fn a_real_container_can_write_in_both_of_the_trees_it_was_handed() {
     let Some(docker) = reachable_daemon() else {
-        eprintln!("SKIPPED a_real_container_can_write_in_both_of_the_trees_it_was_handed: no docker daemon");
+        eprintln!(
+            "SKIPPED a_real_container_can_write_in_both_of_the_trees_it_was_handed: no docker daemon"
+        );
         return;
     };
     let _daemon = the_daemon_to_ourselves().await;

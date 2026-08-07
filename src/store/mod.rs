@@ -29,6 +29,14 @@ const CLAUDE_DIR: &str = "claude";
 const MANIFEST_FILE: &str = "manifest.json";
 const EVENTS_FILE: &str = "events.jsonl";
 
+/// The workspace image's `agent` user (ADR-0001), spelled numerically.
+///
+/// Who the plane runs a container as, enforcing non-root whatever image it is
+/// handed — and so who every tree handed to that container must belong to,
+/// since a bind mount carries the numbers through unchanged.
+pub const AGENT_UID: u32 = 1000;
+pub const AGENT_GID: u32 = 1000;
+
 /// Reader and writer of every chat under one dataset root.
 pub struct ChatStore {
     root: PathBuf,
@@ -96,15 +104,19 @@ impl ChatStore {
         }
     }
 
-    /// Lay down both trees for a new chat, publishing the chat dir whole.
+    /// Lay down both trees for a new chat, publishing the chat dir whole. Both
+    /// are mounted into the chat's container, so both are handed to the agent
+    /// as they are made.
     pub fn create_chat(&self, new_chat: NewChat) -> Result<Manifest, StoreError> {
         let manifest = Manifest::open(new_chat);
         let chat_id = &manifest.chat_id;
         let workspace = self.workspace_dir(chat_id);
         fs::create_dir_all(&workspace).map_err(StoreError::writing(&workspace))?;
+        make_agents_own(&workspace)?;
         let staged = self.staging_dir(chat_id);
         let claude = staged.join(CLAUDE_DIR);
         fs::create_dir_all(&claude).map_err(StoreError::writing(&claude))?;
+        make_agents_own(&claude)?;
         let events = staged.join(EVENTS_FILE);
         File::create_new(&events).map_err(StoreError::writing(&events))?;
         write_manifest_in(&staged, &manifest)?;
@@ -216,6 +228,55 @@ impl ChatStore {
     fn events_path(&self, chat_id: &str) -> PathBuf {
         self.chat_dir(chat_id).join(EVENTS_FILE)
     }
+}
+
+/// Give `path` and everything under it to the agent (ADR-0001).
+///
+/// Whatever the core clones or creates it owns itself, and a tree the agent
+/// does not own is one it can read and change nothing in: no commit, no
+/// session state, no work at all.
+pub fn make_agents_own(path: &Path) -> Result<(), StoreError> {
+    hand_tree_to(path, AGENT_UID, AGENT_GID)
+}
+
+/// Give `root` and every entry beneath it to `uid`:`gid`.
+fn hand_tree_to(root: &Path, uid: u32, gid: u32) -> Result<(), StoreError> {
+    for entry in tree_at(root)? {
+        change_owner(&entry, uid, gid).map_err(StoreError::writing(&entry))?;
+    }
+    Ok(())
+}
+
+/// `root` and every entry beneath it, links named but never walked through:
+/// what a link points at is another tree, and whose that is is not this tree's
+/// to say.
+fn tree_at(root: &Path) -> Result<Vec<PathBuf>, StoreError> {
+    let mut found = Vec::new();
+    let mut unwalked = vec![root.to_owned()];
+    while let Some(path) = unwalked.pop() {
+        let entry = fs::symlink_metadata(&path).map_err(StoreError::reading(&path))?;
+        if entry.is_dir() {
+            for below in fs::read_dir(&path).map_err(StoreError::reading(&path))? {
+                unwalked.push(below.map_err(StoreError::reading(&path))?.path());
+            }
+        }
+        found.push(path);
+    }
+    Ok(found)
+}
+
+/// Change one entry's owner without following it: a link is handed over
+/// itself, never the file it points at.
+#[cfg(unix)]
+fn change_owner(entry: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    std::os::unix::fs::lchown(entry, Some(uid), Some(gid))
+}
+
+/// Nowhere but unix has an owner to change. This core is deployed as a Linux
+/// container (ADR-0001); everywhere else only builds it.
+#[cfg(not(unix))]
+fn change_owner(_entry: &Path, _uid: u32, _gid: u32) -> io::Result<()> {
+    Ok(())
 }
 
 fn chat_dir_under(root: &Path, chat_id: &str) -> PathBuf {
