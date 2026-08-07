@@ -47,28 +47,46 @@ impl Remotes {
         Self { base: base.into() }
     }
 
-    /// Where one `owner/name` repository is cloned from, over `token` if the
-    /// caller holds one. A token is put into the URL only for https, so no
-    /// local or ssh URL can carry one.
+    /// Where one repository is cloned from, over `token` if the caller holds
+    /// one. The credential is spliced in only for github.com itself, so a URL
+    /// leading anywhere else — another forge, a local path, an ssh host —
+    /// cannot carry one.
     ///
     /// The credential is the caller's to read for each operation rather than
     /// this site's to keep, so a rotated one is in force for the next clone
     /// or push (`crate::secrets`).
     #[must_use]
     pub fn origin(&self, repo: &str, token: Option<&str>) -> Origin {
-        let base = &self.base;
-        let token = token
-            .filter(|_| base.starts_with("https://"))
-            .map(ToOwned::to_owned);
-        let authority = token.as_ref().map_or_else(
-            || base.clone(),
-            |token| base.replacen("https://", &format!("https://{TOKEN_USER}:{token}@"), 1),
-        );
+        let url = self.clone_url(repo);
+        let token = token.filter(|_| github_hosted(&url)).map(ToOwned::to_owned);
         Origin {
-            url: format!("{authority}/{repo}.git"),
+            url: token.as_ref().map_or_else(
+                || url.clone(),
+                |token| url.replacen(HTTPS, &format!("{HTTPS}{TOKEN_USER}:{token}@"), 1),
+            ),
             token,
         }
     }
+
+    /// The URL git is given: a repository spelled as a URL is cloned from
+    /// exactly that, and the `owner/name` shorthand from under this site's
+    /// base.
+    fn clone_url(&self, repo: &str) -> String {
+        if names_a_github_repository(repo) {
+            format!("{}/{repo}.git", self.base)
+        } else {
+            repo.to_owned()
+        }
+    }
+}
+
+/// Whether `url` leads to github.com itself, which is the one host this core
+/// will hand a credential to. The authority is read rather than searched for:
+/// `github.com.evil.example` and `evil.example/github.com` are other people's
+/// hosts, and so is github.com reached over a port of somebody's choosing.
+fn github_hosted(url: &str) -> bool {
+    let github = authority(GITHUB).expect("this site's own base is an https URL");
+    authority(url).is_some_and(|authority| authority.eq_ignore_ascii_case(github))
 }
 
 /// One repository's clone URL, credentials and all.
