@@ -327,6 +327,8 @@ fn bind(host_dir: &Path, container_path: &str) -> Result<String, PlaneError> {
 
 #[cfg(test)]
 mod tests {
+    use bollard::models::EndpointResource;
+
     use super::*;
 
     const CHAT_ID: &str = "01K1TESTCHATID0000000000";
@@ -448,26 +450,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_internal_network_is_the_only_one_agents_may_join() {
-        assert!(routes_nowhere(Some(&network(Some(true)))));
+    fn network_holding(internal: Option<bool>, container: &str) -> NetworkInspect {
+        NetworkInspect {
+            containers: Some(HashMap::from([(
+                container.to_owned(),
+                EndpointResource::default(),
+            )])),
+            ..network(internal)
+        }
     }
 
     #[test]
-    fn a_routable_network_of_the_same_name_is_refused() {
+    fn a_routing_bridge_is_the_only_network_agents_may_join() {
+        assert!(routes_out(&network(Some(false))));
+    }
+
+    #[test]
+    fn an_internal_network_of_the_same_name_is_refused() {
         assert!(
-            !routes_nowhere(Some(&network(Some(false)))),
-            "a routable network would give every agent a way out"
+            !routes_out(&network(Some(true))),
+            "an internal network leaves every agent unable to reach the API"
         );
         assert!(
-            !routes_nowhere(Some(&network(None))),
+            !routes_out(&network(None)),
             "a network that will not say is no better"
         );
     }
 
     #[test]
-    fn a_missing_network_is_refused() {
-        assert!(!routes_nowhere(None));
+    fn nothing_under_the_name_is_the_networks_to_create() {
+        assert_eq!(network_found(None), NetworkFound::Nothing);
+    }
+
+    #[test]
+    fn a_routing_bridge_is_taken_as_it_stands() {
+        assert_eq!(
+            network_found(Some(&network(Some(false)))),
+            NetworkFound::RoutesOut
+        );
+    }
+
+    #[test]
+    fn an_internal_network_with_nothing_on_it_is_the_planes_to_replace() {
+        assert_eq!(
+            network_found(Some(&network(Some(true)))),
+            NetworkFound::WrongShapeAndEmpty
+        );
+        assert_eq!(
+            network_found(Some(&NetworkInspect {
+                containers: Some(HashMap::new()),
+                ..network(Some(true))
+            })),
+            NetworkFound::WrongShapeAndEmpty,
+            "an empty roster is as empty as none at all"
+        );
+    }
+
+    #[test]
+    fn an_internal_network_with_a_container_on_it_is_nobodys_to_delete() {
+        assert_eq!(
+            network_found(Some(&network_holding(
+                Some(true),
+                &container_name(CHAT_ID)
+            ))),
+            NetworkFound::WrongShapeAndInUse,
+            "replacing it would cut off whatever is running on it"
+        );
     }
 
     const OTHER_CHAT_ID: &str = "01K1OTHERCHATID000000000";
