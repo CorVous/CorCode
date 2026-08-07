@@ -336,11 +336,13 @@ fn network_found(network: Option<&NetworkInspect>) -> NetworkFound {
     match network {
         None => NetworkFound::Nothing,
         Some(network) if routes_out(network) => NetworkFound::RoutesOut,
-        Some(network) if network.containers.as_ref().is_none_or(HashMap::is_empty) => {
-            NetworkFound::WrongShapeAndEmpty
-        }
+        Some(network) if nothing_is_attached(network) => NetworkFound::WrongShapeAndEmpty,
         Some(_) => NetworkFound::WrongShapeAndInUse,
     }
+}
+
+fn nothing_is_attached(network: &NetworkInspect) -> bool {
+    network.containers.as_ref().is_none_or(HashMap::is_empty)
 }
 
 /// Ask for the chats' containers that are running: an exited one is a chat
