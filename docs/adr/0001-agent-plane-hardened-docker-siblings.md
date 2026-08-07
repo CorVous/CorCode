@@ -30,6 +30,25 @@ The core's container-spawn logic lives behind a small trait so the Docker
 endpoint is swappable — the same `bollard`/Docker-API calls can later target a
 slim KVM guest's daemon over TCP+mTLS without a rewrite.
 
+## Amendment (2026-08-07): the agent network is a plain bridge
+
+"An internal network with no route to the core's management surface or the
+docker socket" was implemented as `internal: true`, which also cuts the agents
+off from api.anthropic.com and github.com: the first prompt on the NAS came
+back `Unable to connect to API` and no turn could ever have run
+([#43](https://github.com/CorVous/CorCode/issues/43)). The agents' network is
+now an ordinary bridge — plain outbound, still not the core's own network, and
+still no docker socket. A deployment holding the old internal network has it
+replaced at the next spawn, unless containers are still on it, in which case
+the spawn refuses and says to stop them.
+
+Accepted risk: outbound includes the LAN, so a compromised agent can reach the
+NAS's other services. That is the same MVP bet as the missing userns-remap —
+the owner's own agents on the owner's repos — and the tightening is again ops,
+not redesign: block RFC1918 destinations out of the agent bridge, or put the
+agents behind an allowlist egress proxy, when the threat model outgrows the
+MVP.
+
 ## Consequences
 
 - Simplest possible MVP: one runtime, no new infra, the socket the core
