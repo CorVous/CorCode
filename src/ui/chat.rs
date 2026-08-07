@@ -25,7 +25,11 @@ const UNNAMED_TOOL: &str = "tool call";
 
 /// Updates the agent keeps its client's accounting with. They carry no words
 /// for the operator, so the transcript is quieter without them.
-const BOOKKEEPING: [&str; 2] = ["usage_update", "available_commands_update"];
+const BOOKKEEPING: [&str; 3] = [
+    "usage_update",
+    "available_commands_update",
+    "session_info_update",
+];
 
 /// How often an open chat asks for the log again. A turn streams for minutes,
 /// so this is what "live" means here: polling, not a second connection.
@@ -622,6 +626,30 @@ mod tests {
         assert!(
             !rendered.contains("usage") && !rendered.contains("available_commands"),
             "bookkeeping is being read out as if it said something: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_title_the_adapter_settles_on_mid_turn_neither_speaks_nor_breaks_the_message() {
+        let events = log(&[
+            chunk("agent_message_chunk", "ship "),
+            json!({
+                "sessionUpdate": "session_info_update",
+                "title": "Ship the ladder",
+                "updatedAt": "2026-08-07T09:41:00.000Z",
+            }),
+            chunk("agent_message_chunk", "the ladder"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("session_info_update") && !rendered.contains("Ship the ladder"),
+            "the session title is being read out as if it said something: {rendered}"
+        );
+        assert!(
+            rendered.contains("ship the ladder"),
+            "the title broke the message in two: {rendered}"
         );
     }
 
