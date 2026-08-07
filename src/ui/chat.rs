@@ -25,7 +25,11 @@ const UNNAMED_TOOL: &str = "tool call";
 
 /// Updates the agent keeps its client's accounting with. They carry no words
 /// for the operator, so the transcript is quieter without them.
-const BOOKKEEPING: [&str; 2] = ["usage_update", "available_commands_update"];
+const BOOKKEEPING: [&str; 3] = [
+    "usage_update",
+    "available_commands_update",
+    "session_info_update",
+];
 
 /// How often an open chat asks for the log again. A turn streams for minutes,
 /// so this is what "live" means here: polling, not a second connection.
