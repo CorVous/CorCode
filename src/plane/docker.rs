@@ -17,7 +17,7 @@ use futures_util::StreamExt as _;
 
 use super::{ContainerPlane, ContainerRef, PlaneError, WORKSPACE_MOUNT, container_name};
 use crate::config::RegistryCredentials;
-use crate::store::{AGENT_GID, AGENT_UID, ContainerLiveness};
+use crate::store::{ContainerLiveness, Owner};
 
 /// A bridge of the agents' own, off whatever the core is on (ADR-0001).
 const NETWORK: &str = "corcode-agents";
@@ -292,7 +292,7 @@ fn create_body(
         image: Some(settings.image.clone()),
         entrypoint: Some(NO_ENTRYPOINT.map(str::to_owned).into()),
         cmd: Some(KEEP_ALIVE.map(str::to_owned).into()),
-        user: Some(format!("{AGENT_UID}:{AGENT_GID}")),
+        user: Some(Owner::AGENT.to_string()),
         env: Some(
             env.iter()
                 .map(|(name, value)| format!("{name}={value}"))

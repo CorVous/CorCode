@@ -757,7 +757,7 @@ where
         let commit = commit.to_owned();
         tokio::task::spawn_blocking(move || -> Result<String> {
             let standing_at = git::revive_at(&origin, &branch, &commit, &workspace)?;
-            store::make_agents_own(&workspace)?;
+            store::hand_tree_to(&workspace, store::Owner::AGENT)?;
             Ok(standing_at)
         })
         .await
@@ -895,7 +895,7 @@ where
             if let Some(branch) = to_cut {
                 git::create_branch(&workspace, &branch)?;
             }
-            Ok(store::make_agents_own(&workspace)?)
+            Ok(store::hand_tree_to(&workspace, store::Owner::AGENT)?)
         })
         .await
         .expect("the git task should not panic")
