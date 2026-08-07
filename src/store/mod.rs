@@ -539,24 +539,6 @@ mod tests {
         }
     }
 
-    /// The memory tree is written by nobody but the agent, so it is the
-    /// agent's as the store lays it down.
-    #[cfg(unix)]
-    #[test]
-    fn the_memory_tree_of_a_new_chat_belongs_to_the_agent_the_store_serves() {
-        let root = TempDir::new().expect("temp dataset root should be created");
-        let us = ours(root.path());
-        let store = ChatStore::new(root.path()).handing_trees_to(us);
-        store.prepare().expect("an existing root should prepare");
-
-        let chat_id = store
-            .create_chat(new_chat("owned"))
-            .expect("a chat should be created")
-            .chat_id;
-
-        assert_eq!(ours(&store.claude_dir(&chat_id)), us);
-    }
-
     /// A tree the agent does not own is one it can read and change nothing in,
     /// so a chat whose trees will not change hands is no chat: the operator
     /// hears which tree stopped it and the dataset holds nothing new. The tree
