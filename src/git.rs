@@ -1,6 +1,7 @@
 //! Git as the git command line sees it: clone a base branch, cut the chat's
 //! branch off it (ADR-0005).
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::iter;
@@ -26,6 +27,9 @@ const TOKEN_USER: &str = "x-access-token";
 /// Git is never given a terminal to ask for credentials on: a chat that
 /// cannot be cloned must fail, not hang holding a request open.
 const NO_PROMPTS: (&str, &str) = ("GIT_TERMINAL_PROMPT", "0");
+
+/// The one config a command against a workspace carries.
+const SAFE_DIRECTORY: &str = "safe.directory";
 
 /// Who the core commits as on the one commit it authors itself (ADR-0005).
 const CORE_COMMITTER: (&str, &str) = ("CorCode core", "corcode@local");
@@ -262,16 +266,10 @@ pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), G
         |said| origin.scrub(said),
     )?;
     let tokenless = origin.tokenless();
-    run(
+    run_in(
+        dest,
         &format!("take the credential back out of {}", dest.display()),
-        &[
-            "-C",
-            &spelled_dest,
-            "remote",
-            "set-url",
-            "origin",
-            &tokenless,
-        ],
+        &["remote", "set-url", "origin", &tokenless],
         |said| origin.scrub(said),
     )
     .map(drop)
@@ -300,13 +298,11 @@ pub fn revive_at(
 /// Whether the branch `workspace` stands on still reaches `commit`. A commit
 /// the clone cannot show at all is one the remote no longer has.
 fn carries(workspace: &Path, commit: &str) -> Result<bool, GitError> {
-    let spelled = workspace.to_string_lossy();
     let doing = format!("look for {commit} on {}", workspace.display());
-    let known = answers(
+    let known = answers_in(
+        workspace,
         &doing,
         &[
-            "-C",
-            &spelled,
             "rev-parse",
             "--verify",
             "--quiet",
@@ -316,31 +312,20 @@ fn carries(workspace: &Path, commit: &str) -> Result<bool, GitError> {
     if !known {
         return Ok(false);
     }
-    answers(
+    answers_in(
+        workspace,
         &doing,
-        &[
-            "-C",
-            &spelled,
-            "merge-base",
-            "--is-ancestor",
-            commit,
-            "HEAD",
-        ],
+        &["merge-base", "--is-ancestor", commit, "HEAD"],
     )
 }
 
 /// Move the branch `workspace` stands on back to `commit`, working tree and
 /// all.
 fn stand_at(workspace: &Path, commit: &str) -> Result<(), GitError> {
-    run(
+    run_in(
+        workspace,
         &format!("stand {} at {commit}", workspace.display()),
-        &[
-            "-C",
-            &workspace.to_string_lossy(),
-            "reset",
-            "--hard",
-            commit,
-        ],
+        &["reset", "--hard", commit],
         ToOwned::to_owned,
     )
     .map(drop)
@@ -350,9 +335,10 @@ fn stand_at(workspace: &Path, commit: &str) -> Result<(), GitError> {
 /// Nothing is pushed: the branch reaches the remote with its first commit
 /// (ADR-0005).
 pub fn create_branch(workspace: &Path, branch: &str) -> Result<(), GitError> {
-    run(
+    run_in(
+        workspace,
         &format!("cut branch {branch}"),
-        &["-C", &workspace.to_string_lossy(), "checkout", "-b", branch],
+        &["checkout", "-b", branch],
         ToOwned::to_owned,
     )
     .map(drop)
@@ -446,21 +432,22 @@ pub fn push_for_archive(
 
 /// The commit `workspace` has checked out.
 fn head(workspace: &Path) -> Result<String, GitError> {
-    run(
+    run_in(
+        workspace,
         &format!("read where {} stands", workspace.display()),
-        &["-C", &workspace.to_string_lossy(), "rev-parse", "HEAD"],
+        &["rev-parse", "HEAD"],
         ToOwned::to_owned,
     )
 }
 
 /// Where `workspace` has HEAD right now.
 fn standing(workspace: &Path) -> Result<Standing, GitError> {
-    let spelled = workspace.to_string_lossy();
     let doing = format!("read where {} stands", workspace.display());
     let head = head(workspace)?;
-    let branch = run(
+    let branch = run_in(
+        workspace,
         &doing,
-        &["-C", &spelled, "branch", "--show-current"],
+        &["branch", "--show-current"],
         ToOwned::to_owned,
     )?;
     Ok(Standing {
@@ -498,9 +485,10 @@ fn checkpoint_unpushed_work(
 
 /// Whether `workspace` holds anything git has not been told about.
 fn dirty(workspace: &Path) -> Result<bool, GitError> {
-    let said = run(
+    let said = run_in(
+        workspace,
         &format!("read the state of {}", workspace.display()),
-        &["-C", &workspace.to_string_lossy(), "status", "--porcelain"],
+        &["status", "--porcelain"],
         ToOwned::to_owned,
     )?;
     Ok(!said.is_empty())
@@ -508,15 +496,10 @@ fn dirty(workspace: &Path) -> Result<bool, GitError> {
 
 /// Name the commit the workspace stands on, so what follows can be pushed.
 fn cut_checkpoint(workspace: &Path, checkpoint: &str) -> Result<(), GitError> {
-    run(
+    run_in(
+        workspace,
         &format!("cut {checkpoint} off the working tree"),
-        &[
-            "-C",
-            &workspace.to_string_lossy(),
-            "checkout",
-            "-b",
-            checkpoint,
-        ],
+        &["checkout", "-b", checkpoint],
         ToOwned::to_owned,
     )
     .map(drop)
@@ -525,18 +508,17 @@ fn cut_checkpoint(workspace: &Path, checkpoint: &str) -> Result<(), GitError> {
 /// Commit the whole working tree onto the checkpoint branch, in the core's
 /// own name: these are the one kind of commit no agent authored (ADR-0005).
 fn commit_everything(workspace: &Path, checkpoint: &str) -> Result<(), GitError> {
-    let workspace = workspace.to_string_lossy();
     let doing = |what: &str| format!("{what} on {checkpoint}");
-    run(
+    run_in(
+        workspace,
         &doing("stage the working tree"),
-        &["-C", &workspace, "add", "-A"],
+        &["add", "-A"],
         ToOwned::to_owned,
     )?;
-    run(
+    run_in(
+        workspace,
         &doing("commit the working tree"),
         &[
-            "-C",
-            &workspace,
             "-c",
             &format!("user.name={}", CORE_COMMITTER.0),
             "-c",
@@ -559,30 +541,29 @@ fn push_branches(
     branch: &str,
     checkpoint: Option<&str>,
 ) -> Result<String, PushFailure> {
-    let spelled = workspace.to_string_lossy();
     let mut landed = None;
     for pushing in checkpoint.into_iter().chain(iter::once(branch)) {
-        push_one(origin, &spelled, pushing).map_err(|source| PushFailure {
+        push_one(origin, workspace, pushing).map_err(|source| PushFailure {
             landed: landed.clone(),
             source,
         })?;
         landed = checkpoint.map(ToOwned::to_owned);
     }
-    run(
+    run_in(
+        workspace,
         &format!("read where {branch} stands"),
-        &["-C", &spelled, "rev-parse", branch],
+        &["rev-parse", branch],
         ToOwned::to_owned,
     )
     .map_err(|source| PushFailure { landed, source })
 }
 
 /// Put one branch on the remote under its own name.
-fn push_one(origin: &Origin, workspace: &str, pushing: &str) -> Result<(), GitError> {
-    run(
+fn push_one(origin: &Origin, workspace: &Path, pushing: &str) -> Result<(), GitError> {
+    run_in(
+        workspace,
         &format!("push {pushing} to {origin}"),
         &[
-            "-C",
-            workspace,
             "push",
             "--",
             origin.url(),
@@ -596,9 +577,10 @@ fn push_one(origin: &Origin, workspace: &str, pushing: &str) -> Result<(), GitEr
 /// Stand the workspace on the branch its chat works from, which is where
 /// anyone who retries the archive expects to find it.
 fn stand_on(workspace: &Path, branch: &str) -> Result<(), GitError> {
-    run(
+    run_in(
+        workspace,
         &format!("stand {} back on {branch}", workspace.display()),
-        &["-C", &workspace.to_string_lossy(), "checkout", branch],
+        &["checkout", branch],
         ToOwned::to_owned,
     )
     .map(drop)
@@ -612,22 +594,79 @@ fn undo_checkpoint(
     standing: &Standing,
     checkpoint: &str,
 ) -> Result<(), GitError> {
-    let workspace = workspace.to_string_lossy();
     let doing = format!("roll back {checkpoint}");
     for args in [
-        vec!["-C", &workspace, "reset", "--mixed", &standing.head],
-        vec!["-C", &workspace, "checkout", &standing.at],
-        vec!["-C", &workspace, "branch", "-d", checkpoint],
+        vec!["reset", "--mixed", &standing.head],
+        vec!["checkout", &standing.at],
+        vec!["branch", "-d", checkpoint],
     ] {
-        run(&doing, &args, ToOwned::to_owned)?;
+        run_in(workspace, &doing, &args, ToOwned::to_owned)?;
     }
     Ok(())
+}
+
+/// Run one git command inside `workspace`, answering as [`run`] does.
+///
+/// Every command the core runs in a chat's tree comes through here, so that
+/// none of them can be the one that forgets to say whose tree it is.
+fn run_in(
+    workspace: &Path,
+    doing: &str,
+    args: &[&str],
+    scrub: impl FnOnce(&str) -> String,
+) -> Result<String, GitError> {
+    run(doing, &args_in(&workspace.to_string_lossy(), args), scrub)
+}
+
+/// Ask git something inside `workspace`, answering as [`answers`] does.
+fn answers_in(workspace: &Path, doing: &str, args: &[&str]) -> Result<bool, GitError> {
+    answers(doing, &args_in(&workspace.to_string_lossy(), args))
+}
+
+/// The arguments a git command against `workspace` is run with: that one tree
+/// declared safe to work in, and the tree to run in.
+///
+/// The core clones and commits as itself and then hands the tree to the agent
+/// (ADR-0001), so every tree it comes back to is one git reads as somebody
+/// else's and refuses. The path is named for the one command that needs it:
+/// no wildcard, and nothing written into a gitconfig that outlives the
+/// command or reaches another tree (issue #53).
+fn args_in(workspace: &str, args: &[&str]) -> Vec<String> {
+    [
+        "-c",
+        &format!("{SAFE_DIRECTORY}={workspace}"),
+        "-C",
+        workspace,
+    ]
+    .into_iter()
+    .chain(args.iter().copied())
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+/// Whether a command that reaches into a tree has said that tree is one it may
+/// work in.
+fn declares_what_it_reaches_into<S: AsRef<OsStr>>(args: &[S]) -> bool {
+    !args.iter().any(|arg| arg.as_ref() == "-C")
+        || args.iter().any(|arg| {
+            arg.as_ref()
+                .to_string_lossy()
+                .starts_with(&format!("{SAFE_DIRECTORY}="))
+        })
 }
 
 /// Run one git command, answering with what it wrote on its way out. A
 /// non-zero exit is the failure it is, in git's own words with `scrub`
 /// applied to them.
-fn run(doing: &str, args: &[&str], scrub: impl FnOnce(&str) -> String) -> Result<String, GitError> {
+fn run<S: AsRef<OsStr>>(
+    doing: &str,
+    args: &[S],
+    scrub: impl FnOnce(&str) -> String,
+) -> Result<String, GitError> {
+    assert!(
+        declares_what_it_reaches_into(args),
+        "reaching into a tree without declaring it safe would fail the day it is the agent's: {doing}"
+    );
     let output = Command::new("git")
         .args(args)
         .env(NO_PROMPTS.0, NO_PROMPTS.1)
@@ -648,7 +687,7 @@ fn run(doing: &str, args: &[&str], scrub: impl FnOnce(&str) -> String) -> Result
 /// Ask git something whose answer is its exit status. Git saying no and git
 /// being unable to tell both come back as no: what is being asked about is a
 /// commit, and one this repository cannot show is one the chat cannot have.
-fn answers(doing: &str, args: &[&str]) -> Result<bool, GitError> {
+fn answers<S: AsRef<OsStr>>(doing: &str, args: &[S]) -> Result<bool, GitError> {
     match run(doing, args, ToOwned::to_owned) {
         Ok(_) => Ok(true),
         Err(GitError::Refused { .. }) => Ok(false),
@@ -1255,6 +1294,111 @@ mod tests {
                 "a credential was left where the agent can read it: {config}"
             );
         }
+    }
+
+    /// The core clones, commits and pushes in trees it has handed to the agent
+    /// (ADR-0001), and git refuses a repository it reads as somebody else's.
+    /// Live, that was every new chat: the clone landed and the credential
+    /// could not be taken back out of it (issue #53).
+    ///
+    /// `GIT_TEST_ASSUME_DIFFERENT_OWNER` is git's own way of being told to read
+    /// a tree as another user's, which is what root reading a 1000:1000
+    /// workspace amounts to and what no unprivileged test could otherwise
+    /// arrange. A git that will not be told reads the tree as its own, and
+    /// there is no failure here to show.
+    #[test]
+    fn a_command_works_in_a_tree_read_as_somebody_elses_because_it_says_that_tree_is_safe() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        let spelled = spelled(&workspace);
+        let asking = ["status", "--porcelain"];
+
+        let reached_in = as_another_user(&args_of(["-C", &spelled], &asking));
+        let declared = as_another_user(&args_in(&spelled, &asking));
+
+        if reached_in.status.success() {
+            eprintln!(
+                "SKIPPED a_command_works_in_a_tree_read_as_somebody_elses_because_it_says_that_\
+                 tree_is_safe: this git will not read a tree as another user's"
+            );
+            return;
+        }
+        assert!(
+            String::from_utf8_lossy(&reached_in.stderr).contains("dubious ownership"),
+            "the tree was refused for something other than who owns it: {}",
+            String::from_utf8_lossy(&reached_in.stderr)
+        );
+        assert!(
+            declared.status.success(),
+            "the core cannot work in a tree it handed to the agent: {}",
+            String::from_utf8_lossy(&declared.stderr)
+        );
+    }
+
+    /// The declaration covers the one tree the command runs in, for the length
+    /// of that command: nowhere else is trusted, and nothing is left behind in
+    /// a gitconfig for the next process to read.
+    #[test]
+    fn the_declaration_names_the_one_tree_and_outlives_nothing() {
+        let args = args_in("/data/workspaces/01K", &["status", "--porcelain"]);
+
+        assert_eq!(
+            args,
+            [
+                "-c",
+                "safe.directory=/data/workspaces/01K",
+                "-C",
+                "/data/workspaces/01K",
+                "status",
+                "--porcelain",
+            ]
+        );
+    }
+
+    /// A command reaches into a tree by naming one, and the clone that makes a
+    /// workspace names none: it has nothing to declare and nothing to forget.
+    #[test]
+    fn only_a_command_that_names_a_tree_has_anything_to_declare() {
+        assert!(declares_what_it_reaches_into(&args_in("/w", &["status"])));
+        assert!(declares_what_it_reaches_into(&["clone", "--", "url", "/w"]));
+        assert!(!declares_what_it_reaches_into(&["-C", "/w", "status"]));
+    }
+
+    /// Reaching into a workspace without declaring it is the bug this hotfix
+    /// is for, so a call site that spells its own way in never reaches git.
+    #[test]
+    #[should_panic(expected = "without declaring it safe")]
+    fn a_command_reaching_into_a_tree_it_has_not_declared_safe_is_refused_before_git_sees_it() {
+        let _ = super::run(
+            "reach in the old way",
+            &["-C", "/w", "status"],
+            ToOwned::to_owned,
+        );
+    }
+
+    /// Git the way a root core reads a workspace that belongs to the agent,
+    /// and reading no config but the command's own: whoever runs this suite may
+    /// have declared trees safe for themselves, and a tree already trusted is a
+    /// tree this test cannot watch being refused.
+    fn as_another_user(args: &[String]) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .expect("git should run")
+    }
+
+    /// The arguments of a command that reaches into a tree the old way, which
+    /// is what the declaration has to be measured against.
+    fn args_of(reaching: [&str; 2], asking: &[&str]) -> Vec<String> {
+        reaching
+            .iter()
+            .chain(asking)
+            .map(|arg| (*arg).to_owned())
+            .collect()
     }
 
     /// A cloned workspace standing on its chat branch, ready to commit as the

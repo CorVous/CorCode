@@ -31,6 +31,10 @@ const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
 const FORGOTTEN: &str = "3f2b1c4d-0000-4000-8000-00000000dead";
 
 const SAID: &str = "ship the ladder";
+/// The only user that can give a tree away, and so the only one this suite can
+/// watch a handover under.
+#[cfg(unix)]
+const ROOT: Owner = Owner { uid: 0, gid: 0 };
 
 const RESUME_SESSION: &str = "unstable_resumeSession";
 const LOAD_SESSION: &str = "session/load";
@@ -451,6 +455,43 @@ async fn a_parked_chat_whose_workspace_is_gone_fails_loudly_and_touches_nothing(
     );
 }
 
+/// A revived workspace is as new as a created one: the core clones it back as
+/// itself and the container opens on it as the agent (ADR-0001), so the clone
+/// changes hands before anything runs in it (issue #46). Only a core that can
+/// hand a tree to somebody else can be watched doing it.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_workspace_a_revived_chat_comes_back_in_belongs_to_the_agent() {
+    let dataset = Dataset::handing_trees_to(
+        ScriptedAdapter::resuming(SESSION, &[update(SESSION, "on it")]),
+        Some(Owner::AGENT),
+    );
+    if dataset.ours() != ROOT {
+        eprintln!(
+            "SKIPPED the_workspace_a_revived_chat_comes_back_in_belongs_to_the_agent: {} can \
+             hand a tree to nobody but itself",
+            dataset.ours()
+        );
+        return;
+    }
+    let chat = dataset.create("revived").await;
+    dataset.archive(&chat).await;
+
+    dataset
+        .prompt(&chat, SAID)
+        .await
+        .expect("an archived chat should revive");
+
+    let workspace = dataset.workspace(&chat);
+    for tree in [&workspace, &workspace.join(".git")] {
+        assert_eq!(
+            Owner::of(tree).expect("the clone should be there"),
+            Owner::AGENT,
+            "{tree:?} came back where the agent can change nothing"
+        );
+    }
+}
+
 /// The core writes in an open chat's own workspace — archiving it leaves a
 /// commit message and refs in `.git` that git wrote as the core — so the tree
 /// goes back into the agent's hands before a container opens on it again. A
@@ -493,15 +534,24 @@ struct Dataset {
 
 impl Dataset {
     fn of(adapter: ScriptedAdapter) -> Self {
+        Self::handing_trees_to(adapter, None)
+    }
+
+    /// A dataset whose chats are handed to `agent`, or to whoever runs this
+    /// suite when the trees are to stay where they are.
+    fn handing_trees_to(adapter: ScriptedAdapter, agent: Option<Owner>) -> Self {
         let data_dir = TempDir::new().expect("temp dir should be creatable");
         let (origin, remotes) = seeded_repository();
         let config = test_config(data_dir.path().to_path_buf());
         ChatStore::new(data_dir.path())
             .prepare()
             .expect("the dataset should prepare, as serving does");
+        let agent = agent.unwrap_or_else(|| {
+            Owner::of(&config.data_dir).expect("we own the dataset we just made")
+        });
         let chats = Chats::new(
             &config,
-            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
+            agent,
             MemoryPlane::default(),
             adapter.clone(),
             remotes,
@@ -513,6 +563,11 @@ impl Dataset {
             data_dir,
             origin,
         }
+    }
+
+    /// Whoever this suite is running as, and so what it can hand a tree to.
+    fn ours(&self) -> Owner {
+        Owner::of(self.data_dir.path()).expect("we own the dataset we just made")
     }
 
     async fn create(&self, slug: &str) -> String {
