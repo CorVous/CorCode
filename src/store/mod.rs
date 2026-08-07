@@ -6,6 +6,7 @@ mod liveness;
 mod manifest;
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -29,10 +30,51 @@ const CLAUDE_DIR: &str = "claude";
 const MANIFEST_FILE: &str = "manifest.json";
 const EVENTS_FILE: &str = "events.jsonl";
 
+/// Who a tree belongs to, in the numbers a bind mount carries into a container
+/// unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl Owner {
+    /// The workspace image's `agent` user (ADR-0001), spelled numerically.
+    ///
+    /// Who the plane runs a container as, enforcing non-root whatever image it
+    /// is handed — and so who every tree handed to that container must belong
+    /// to.
+    pub const AGENT: Self = Self {
+        uid: 1000,
+        gid: 1000,
+    };
+
+    /// Whoever owns `path` as it stands — for a core that is not root, and so
+    /// can hand a tree to nobody but itself.
+    #[cfg(unix)]
+    pub fn of(path: &Path) -> Result<Self, StoreError> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let entry = fs::symlink_metadata(path).map_err(StoreError::reading(path))?;
+        Ok(Self {
+            uid: entry.uid(),
+            gid: entry.gid(),
+        })
+    }
+}
+
+impl fmt::Display for Owner {
+    /// As docker spells an owner on the command line and in its API.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.uid, self.gid)
+    }
+}
+
 /// Reader and writer of every chat under one dataset root.
 pub struct ChatStore {
     root: PathBuf,
     host_root: PathBuf,
+    agent: Owner,
 }
 
 impl ChatStore {
@@ -42,6 +84,7 @@ impl ChatStore {
         Self {
             host_root: root.clone(),
             root,
+            agent: Owner::AGENT,
         }
     }
 
@@ -51,7 +94,21 @@ impl ChatStore {
         Self {
             root: root.into(),
             host_root: host_root.into(),
+            agent: Owner::AGENT,
         }
+    }
+
+    /// Serve the same dataset for an agent that is not the image's own — a
+    /// core that cannot give trees away can only hand them to itself.
+    #[must_use]
+    pub fn handing_trees_to(self, agent: Owner) -> Self {
+        Self { agent, ..self }
+    }
+
+    /// Who the trees this store lays down are handed to.
+    #[must_use]
+    pub const fn agent(&self) -> Owner {
+        self.agent
     }
 
     /// Durable home of a chat: manifest, event log, agent memory.
@@ -96,15 +153,19 @@ impl ChatStore {
         }
     }
 
-    /// Lay down both trees for a new chat, publishing the chat dir whole.
+    /// Lay down both trees for a new chat, publishing the chat dir whole. Both
+    /// are mounted into the chat's container, so both are handed to the agent
+    /// as they are made.
     pub fn create_chat(&self, new_chat: NewChat) -> Result<Manifest, StoreError> {
         let manifest = Manifest::open(new_chat);
         let chat_id = &manifest.chat_id;
         let workspace = self.workspace_dir(chat_id);
         fs::create_dir_all(&workspace).map_err(StoreError::writing(&workspace))?;
+        hand_tree_to(&workspace, self.agent)?;
         let staged = self.staging_dir(chat_id);
         let claude = staged.join(CLAUDE_DIR);
         fs::create_dir_all(&claude).map_err(StoreError::writing(&claude))?;
+        hand_tree_to(&claude, self.agent)?;
         let events = staged.join(EVENTS_FILE);
         File::create_new(&events).map_err(StoreError::writing(&events))?;
         write_manifest_in(&staged, &manifest)?;
@@ -218,6 +279,50 @@ impl ChatStore {
     }
 }
 
+/// Give `root` and every entry beneath it to `owner` (ADR-0001).
+///
+/// Whatever the core clones or creates it owns itself, and a tree the agent
+/// does not own is one it can read and change nothing in: no commit, no
+/// session state, no work at all.
+pub fn hand_tree_to(root: &Path, owner: Owner) -> Result<(), StoreError> {
+    for entry in tree_at(root)? {
+        change_owner(&entry, owner).map_err(StoreError::writing(&entry))?;
+    }
+    Ok(())
+}
+
+/// `root` and every entry beneath it, links named but never walked through:
+/// what a link points at is another tree, and whose that is is not this tree's
+/// to say.
+fn tree_at(root: &Path) -> Result<Vec<PathBuf>, StoreError> {
+    let mut found = Vec::new();
+    let mut unwalked = vec![root.to_owned()];
+    while let Some(path) = unwalked.pop() {
+        let entry = fs::symlink_metadata(&path).map_err(StoreError::reading(&path))?;
+        if entry.is_dir() {
+            for below in fs::read_dir(&path).map_err(StoreError::reading(&path))? {
+                unwalked.push(below.map_err(StoreError::reading(&path))?.path());
+            }
+        }
+        found.push(path);
+    }
+    Ok(found)
+}
+
+/// Change one entry's owner without following it: a link is handed over
+/// itself, never the file it points at.
+#[cfg(unix)]
+fn change_owner(entry: &Path, owner: Owner) -> io::Result<()> {
+    std::os::unix::fs::lchown(entry, Some(owner.uid), Some(owner.gid))
+}
+
+/// Nowhere but unix has an owner to change. This core is deployed as a Linux
+/// container (ADR-0001); everywhere else only builds it.
+#[cfg(not(unix))]
+fn change_owner(_entry: &Path, _owner: Owner) -> io::Result<()> {
+    Ok(())
+}
+
 fn chat_dir_under(root: &Path, chat_id: &str) -> PathBuf {
     root.join(CHATS_DIR).join(chat_id)
 }
@@ -293,7 +398,7 @@ mod tests {
 
     fn store() -> (TempDir, ChatStore) {
         let root = TempDir::new().expect("temp dataset root should be created");
-        let store = ChatStore::new(root.path());
+        let store = ChatStore::new(root.path()).handing_trees_to(ours(root.path()));
         (root, store)
     }
 
@@ -306,6 +411,125 @@ mod tests {
         fs::metadata(path).expect("manifest should exist").ino()
     }
 
+    /// Somebody no test process is, so that handing them a tree is refused
+    /// wherever the suite runs unprivileged.
+    #[cfg(unix)]
+    const A_STRANGER: Owner = Owner {
+        uid: 424_242,
+        gid: 424_243,
+    };
+
+    /// The owner this process writes as, read off something it wrote: the one
+    /// owner a test is allowed to hand a tree to.
+    #[cfg(unix)]
+    fn ours(path: &Path) -> Owner {
+        Owner::of(path).expect("what we wrote should be there")
+    }
+
+    /// Nowhere but unix has an owner to read, and nowhere but unix is one
+    /// changed.
+    #[cfg(not(unix))]
+    fn ours(_path: &Path) -> Owner {
+        Owner::AGENT
+    }
+
+    /// A clone the core wrote as itself: nested dirs, files, and a link
+    /// pointing out of the tree the way a checked-out repository may.
+    #[cfg(unix)]
+    fn tree_with_a_link_to(elsewhere: &Path, root: &Path) -> PathBuf {
+        let tree = root.join("workspace");
+        fs::create_dir_all(tree.join("nested").join("deeper")).expect("a tree should be writable");
+        fs::write(tree.join("top.txt"), "").expect("a file should be writable");
+        fs::write(tree.join("nested").join("deeper").join("bottom.txt"), "")
+            .expect("a file should be writable");
+        std::os::unix::fs::symlink(elsewhere, tree.join("elsewhere"))
+            .expect("a link should be creatable");
+        tree
+    }
+
+    /// Every entry has to change hands, and none of them is the way to
+    /// somebody else's tree.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_is_walked_to_every_entry_and_never_through_a_link_out_of_it() {
+        let root = TempDir::new().expect("temp dir should be created");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(outside.join("theirs")).expect("a tree should be writable");
+        let tree = tree_with_a_link_to(&outside, root.path());
+
+        let mut walked = tree_at(&tree).expect("a tree should walk");
+
+        walked.sort();
+        assert_eq!(
+            walked,
+            [
+                tree.clone(),
+                tree.join("elsewhere"),
+                tree.join("nested"),
+                tree.join("nested").join("deeper"),
+                tree.join("nested").join("deeper").join("bottom.txt"),
+                tree.join("top.txt"),
+            ]
+        );
+    }
+
+    /// A link out of the tree is handed over as the link it is: what it points
+    /// at belongs to whoever owns it, down to the setuid bit a handover would
+    /// strip off it on the way past.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_tree_changes_hands_and_what_it_points_at_does_not() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().expect("temp dir should be created");
+        let theirs = root.path().join("theirs");
+        fs::write(&theirs, "").expect("a file should be writable");
+        fs::set_permissions(&theirs, fs::Permissions::from_mode(0o4755))
+            .expect("a file should be setuid");
+        let tree = tree_with_a_link_to(&theirs, root.path());
+
+        hand_tree_to(&tree, ours(&tree)).expect("a tree with a link out of it should change hands");
+
+        assert_eq!(
+            fs::read_link(tree.join("elsewhere")).expect("the link should still be a link"),
+            theirs,
+            "the link was replaced rather than handed over"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&theirs)
+                .expect("what the link points at should still be there")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o4755,
+            "the handover followed the link out of the tree and stripped what it found"
+        );
+    }
+
+    /// Half a tree in the agent's hands is a workspace it cannot work in, so
+    /// the caller hears which entry stopped the handover.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_that_cannot_be_walked_names_what_stopped_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().expect("temp dir should be created");
+        let tree = tree_with_a_link_to(root.path(), root.path());
+        let sealed = tree.join("nested");
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000))
+            .expect("a dir should be sealable");
+        let us = ours(&tree);
+
+        let error = hand_tree_to(&tree, us).expect_err("a sealed dir should stop the handover");
+
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700))
+            .expect("a dir should be unsealable");
+        assert!(
+            format!("{error}").contains(&sealed.display().to_string()),
+            "error should name the entry it stopped on, got: {error}"
+        );
+    }
+
     fn new_chat(title: &str) -> NewChat {
         NewChat {
             title: title.to_owned(),
@@ -313,6 +537,53 @@ mod tests {
             branch: format!("chat/{title}"),
             base_branch: "main".to_owned(),
         }
+    }
+
+    /// Both of a chat's trees are mounted into its container, so both leave
+    /// the store belonging to whoever that container runs as.
+    #[cfg(unix)]
+    #[test]
+    fn both_trees_of_a_new_chat_belong_to_the_agent_the_store_serves() {
+        let root = TempDir::new().expect("temp dataset root should be created");
+        let us = ours(root.path());
+        let store = ChatStore::new(root.path()).handing_trees_to(us);
+        store.prepare().expect("an existing root should prepare");
+
+        let chat_id = store
+            .create_chat(new_chat("owned"))
+            .expect("a chat should be created")
+            .chat_id;
+
+        assert_eq!(ours(&store.workspace_dir(&chat_id)), us, "workspace");
+        assert_eq!(ours(&store.claude_dir(&chat_id)), us, "claude dir");
+    }
+
+    /// A tree the agent does not own is one it can read and change nothing in,
+    /// so a chat whose trees will not change hands is no chat: the operator
+    /// hears which tree stopped it and the dataset holds nothing new.
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_whose_trees_will_not_change_hands_is_never_published() {
+        let root = TempDir::new().expect("temp dataset root should be created");
+        if ours(root.path()).uid == 0 {
+            eprintln!("SKIPPED a_chat_whose_trees_will_not_change_hands_is_never_published: root");
+            return;
+        }
+        let store = ChatStore::new(root.path()).handing_trees_to(A_STRANGER);
+        store.prepare().expect("an existing root should prepare");
+
+        let error = store
+            .create_chat(new_chat("stranded"))
+            .expect_err("a chat nobody can work in should not be created");
+
+        assert!(
+            format!("{error}").contains(&root.path().join(WORKSPACES_DIR).display().to_string()),
+            "error should name the tree that would not change hands, got: {error}"
+        );
+        assert!(
+            store.scan().expect("the dataset should scan").is_empty(),
+            "a chat that cannot be worked in was published anyway"
+        );
     }
 
     #[test]

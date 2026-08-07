@@ -18,7 +18,7 @@ use cor_code::config::{
 use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::{ContainerPlane as _, MemoryPlane};
 use cor_code::secrets::Secrets;
-use cor_code::store::{ChatStore, Manifest, NewChat};
+use cor_code::store::{ChatStore, Manifest, NewChat, Owner};
 use cor_code::ui;
 
 const IMAGE: &str = "ghcr.io/corvous/corcode-workspace:2026-08-05";
@@ -109,6 +109,7 @@ impl Dataset {
 
     fn store(&self) -> ChatStore {
         ChatStore::new(self.dir.path())
+            .handing_trees_to(Owner::of(self.dir.path()).expect("we own the dataset we just made"))
     }
 
     /// One open chat whose last turn was at `last_active_at`.
@@ -155,6 +156,7 @@ impl Dataset {
         let secrets = Arc::new(Secrets::from_config(&config));
         Chats::new(
             &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
             plane,
             ScriptedAdapter::silent(),
             Remotes::new(GITHUB),

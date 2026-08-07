@@ -17,7 +17,7 @@ use futures_util::StreamExt as _;
 
 use super::{ContainerPlane, ContainerRef, PlaneError, WORKSPACE_MOUNT, container_name};
 use crate::config::RegistryCredentials;
-use crate::store::ContainerLiveness;
+use crate::store::{ContainerLiveness, Owner};
 
 /// A bridge of the agents' own, off whatever the core is on (ADR-0001).
 const NETWORK: &str = "corcode-agents";
@@ -29,9 +29,6 @@ const CLAUDE_MOUNT: &str = "/home/agent/.claude";
 /// read-only.
 const SCRATCH_MOUNT: &str = "/tmp";
 const SCRATCH_OPTIONS: &str = "rw,nosuid,nodev,noexec,size=256m";
-/// The workspace image's `agent` user, spelled numerically so the plane
-/// enforces non-root whatever image it is handed.
-const AGENT_USER: &str = "1000:1000";
 /// What PID 1 does for a living: nothing, until the container is torn down.
 /// The agent is started by `docker exec` (ADR-0001), so an image's own command
 /// running as PID 1 would only be a second, stdin-less adapter — one that
@@ -295,7 +292,7 @@ fn create_body(
         image: Some(settings.image.clone()),
         entrypoint: Some(NO_ENTRYPOINT.map(str::to_owned).into()),
         cmd: Some(KEEP_ALIVE.map(str::to_owned).into()),
-        user: Some(AGENT_USER.to_owned()),
+        user: Some(Owner::AGENT.to_string()),
         env: Some(
             env.iter()
                 .map(|(name, value)| format!("{name}={value}"))

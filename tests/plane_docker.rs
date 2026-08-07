@@ -16,6 +16,7 @@ use bollard::query_parameters::{
     StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings, container_name};
+use cor_code::store::{ChatStore, NewChat, Owner};
 use futures_util::StreamExt as _;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
@@ -32,6 +33,18 @@ const CHAT_ID: &str = "01K1DOCKERGATEDTEST00000";
 const KEEP_ALIVE_CHAT_ID: &str = "01K1DOCKERKEEPALIVE00000";
 const MIGRATION_CHAT_ID: &str = "01K1DOCKERMIGRATION00000";
 const IN_USE_CHAT_ID: &str = "01K1DOCKERNETWORKINUSE00";
+const OWNERSHIP_CHAT_ID: &str = "01K1DOCKEROWNERSHIP00000";
+/// A shell making the two writes an agent cannot get through its first turn
+/// without: a file in the workspace it commits from, and the session state the
+/// adapter keeps beside it.
+const AGENTS_OWN_WORK: [&str; 3] = [
+    "sh",
+    "-c",
+    "touch /workspace/committed /home/agent/.claude/session-env",
+];
+/// The only user that can give a tree away, and so the only one this suite can
+/// prove a handover to the agent under.
+const ROOT: u32 = 0;
 /// A container the plane did not spawn and must not throw away.
 const INTERLOPER: &str = "corcode-test-interloper";
 const MEMORY_MB: u32 = 512;
@@ -124,6 +137,66 @@ async fn a_real_spawned_container_wears_every_hardening_flag() {
         "an internal network would leave the agent unable to reach the API"
     );
     assert_hardened(inspected, workspace.path(), claude.path());
+}
+
+/// Running the container as the agent is only half of ADR-0001: the core lays
+/// both of a chat's trees down as itself, and a container that runs as
+/// somebody else can read a tree it does not own and change nothing in it.
+/// Live, that was an agent whose every commit and every session file failed
+/// (issue #46).
+#[tokio::test]
+async fn a_real_container_can_write_in_both_of_the_trees_it_was_handed() {
+    let Some(docker) = reachable_daemon() else {
+        eprintln!(
+            "SKIPPED a_real_container_can_write_in_both_of_the_trees_it_was_handed: no docker daemon"
+        );
+        return;
+    };
+    let dataset = TempDir::new().expect("dataset root should be created");
+    let us = Owner::of(dataset.path()).expect("we own what we just made");
+    if us.uid != ROOT && us != Owner::AGENT {
+        eprintln!(
+            "SKIPPED a_real_container_can_write_in_both_of_the_trees_it_was_handed: \
+             {us} can hand no tree to {}",
+            Owner::AGENT
+        );
+        return;
+    }
+    let _daemon = the_daemon_to_ourselves().await;
+    let plane = DockerPlane::connect(settings()).expect("the daemon should be reachable");
+    clear_any_leftover(&plane, OWNERSHIP_CHAT_ID).await;
+    let store = ChatStore::new(dataset.path());
+    store.prepare().expect("the dataset should prepare");
+    let chat_id = store
+        .create_chat(NewChat {
+            title: "docker gated".to_owned(),
+            repo: "CorVous/fixture".to_owned(),
+            branch: "chat/owned".to_owned(),
+            base_branch: "main".to_owned(),
+        })
+        .expect("the chat should be laid down")
+        .chat_id;
+
+    let container = plane
+        .spawn(
+            &chat_id,
+            &store.workspace_dir(&chat_id),
+            &store.claude_dir(&chat_id),
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("the chat should spawn");
+    let wrote = exec_exit_code(&docker, &container.name, &AGENTS_OWN_WORK).await;
+    plane
+        .teardown(&chat_id)
+        .await
+        .expect("the chat should tear down");
+
+    assert_eq!(
+        wrote.expect("the daemon should answer an exec"),
+        Some(0),
+        "the agent cannot write in the trees it was handed: {AGENTS_OWN_WORK:?}"
+    );
 }
 
 /// A deployment older than the plain-bridge decision holds `corcode-agents` as
@@ -354,7 +427,7 @@ async fn a_container_outlives_the_command_its_image_would_have_run() {
 
     tokio::time::sleep(SETTLE).await;
     let live = plane.list_live().await.expect("liveness should answer");
-    let exec_exit_code = exec_exit_code(&docker, &container.name).await;
+    let exec_exit_code = exec_exit_code(&docker, &container.name, &["true"]).await;
     plane
         .teardown(KEEP_ALIVE_CHAT_ID)
         .await
@@ -371,16 +444,20 @@ async fn a_container_outlives_the_command_its_image_would_have_run() {
     );
 }
 
-/// What the ACP transport does to a chat's container, reduced to the smallest
-/// process there is. Answered rather than asserted, so a refused exec is
+/// What `cmd` came to inside a live container, run the way the ACP transport
+/// runs the adapter. Answered rather than asserted, so a refused exec is
 /// reported by a test that has already torn its container down.
-async fn exec_exit_code(docker: &Docker, name: &str) -> Result<Option<i64>, DockerError> {
+async fn exec_exit_code(
+    docker: &Docker,
+    name: &str,
+    cmd: &[&str],
+) -> Result<Option<i64>, DockerError> {
     let exec = docker
         .create_exec(
             name,
             ExecConfig {
                 attach_stdout: Some(true),
-                cmd: Some(vec!["true".to_owned()]),
+                cmd: Some(cmd.iter().map(|word| (*word).to_owned()).collect()),
                 ..ExecConfig::default()
             },
         )

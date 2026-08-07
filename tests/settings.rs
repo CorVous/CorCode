@@ -24,7 +24,7 @@ use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
-use cor_code::store::{ChatStore, NewChat};
+use cor_code::store::{ChatStore, NewChat, Owner};
 use cor_code::verify::{ScriptedVerifier, Verified};
 
 const USERNAME: &str = "cassidy";
@@ -420,6 +420,7 @@ impl TestApp {
             &config,
             Chats::new(
                 &config,
+                Owner::of(&config.data_dir).expect("we own the dataset we just made"),
                 MemoryPlane::default(),
                 ScriptedAdapter::silent(),
                 Remotes::new(GITHUB),
@@ -454,6 +455,9 @@ impl TestApp {
     /// A chat on disk, so that the chat page can be searched for leaks too.
     fn fixture_chat(&self) -> String {
         ChatStore::new(self.data_dir.path())
+            .handing_trees_to(
+                Owner::of(self.data_dir.path()).expect("we own the dataset we just made"),
+            )
             .create_chat(NewChat {
                 title: "Resume ladder".to_owned(),
                 repo: "CorVous/CorCode".to_owned(),

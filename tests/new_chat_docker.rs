@@ -27,7 +27,7 @@ use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings};
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
-use cor_code::store::ChatStore;
+use cor_code::store::{ChatStore, Owner};
 use cor_code::verify::ScriptedVerifier;
 
 const DOCKER_SOCKET: &str = "/var/run/docker.sock";
@@ -116,6 +116,7 @@ impl Serving {
         let secrets = Arc::new(Secrets::from_config(&config));
         let chats = Chats::new(
             &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
             DockerPlane::connect(settings(deployment)).expect("the daemon should be reachable"),
             DockerExec::connect().expect("the daemon should be reachable"),
             remotes,

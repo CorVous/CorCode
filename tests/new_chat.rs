@@ -28,7 +28,7 @@ use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
-use cor_code::store::ChatStore;
+use cor_code::store::{ChatStore, Owner};
 use cor_code::verify::ScriptedVerifier;
 
 const USERNAME: &str = "cassidy";
@@ -453,6 +453,7 @@ impl TestApp {
         let secrets = Arc::new(Secrets::from_config(&config));
         let chats = Chats::new(
             &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
             plane.clone(),
             ScriptedAdapter::opening(SESSION),
             remotes,

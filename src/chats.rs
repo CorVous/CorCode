@@ -20,7 +20,7 @@ use crate::resume::{self, Attempt, Rung, Step};
 use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
 use crate::status::{Slot, Status};
 use crate::store::{
-    ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, RuntimeStatus,
+    self, ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, Owner, RuntimeStatus,
     runtime_status,
 };
 use crate::sweep::{self, Sweep, Swept};
@@ -208,16 +208,19 @@ pub struct Chats<P, T: AcpTransport> {
 impl<P, T: AcpTransport + Sync> Chats<P, T> {
     /// Serve the dataset `config` names, over `plane` and the adapters
     /// `transport` reaches, from the repositories `remotes` holds, on the
-    /// credentials `secrets` holds.
+    /// credentials `secrets` holds, for the `agent` every workspace is handed
+    /// to (ADR-0001).
     pub fn new(
         config: &Config,
+        agent: Owner,
         plane: P,
         transport: T,
         remotes: Remotes,
         secrets: Arc<Secrets>,
     ) -> Self {
         Self {
-            store: ChatStore::mounted(&config.data_dir, &config.host_data_dir),
+            store: ChatStore::mounted(&config.data_dir, &config.host_data_dir)
+                .handing_trees_to(agent),
             plane,
             adapter: Adapter::new(transport),
             connections: Connections::default(),
@@ -650,6 +653,7 @@ where
             self.revive(manifest).await?
         } else {
             self.still_has_its_workspace(chat_id)?;
+            self.hand_the_workspace_back(chat_id).await?;
             manifest
         };
         let climbed = self.climbed_in_a_container(chat_id, &remembered).await?;
@@ -694,6 +698,20 @@ where
             "this chat is open but has no workspace at {}",
             workspace.display()
         );
+        Ok(())
+    }
+
+    /// Give the workspace back to the agent before a container opens on it
+    /// again. The core writes in an open chat's tree itself — an archive
+    /// commits and pushes as the core, down to the refs and the index — and
+    /// one entry the agent does not own is enough to stop it committing. Walking
+    /// a tree blocks, so it runs off the runtime.
+    async fn hand_the_workspace_back(&self, chat_id: &str) -> Result<()> {
+        let workspace = self.store.workspace_dir(chat_id);
+        let agent = self.store.agent();
+        tokio::task::spawn_blocking(move || store::hand_tree_to(&workspace, agent))
+            .await
+            .expect("the handover task should not panic")?;
         Ok(())
     }
 
@@ -747,18 +765,22 @@ where
         }
     }
 
-    /// Clone the chat's branch back into its workspace at `commit`. Git
-    /// blocks, so it runs off the runtime.
+    /// Clone the chat's branch back into its workspace at `commit` and hand
+    /// the clone to the agent that will work in it: a revived workspace is as
+    /// new as a created one. Git blocks, so it runs off the runtime.
     async fn clone_back(&self, manifest: &Manifest, commit: &str) -> Result<String> {
         let origin = self.origin(&manifest.repo)?;
         let workspace = self.store.workspace_dir(&manifest.chat_id);
         let branch = manifest.branch.clone();
         let commit = commit.to_owned();
-        Ok(tokio::task::spawn_blocking(move || {
-            git::revive_at(&origin, &branch, &commit, &workspace)
+        let agent = self.store.agent();
+        tokio::task::spawn_blocking(move || -> Result<String> {
+            let standing_at = git::revive_at(&origin, &branch, &commit, &workspace)?;
+            store::hand_tree_to(&workspace, agent)?;
+            Ok(standing_at)
         })
         .await
-        .expect("the git task should not panic")?)
+        .expect("the git task should not panic")
     }
 
     /// The container this chat's adapter is reached in. One that is still up
@@ -874,8 +896,9 @@ where
         }
     }
 
-    /// Clone the repository into the chat's workspace and stand on the branch
-    /// the chat works from. Git blocks, so it runs off the runtime.
+    /// Clone the repository into the chat's workspace, stand on the branch the
+    /// chat works from, and hand the clone to the agent that will work in it:
+    /// git wrote it as the core. Git blocks, so it runs off the runtime.
     async fn check_out(
         &self,
         chat_id: &str,
@@ -886,9 +909,13 @@ where
         let workspace = self.store.workspace_dir(chat_id);
         let base_branch = wanted.base_branch.clone();
         let to_cut = (!wanted.direct_on_base).then(|| branch.to_owned());
-        tokio::task::spawn_blocking(move || {
+        let agent = self.store.agent();
+        tokio::task::spawn_blocking(move || -> Result<()> {
             git::clone_at(&origin, &base_branch, &workspace)?;
-            to_cut.map_or(Ok(()), |branch| git::create_branch(&workspace, &branch))
+            if let Some(branch) = to_cut {
+                git::create_branch(&workspace, &branch)?;
+            }
+            Ok(store::hand_tree_to(&workspace, agent)?)
         })
         .await
         .expect("the git task should not panic")
