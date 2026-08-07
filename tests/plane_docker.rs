@@ -8,19 +8,24 @@ use std::time::Duration;
 use bollard::Docker;
 use bollard::errors::Error as DockerError;
 use bollard::exec::StartExecResults;
-use bollard::models::{ContainerInspectResponse, ExecConfig};
+use bollard::models::{ContainerInspectResponse, ExecConfig, NetworkCreateRequest};
 use bollard::query_parameters::{StopContainerOptionsBuilder, WaitContainerOptionsBuilder};
 use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings, container_name};
 use futures_util::StreamExt as _;
 use tempfile::TempDir;
+use tokio::sync::{Mutex, MutexGuard};
 
 const DOCKER_SOCKET: &str = "/var/run/docker.sock";
+/// The one network every chat's container joins, and so the one piece of
+/// daemon state these tests all reach for.
+const AGENT_NETWORK: &str = "corcode-agents";
 /// Small, and never the multi-gigabyte workspace image. Its default command is
 /// a shell that exits at once without a tty — exactly what the plane's
 /// container must not be left to.
 const TEST_IMAGE: &str = "alpine:3.22";
 const CHAT_ID: &str = "01K1DOCKERGATEDTEST00000";
 const KEEP_ALIVE_CHAT_ID: &str = "01K1DOCKERKEEPALIVE00000";
+const MIGRATION_CHAT_ID: &str = "01K1DOCKERMIGRATION00000";
 const MEMORY_MB: u32 = 512;
 const CPUS: u32 = 1;
 /// Long enough for an image command to have run out: the adapter reading EOF
@@ -32,12 +37,24 @@ const TEST_STOP_GRACE_SECONDS: i32 = 1;
 /// The state the daemon has finished committing an exit into.
 const NOT_RUNNING: &str = "not-running";
 
+/// The daemon, taken one test at a time. The migration case replaces the agent
+/// network wholesale, which the daemon refuses while another test's container
+/// is attached and which would strand that container if it did not — so the
+/// tests that share the network queue rather than race. A tokio mutex needs no
+/// new dependency and, unlike the std one, survives a failing test unpoisoned.
+static DAEMON: Mutex<()> = Mutex::const_new(());
+
+async fn the_daemon_to_ourselves() -> MutexGuard<'static, ()> {
+    DAEMON.lock().await
+}
+
 #[tokio::test]
 async fn a_real_spawned_container_wears_every_hardening_flag() {
     let Some(docker) = reachable_daemon() else {
         eprintln!("SKIPPED a_real_spawned_container_wears_every_hardening_flag: no docker daemon");
         return;
     };
+    let _daemon = the_daemon_to_ourselves().await;
     let plane = DockerPlane::connect(settings()).expect("the daemon should be reachable");
     clear_any_leftover(&plane, CHAT_ID).await;
     let workspace = TempDir::new().expect("workspace dir should be created");
@@ -53,7 +70,7 @@ async fn a_real_spawned_container_wears_every_hardening_flag() {
         .await
         .expect("the container should be inspectable");
     let network = docker
-        .inspect_network("corcode-agents", None)
+        .inspect_network(AGENT_NETWORK, None)
         .await
         .expect("the agent network should exist");
     stop(&docker, &container.name).await;
@@ -91,8 +108,82 @@ async fn a_real_spawned_container_wears_every_hardening_flag() {
             .is_err(),
         "teardown should remove the container"
     );
-    assert_eq!(network.internal, Some(true));
+    assert_eq!(
+        network.internal,
+        Some(false),
+        "an internal network would leave the agent unable to reach the API"
+    );
     assert_hardened(inspected, workspace.path(), claude.path());
+}
+
+/// A deployment older than the plain-bridge decision holds `corcode-agents` as
+/// an internal network (ADR-0001). The spawn that finds it has to replace it,
+/// or every turn the upgraded core runs is an agent with no route to the API.
+#[tokio::test]
+async fn a_spawn_replaces_the_internal_network_an_older_deployment_left() {
+    let Some(docker) = reachable_daemon() else {
+        eprintln!(
+            "SKIPPED a_spawn_replaces_the_internal_network_an_older_deployment_left: no docker daemon"
+        );
+        return;
+    };
+    let _daemon = the_daemon_to_ourselves().await;
+    let plane = DockerPlane::connect(settings()).expect("the daemon should be reachable");
+    clear_any_leftover(&plane, MIGRATION_CHAT_ID).await;
+    put_back_the_internal_network(&docker).await;
+    let workspace = TempDir::new().expect("workspace dir should be created");
+    let claude = TempDir::new().expect("claude dir should be created");
+
+    plane
+        .spawn(
+            MIGRATION_CHAT_ID,
+            workspace.path(),
+            claude.path(),
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("the chat should spawn");
+
+    let network = docker
+        .inspect_network(AGENT_NETWORK, None)
+        .await
+        .expect("the agent network should exist");
+    let live = plane.list_live().await.expect("liveness should answer");
+    plane
+        .teardown(MIGRATION_CHAT_ID)
+        .await
+        .expect("the chat should tear down");
+
+    assert_eq!(
+        network.internal,
+        Some(false),
+        "the internal network should have been replaced, not reused"
+    );
+    assert!(
+        live.contains(MIGRATION_CHAT_ID),
+        "the chat's container should be running on the network that replaced it"
+    );
+}
+
+/// The daemon state an upgraded deployment wakes up in: the agents' name held
+/// by an internal network, with nothing on it.
+async fn put_back_the_internal_network(docker: &Docker) {
+    match docker.remove_network(AGENT_NETWORK).await {
+        Ok(())
+        | Err(DockerError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => {}
+        Err(error) => panic!("the agent network should be ours to remove: {error}"),
+    }
+    docker
+        .create_network(NetworkCreateRequest {
+            name: AGENT_NETWORK.to_owned(),
+            driver: Some("bridge".to_owned()),
+            internal: Some(true),
+            ..NetworkCreateRequest::default()
+        })
+        .await
+        .expect("an internal network should be creatable");
 }
 
 /// The image's own command exits at once; the chat's container may not go with
@@ -106,6 +197,7 @@ async fn a_container_outlives_the_command_its_image_would_have_run() {
         );
         return;
     };
+    let _daemon = the_daemon_to_ourselves().await;
     let plane = DockerPlane::connect(settings()).expect("the daemon should be reachable");
     clear_any_leftover(&plane, KEEP_ALIVE_CHAT_ID).await;
     let workspace = TempDir::new().expect("workspace dir should be created");
@@ -192,7 +284,7 @@ fn assert_hardened(inspected: ContainerInspectResponse, workspace: &Path, claude
         "swap left open would double the ceiling"
     );
     assert_eq!(host_config.nano_cpus, Some(i64::from(CPUS) * 1_000_000_000));
-    assert_eq!(host_config.network_mode, Some("corcode-agents".to_owned()));
+    assert_eq!(host_config.network_mode, Some(AGENT_NETWORK.to_owned()));
     assert_eq!(
         host_config.binds,
         Some(vec![
