@@ -16,9 +16,14 @@ stand_down() {
   exit 0
 }
 
+# Only a stored credential counts. Nothing in a workspace container can answer
+# a prompt, so every route to one is closed here: what an askpass would type is
+# not something this workspace could push over.
 credential_answers_for() {
   local filled
-  filled="$(GIT_TERMINAL_PROMPT=0 in_workspace credential fill 2>/dev/null <<EOF
+  filled="$(
+    unset GIT_ASKPASS SSH_ASKPASS
+    GIT_TERMINAL_PROMPT=0 in_workspace -c core.askPass= credential fill 2>/dev/null <<EOF
 protocol=https
 host=$1
 

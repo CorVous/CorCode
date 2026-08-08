@@ -33,7 +33,8 @@ filled_for() {
   local host=$1
   shift
   printf 'protocol=https\nhost=%s\n\n' "$host" |
-    env "$@" GIT_TERMINAL_PROMPT=0 timeout "$PATIENCE" git credential fill 2>/dev/null
+    env --unset=GIT_ASKPASS --unset=SSH_ASKPASS "$@" GIT_TERMINAL_PROMPT=0 \
+      timeout "$PATIENCE" git -c core.askPass= credential fill 2>/dev/null
 }
 
 expect_password() {
