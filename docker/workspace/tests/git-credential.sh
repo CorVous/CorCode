@@ -93,6 +93,12 @@ expect_no_password 'no other host is offered the token, however it is spelled' \
   "$(filled_for git.example.invalid "GH_TOKEN=$token")"
 expect_no_password 'a host that merely ends in the one we trust is another host' \
   "$(filled_for github.com.evil.example "GH_TOKEN=$token")"
+# gh turns the other two spellings away by itself, so they would pass over an
+# unscoped helper too. This one only passes because the helper is scoped: gh
+# would spend the token on an enterprise host under github.com, and git never
+# asks it to, because the scope is an exact host.
+expect_no_password 'a host merely under the one we trust is another host' \
+  "$(filled_for foo.github.com "GH_TOKEN=$token")"
 
 credentialed="$(workspace_on credentialed "$github")"
 expect_hook_status 'the stop hook keeps its teeth where the token could push' \
