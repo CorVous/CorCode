@@ -271,6 +271,8 @@ impl Dataset {
                 base_branch: "main".to_owned(),
                 slug: slug.to_owned(),
                 direct_on_base: false,
+                env: std::collections::BTreeMap::new(),
+                startup_script: None,
             })
             .await
             .expect("a chat should be cut")

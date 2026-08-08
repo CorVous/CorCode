@@ -219,6 +219,8 @@ fn fixture_chat() -> (TempDir, String) {
             repo: "CorVous/CorCode".to_owned(),
             branch: "chat/2026-08-05-resume-ladder".to_owned(),
             base_branch: "main".to_owned(),
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
         })
         .expect("fixture chat should be created");
     for payload in [
@@ -276,6 +278,8 @@ fn vanished_chat(data_dir: &TempDir) -> String {
             repo: "CorVous/CorCode".to_owned(),
             branch: "chat/2026-08-05-gone".to_owned(),
             base_branch: "main".to_owned(),
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
         })
         .expect("chat should be created");
     fs::remove_dir_all(store.chat_dir(&manifest.chat_id)).expect("chat dir should be removable");

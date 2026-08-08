@@ -327,6 +327,8 @@ impl From<NewChatForm> for WantedChat {
             base_branch: form.base_branch,
             slug: form.slug,
             direct_on_base: form.direct_on_base.is_some(),
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
         }
     }
 }

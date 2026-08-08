@@ -258,6 +258,8 @@ mod tests {
             checkpoint_branch: None,
             last_pushed_commit: None,
             acp_session_id: None,
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
             created_at: now,
             last_active_at: now,
         }

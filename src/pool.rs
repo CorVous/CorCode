@@ -61,6 +61,8 @@ mod tests {
             repo: "CorVous/CorCode".to_owned(),
             branch: format!("chat/{title}"),
             base_branch: "main".to_owned(),
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
         });
         manifest.last_active_at = Utc::now() - Duration::minutes(minutes_ago);
         manifest

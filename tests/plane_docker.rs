@@ -177,6 +177,8 @@ async fn a_real_container_can_write_in_both_of_the_trees_it_was_handed() {
             repo: "CorVous/fixture".to_owned(),
             branch: "chat/owned".to_owned(),
             base_branch: "main".to_owned(),
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
         })
         .expect("the chat should be laid down")
         .chat_id;

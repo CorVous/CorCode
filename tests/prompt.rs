@@ -403,6 +403,8 @@ impl TestApp {
                 repo: REPO.to_owned(),
                 branch: "chat/parked".to_owned(),
                 base_branch: "main".to_owned(),
+                env: std::collections::BTreeMap::new(),
+                startup_script: None,
             })
             .expect("a chat should be creatable")
             .chat_id

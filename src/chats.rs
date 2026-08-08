@@ -32,6 +32,12 @@ pub struct WantedChat {
     pub base_branch: String,
     pub slug: String,
     pub direct_on_base: bool,
+    /// Custom environment for the agent container, already parsed and validated
+    /// at the form (issue #14). System credentials still win a name clash at
+    /// spawn.
+    pub env: BTreeMap<String, String>,
+    /// A shell to run in the container once it is ready, or nothing.
+    pub startup_script: Option<String>,
 }
 
 /// Why a chat was not created. A refusal is the request's fault and says so;
@@ -883,6 +889,8 @@ where
                 repo: wanted.repo.clone(),
                 branch: branch.clone(),
                 base_branch: wanted.base_branch.clone(),
+                env: wanted.env.clone(),
+                startup_script: wanted.startup_script.clone(),
             })
             .map_err(broke)?;
         let chat_id = manifest.chat_id.clone();

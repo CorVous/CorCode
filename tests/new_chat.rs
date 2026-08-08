@@ -85,6 +85,8 @@ async fn the_workspace_a_new_chat_is_given_belongs_to_the_agent_that_will_work_i
             base_branch: "main".to_owned(),
             slug: "handed over".to_owned(),
             direct_on_base: false,
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
         })
         .await
         .expect("the chat should be created");
