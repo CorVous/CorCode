@@ -159,10 +159,11 @@ async fn a_rotated_github_token_reaches_the_next_container() {
     );
 }
 
-/// The token is handed to the agent's container and spliced into the URLs the
-/// core clones over, and the dataset is where both of those leave traces: the
-/// manifest, the events log, the workspace's own git config. It belongs in its
-/// own file and nowhere else on disk.
+/// Cutting a chat hands the token to a container and writes a great deal to
+/// the dataset — the manifest, the event log, a workspace tree with its own
+/// git config — and none of that is a place a token belongs. What the clone
+/// URL itself carries is `git`'s to answer for, and does:
+/// `a_token_rides_in_the_url_and_nowhere_else`.
 #[tokio::test]
 async fn a_chat_cut_over_a_token_writes_it_nowhere_on_the_dataset() {
     let dataset = Dataset::bootstrapped_with(None);
