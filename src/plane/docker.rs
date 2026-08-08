@@ -406,6 +406,7 @@ mod tests {
             image: "ghcr.io/corvous/corcode-workspace:2026-08-05".to_owned(),
             memory_mb: 512,
             cpus: 3,
+            scratch_mb: 64,
             registry: None,
         }
     }
@@ -448,8 +449,9 @@ mod tests {
             host_config.tmpfs,
             Some(HashMap::from([(
                 "/tmp".to_owned(),
-                "rw,nosuid,nodev,noexec,size=256m".to_owned()
-            )]))
+                "rw,nosuid,nodev,noexec,size=64m".to_owned()
+            )])),
+            "the scratch tmpfs is the size this deployment allows it, and no bigger"
         );
         assert_eq!(
             host_config.binds,

@@ -376,6 +376,7 @@ mod tests {
 
         assert_eq!(config.container_memory_mb, DEFAULT_CONTAINER_MEMORY_MB);
         assert_eq!(config.container_cpus, DEFAULT_CONTAINER_CPUS);
+        assert_eq!(config.scratch_mb, DEFAULT_SCRATCH_MB);
         assert!(config.registry.is_none());
     }
 
@@ -384,11 +385,13 @@ mod tests {
         let mut vars = required_vars();
         vars.push(("CORCODE_CONTAINER_MEMORY_MB".to_owned(), "8192".to_owned()));
         vars.push(("CORCODE_CONTAINER_CPUS".to_owned(), "6".to_owned()));
+        vars.push(("CORCODE_SCRATCH_MB".to_owned(), "2048".to_owned()));
 
         let config = Config::from_vars(vars).expect("tuned environment should load");
 
         assert_eq!(config.container_memory_mb, 8192);
         assert_eq!(config.container_cpus, 6);
+        assert_eq!(config.scratch_mb, 2048);
     }
 
     #[test]
