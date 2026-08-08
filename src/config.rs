@@ -406,6 +406,21 @@ mod tests {
         assert_eq!(config.scratch_mb, 2048);
     }
 
+    /// `size=0m` is how a tmpfs is asked for no limit at all, so a deployment
+    /// that means "no scratch" would get an unbounded one.
+    #[test]
+    fn a_scratch_of_no_size_is_refused_rather_than_read_as_no_limit() {
+        let mut vars = required_vars();
+        vars.push(("CORCODE_SCRATCH_MB".to_owned(), "0".to_owned()));
+
+        let error = Config::from_vars(vars).expect_err("a scratch of no size should fail");
+
+        assert!(
+            format!("{error:#}").contains("CORCODE_SCRATCH_MB"),
+            "error should name the offending variable, got: {error:#}"
+        );
+    }
+
     #[test]
     fn an_unparseable_container_limit_names_the_variable() {
         let mut vars = required_vars();
