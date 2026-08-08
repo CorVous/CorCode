@@ -159,6 +159,24 @@ async fn a_rotated_github_token_reaches_the_next_container() {
     );
 }
 
+/// The token is handed to the agent's container and spliced into the URLs the
+/// core clones over, and the dataset is where both of those leave traces: the
+/// manifest, the events log, the workspace's own git config. It belongs in its
+/// own file and nowhere else on disk.
+#[tokio::test]
+async fn a_chat_cut_over_a_token_writes_it_nowhere_on_the_dataset() {
+    let dataset = Dataset::bootstrapped_with(None);
+    dataset.write(Secret::GithubToken, TOKEN);
+
+    dataset.create("contained").await;
+
+    assert_eq!(
+        dataset.dataset_files_holding(TOKEN),
+        Vec::<PathBuf>::new(),
+        "the token was written where the agent, or anyone reading the dataset, can find it"
+    );
+}
+
 /// Cutting a chat and archiving it are two operations, and the token in force
 /// at the second is not the one the first went out on.
 #[tokio::test]
@@ -301,6 +319,31 @@ impl Dataset {
 
     fn workspace(&self, chat_id: &str) -> PathBuf {
         self.data_dir.path().join("workspaces").join(chat_id)
+    }
+
+    /// Every file on the dataset spelling `secret` out, but for the secrets
+    /// directory, which is the one place a secret is kept.
+    fn dataset_files_holding(&self, secret: &str) -> Vec<PathBuf> {
+        let mut holding = Vec::new();
+        let mut looking = vec![self.data_dir.path().to_path_buf()];
+        while let Some(dir) = looking.pop() {
+            if dir == self.secrets_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&dir).expect("the dataset should be readable") {
+                let path = entry.expect("an entry should be readable").path();
+                if path.is_dir() {
+                    looking.push(path);
+                } else if fs::read(&path)
+                    .expect("a dataset file should be readable")
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes())
+                {
+                    holding.push(path);
+                }
+            }
+        }
+        holding
     }
 
     fn branches_on_the_remote(&self) -> String {
