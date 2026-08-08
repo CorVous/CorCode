@@ -145,6 +145,12 @@ const RESET_NOTICE: &str = "reset_notice";
 /// What a prompt that never got as far as an agent calls itself there.
 const WAKE_FAILURE: &str = "wake_failure";
 
+/// The names an agent's tooling reads the GitHub token from: `gh` — which the
+/// image's credential helper answers over — prefers the first, and everything
+/// else looks for the second. An agent pushes its own work (ADR-0005), so it
+/// is handed the same token the core clones and archives over.
+const GITHUB_TOKEN_VARIABLES: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
+
 /// The right to decide who gives a container up, held by one capping at a
 /// time.
 type ParkingLock = tokio::sync::Mutex<()>;
@@ -924,11 +930,20 @@ where
 
     /// Start the chat's container over both of its directories (ADR-0006),
     /// answering with the container's name.
+    ///
+    /// Every credential is read here rather than held, so the one written a
+    /// moment ago is the one the next container is spawned with, and a
+    /// deployment holding none hands the agent none.
     async fn spawn(&self, chat_id: &str) -> Result<String> {
         let mut env = BTreeMap::new();
         if let Some(credential) = self.secrets.read(Secret::AnthropicKey)? {
             let variable = AnthropicCredential::of(&credential).variable();
             env.insert(variable.to_owned(), credential);
+        }
+        if let Some(token) = self.secrets.read(Secret::GithubToken)? {
+            for variable in GITHUB_TOKEN_VARIABLES {
+                env.insert(variable.to_owned(), token.clone());
+            }
         }
         Ok(self
             .plane
