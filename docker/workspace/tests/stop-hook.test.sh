@@ -125,6 +125,13 @@ run_hook "$credentialed" '{"stop_hook_active": false}'
 expect_status 'a workspace that can push still has to' 2
 expect_stderr_mentions 'the tracked edit is named in the block reason' 'uncommitted'
 
+unpushable_branch="$(seeded_repo unpushable-branch)"
+point_at_web_origin "$unpushable_branch"
+hold_a_credential "$unpushable_branch"
+run_hook "$unpushable_branch" '{"stop_hook_active": false}'
+expect_status 'a credentialed workspace with no upstream still blocks the stop' 2
+expect_stderr_mentions 'the missing upstream is named for a credentialed origin too' 'upstream'
+
 uncredentialed="$(pushed_repo uncredentialed)"
 point_at_web_origin "$uncredentialed"
 edit_a_tracked_file "$uncredentialed"
