@@ -34,6 +34,11 @@ const API_KEY: &str = "ANTHROPIC_API_KEY";
 /// The variable it reads a subscription token from instead.
 const OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
+/// The variable `gh` reads the GitHub token from, and the one everything else
+/// looks for (ADR-0005).
+const GH_TOKEN: &str = "GH_TOKEN";
+const GITHUB_TOKEN: &str = "GITHUB_TOKEN";
+
 const BOOTSTRAPPED_KEY: &str = "sk-ant-bootstrapped";
 const ROTATED_KEY: &str = "sk-ant-rotated";
 const SUBSCRIPTION: &str = "sk-ant-oat01-subscription-secret";
@@ -101,6 +106,54 @@ async fn a_rotated_key_reaches_the_next_container() {
         dataset.key_of(&before).as_deref(),
         Some(BOOTSTRAPPED_KEY),
         "a container already up was somehow handed the new key"
+    );
+}
+
+/// The agent pushes its own commits (ADR-0005), so the container is handed the
+/// token under both names its tooling looks for: `gh` prefers one and
+/// everything else the other.
+#[tokio::test]
+async fn a_container_is_spawned_with_the_github_token_under_both_the_names_its_tools_read() {
+    let dataset = Dataset::bootstrapped_with(None);
+    dataset.write(Secret::GithubToken, TOKEN);
+
+    let chat = dataset.create("credentialed").await;
+
+    assert_eq!(dataset.env_of(&chat, GH_TOKEN).as_deref(), Some(TOKEN));
+    assert_eq!(dataset.env_of(&chat, GITHUB_TOKEN).as_deref(), Some(TOKEN));
+}
+
+/// A deployment holding no token spawns an agent that holds none either: the
+/// image's credential helper then answers nothing and the stop hook stands
+/// down (ADR-0005), which is only true while neither name is set to anything.
+#[tokio::test]
+async fn a_container_spawned_where_no_github_token_is_held_carries_neither_name() {
+    let dataset = Dataset::bootstrapped_with(Some(BOOTSTRAPPED_KEY));
+
+    let chat = dataset.create("tokenless").await;
+
+    assert_eq!(dataset.env_of(&chat, GH_TOKEN), None);
+    assert_eq!(dataset.env_of(&chat, GITHUB_TOKEN), None);
+}
+
+#[tokio::test]
+async fn a_rotated_github_token_reaches_the_next_container() {
+    let dataset = Dataset::bootstrapped_with(None);
+    dataset.write(Secret::GithubToken, TOKEN);
+    let before = dataset.create("before").await;
+
+    dataset.write(Secret::GithubToken, ROTATED_TOKEN);
+    let after = dataset.create("after").await;
+
+    assert_eq!(
+        dataset.env_of(&after, GH_TOKEN).as_deref(),
+        Some(ROTATED_TOKEN),
+        "the container was spawned with the token the core booted with"
+    );
+    assert_eq!(
+        dataset.env_of(&before, GH_TOKEN).as_deref(),
+        Some(TOKEN),
+        "a container already up was somehow handed the new token"
     );
 }
 
