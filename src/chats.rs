@@ -244,6 +244,7 @@ pub fn parse_env(raw: &str) -> Result<BTreeMap<String, String>, EnvError> {
     let mut env = BTreeMap::new();
     for (index, line) in raw.lines().enumerate() {
         let line_number = index + 1;
+        let line = line.strip_suffix('\r').unwrap_or(line);
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -1168,6 +1169,19 @@ mod tests {
     }
 
     #[test]
+    fn a_carriage_return_ending_leaves_no_stray_byte_in_key_or_value() {
+        let env = parse_env("A=one\r\nB=two\r").expect("both endings should parse");
+
+        assert_eq!(
+            env,
+            BTreeMap::from([
+                ("A".to_owned(), "one".to_owned()),
+                ("B".to_owned(), "two".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
     fn a_line_with_no_equals_is_refused() {
         assert_eq!(
             parse_env("EDITOR helix"),
@@ -1196,7 +1210,12 @@ mod tests {
 
     #[test]
     fn a_name_the_core_sets_itself_is_refused() {
-        for reserved in ["GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY"] {
+        for reserved in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
             assert_eq!(
                 parse_env(&format!("{reserved}=mine")),
                 Err(EnvError::Reserved {
