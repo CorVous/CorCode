@@ -67,6 +67,16 @@ USER agent
 ENV HOME=/home/agent \
     CLAUDE_CONFIG_DIR=/home/agent/.claude
 
+# The runtime rootfs is read-only and the only writable places are the tmpfs
+# scratch and the two binds (ADR-0001), so every toolchain cache is sent to
+# scratch. The baked Rust toolchain stays where it is, readable: only
+# CARGO_HOME, which is what cargo writes through, moves.
+ENV CARGO_HOME=/tmp/cache/cargo \
+    npm_config_cache=/tmp/cache/npm \
+    PIP_CACHE_DIR=/tmp/cache/pip \
+    XDG_CACHE_HOME=/tmp/cache/xdg \
+    GH_CONFIG_DIR=/tmp/cache/gh
+
 RUN git config --global user.name 'Cor' \
  && git config --global user.email 'birb@cor.gg' \
  && git config --global --add safe.directory /workspace

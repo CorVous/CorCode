@@ -55,6 +55,32 @@ The stamp is to the second (`-chkpt-20260805T214033`), not the minute: a
 refused push is retried immediately, and a retry within the same minute would
 otherwise name a branch the remote already has.
 
+## Amendment (2026-08-07): the nudge stands down where no push could land
+
+The blocking nudge demanded a push of workspaces that hold no GitHub
+credential, so every turn in one ended with the agent narrating an
+unresolvable impasse ([#47](https://github.com/CorVous/CorCode/issues/47)).
+The hook now asks first whether pushing is possible at all, and rules on what
+"unsafe" means:
+
+- **No `origin` remote** — the hook says so in one line and exits 0. Removing
+  the remote disarms it; that is a deliberate act by whoever set the workspace
+  up, not a hole an agent can dig.
+- **An `http(s)` `origin` no credential answers for** — `git credential fill`
+  with prompting disabled is the test, so a configured helper that has nothing
+  for this host counts as nothing. One line, exit 0. Other transports carry
+  their own keys and are left alone: the hook keeps its teeth.
+- **A credential answers** — the nudge is unchanged, except that **untracked
+  files no longer block**. Counting them was the "dirty tree" over-read
+  ([#48](https://github.com/CorVous/CorCode/issues/48)): scratch output is not
+  work git is missing, and demanding a commit of it taught agents to commit
+  noise. Staged and modified tracked files still block, as do unpushed commits
+  and a branch with no upstream.
+
+Accepted risk: a workspace whose credential is merely broken looks the same as
+one that never had one, and the hook stands down for both. Losing a turn's
+nudge is cheaper than losing every turn to an impossible demand.
+
 ## Consequences
 
 - Chat branches carry only agent-authored semantic commits; mechanical

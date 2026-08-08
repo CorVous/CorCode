@@ -49,6 +49,46 @@ not redesign: block RFC1918 destinations out of the agent bridge, or put the
 agents behind an allowlist egress proxy, when the threat model outgrows the
 MVP.
 
+## Amendment (2026-08-07): the container is the permission boundary
+
+The baked managed settings shipped no `permissions.defaultMode`, so every
+agent ran in Claude Code's interactive default: it asked before acting, the
+ACP client declined on its behalf, and the hardening above was paid for twice
+([#49](https://github.com/CorVous/CorCode/issues/49)). The flags in this ADR
+are the boundary; a second gate inside them is the same over-reading that
+produced `internal: true`. `/etc/claude-code/managed-settings.json` now sets
+`permissions.defaultMode` to **`auto`** — safe calls approved by the model's
+own classifier, risky ones still classified.
+
+Managed scope, because it is ours. The SDK's trust filter drops an escalating
+default (`auto`, `acceptEdits`, `bypassPermissions`) from exactly one place:
+repo-committed `project` settings, `.claude/settings.json` in the clone.
+User, local, flag and managed scopes are all honored. The image bakes the
+managed file, so the mode travels with the image the hardening flags belong to
+and a cloned repository cannot set it, unset it, or escalate past it.
+
+Three properties of headless auto mode the settings file has to respect:
+
+- **No `permissions.ask` rules.** An ask reaches a client that auto-declines,
+  and the turn dead-ends where a classifier would have carried it.
+- **No reliance on broad allow rules.** Auto mode drops them; a `Bash(*)`
+  allowlist would read as permission granted and grant nothing.
+- **Denies are sticky for the run, and repeated classifier blocks abort it.**
+  A headless turn that keeps reaching for the same blocked call does not
+  recover by retrying — it ends. Work the agent must do belongs inside the
+  container's own writable surface, not behind a call the classifier stops.
+
+**Known blind spot: nothing watches the mode a session actually opened in.**
+Adapter 0.66.0 clamps silently — a model whose session reports no auto support
+gets `default`, logged to the adapter's stderr and nowhere else. The one
+observable is `modes.currentModeId` in the `session/new` result, and the core
+keeps only `sessionId` from that response (`src/acp/mod.rs`), so no test can
+reach it without the core surfacing it first. The image-side check proves the
+settings resolve to `auto`; that the session honored it is unproven, and a
+whole deployment could quietly fall back to asking. Surfacing the session's
+mode — logged at open, or asserted in the docker-gated vertical — is the fix,
+and it is a core change this image increment did not make.
+
 ## Consequences
 
 - Simplest possible MVP: one runtime, no new infra, the socket the core
