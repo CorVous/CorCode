@@ -6,16 +6,19 @@ use std::path::Path;
 use bollard::Docker;
 use bollard::auth::DockerCredentials;
 use bollard::errors::Error as DockerError;
+use bollard::exec::StartExecResults;
 use bollard::models::{
-    ContainerCreateBody, ContainerSummary, HostConfig, NetworkCreateRequest, NetworkInspect,
+    ContainerCreateBody, ContainerSummary, ExecConfig, HostConfig, NetworkCreateRequest,
+    NetworkInspect,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptions,
     ListContainersOptionsBuilder, StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt as _;
+use tokio::io::AsyncWriteExt as _;
 
-use super::{ContainerPlane, ContainerRef, PlaneError, WORKSPACE_MOUNT, container_name};
+use super::{ContainerPlane, ContainerRef, PlaneError, ScriptRun, WORKSPACE_MOUNT, container_name};
 use crate::config::RegistryCredentials;
 use crate::store::{ContainerLiveness, Owner};
 
@@ -210,6 +213,62 @@ impl ContainerPlane for DockerPlane {
         Ok(ContainerRef::new(chat_id, created.id))
     }
 
+    async fn run_startup_script(
+        &self,
+        chat_id: &str,
+        script: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<ScriptRun, PlaneError> {
+        let container = container_name(chat_id);
+        let blame = |action: &str| {
+            PlaneError::runtime(format!("{action} the startup script of chat {chat_id}"))
+        };
+        let exec = self
+            .docker
+            .create_exec(&container, startup_exec(env))
+            .await
+            .map_err(blame("prepare"))?;
+        let StartExecResults::Attached {
+            mut output,
+            mut input,
+        } = self
+            .docker
+            .start_exec(&exec.id, None)
+            .await
+            .map_err(blame("start"))?
+        else {
+            return Err(blame("attach to")(DockerError::IOError {
+                err: std::io::Error::other("the daemon detached the startup script"),
+            }));
+        };
+        input
+            .write_all(script.as_bytes())
+            .await
+            .map_err(|err| blame("feed")(DockerError::IOError { err }))?;
+        input
+            .shutdown()
+            .await
+            .map_err(|err| blame("close the input of")(DockerError::IOError { err }))?;
+        drop(input);
+        let mut combined = String::new();
+        while let Some(chunk) = output.next().await {
+            combined.push_str(&String::from_utf8_lossy(
+                chunk.map_err(blame("read"))?.as_ref(),
+            ));
+        }
+        let exit_code = self
+            .docker
+            .inspect_exec(&exec.id)
+            .await
+            .map_err(blame("read the exit code of"))?
+            .exit_code
+            .unwrap_or_default();
+        Ok(ScriptRun {
+            output: combined,
+            exit_code,
+        })
+    }
+
     async fn teardown(&self, chat_id: &str) -> Result<(), PlaneError> {
         let name = container_name(chat_id);
         let stop = StopContainerOptionsBuilder::new()
@@ -322,6 +381,27 @@ fn create_body(
         }),
         ..ContainerCreateBody::default()
     })
+}
+
+/// The exec that runs a chat's startup script: a shell reading the script off
+/// its own stdin — so no quoting in the script can trip the invocation — as the
+/// agent, in the workspace, with the chat's env visible (issue #14).
+fn startup_exec(env: &BTreeMap<String, String>) -> ExecConfig {
+    ExecConfig {
+        attach_stdin: Some(true),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        tty: Some(false),
+        cmd: Some(vec!["sh".to_owned(), "-s".to_owned()]),
+        user: Some(Owner::AGENT.to_string()),
+        working_dir: Some(WORKSPACE_MOUNT.to_owned()),
+        env: Some(
+            env.iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect(),
+        ),
+        ..ExecConfig::default()
+    }
 }
 
 /// How the scratch tmpfs is mounted at the size this deployment allows it:
@@ -706,6 +786,39 @@ mod tests {
         assert!(
             format!("{error}").contains(&format!("tear down the container of chat {CHAT_ID}")),
             "error should say what failed, got: {error}"
+        );
+    }
+
+    #[test]
+    fn the_startup_script_runs_as_the_agent_in_the_workspace_over_a_shell() {
+        let config = startup_exec(&BTreeMap::from([("EDITOR".to_owned(), "helix".to_owned())]));
+
+        assert_eq!(
+            config.cmd,
+            Some(vec!["sh".to_owned(), "-s".to_owned()]),
+            "the script is fed to a shell on stdin, so no quoting can trip it"
+        );
+        assert_eq!(
+            config.user,
+            Some(Owner::AGENT.to_string()),
+            "the script runs as the agent, never as root"
+        );
+        assert_eq!(
+            config.working_dir,
+            Some(WORKSPACE_MOUNT.to_owned()),
+            "the script runs with the workspace as its cwd"
+        );
+        assert_eq!(config.env, Some(vec!["EDITOR=helix".to_owned()]));
+        assert_eq!(
+            config.attach_stdin,
+            Some(true),
+            "the script arrives on stdin"
+        );
+        assert_eq!(config.attach_stdout, Some(true));
+        assert_eq!(
+            config.attach_stderr,
+            Some(true),
+            "stderr is captured alongside stdout"
         );
     }
 

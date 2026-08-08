@@ -7,7 +7,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::{ContainerPlane, ContainerRef, PlaneError};
+use super::{ContainerPlane, ContainerRef, PlaneError, ScriptRun};
 use crate::store::ContainerLiveness;
 
 /// The two directories a chat's container was asked to bind (ADR-0006), in
@@ -23,6 +23,20 @@ pub struct Mounts {
 #[derive(Debug, Default, Clone)]
 pub struct MemoryPlane {
     live: Arc<Mutex<HashMap<String, Spawned>>>,
+    scripts: Arc<Mutex<Vec<StartupRun>>>,
+    outcome: Arc<Mutex<ScriptRun>>,
+}
+
+/// One startup script this plane was asked to run, kept so a test can read what
+/// it was handed and prove the container was up when it ran (issue #14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupRun {
+    pub chat_id: String,
+    pub script: String,
+    pub env: BTreeMap<String, String>,
+    /// Whether the chat's container was live when the script ran: a script that
+    /// runs only over a live container is one that runs after the spawn.
+    pub over_a_live_container: bool,
 }
 
 #[derive(Clone)]
@@ -69,6 +83,29 @@ impl ContainerPlane for MemoryPlane {
         }
     }
 
+    async fn run_startup_script(
+        &self,
+        chat_id: &str,
+        script: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<ScriptRun, PlaneError> {
+        let over_a_live_container = self.live().contains_key(chat_id);
+        self.scripts
+            .lock()
+            .expect("no holder of the lock panics")
+            .push(StartupRun {
+                chat_id: chat_id.to_owned(),
+                script: script.to_owned(),
+                env: env.clone(),
+                over_a_live_container,
+            });
+        Ok(self
+            .outcome
+            .lock()
+            .expect("no holder of the lock panics")
+            .clone())
+    }
+
     async fn teardown(&self, chat_id: &str) -> Result<(), PlaneError> {
         self.live()
             .remove(chat_id)
@@ -98,6 +135,24 @@ impl MemoryPlane {
     #[must_use]
     pub fn env_of(&self, chat_id: &str) -> Option<BTreeMap<String, String>> {
         self.live().get(chat_id).map(|spawned| spawned.env.clone())
+    }
+
+    /// Make every startup script from here on answer with `output` and
+    /// `exit_code`, as a container's shell would.
+    pub fn program_startup(&self, output: &str, exit_code: i64) {
+        *self.outcome.lock().expect("no holder of the lock panics") = ScriptRun {
+            output: output.to_owned(),
+            exit_code,
+        };
+    }
+
+    /// Every startup script this plane was asked to run, in order.
+    #[must_use]
+    pub fn startup_runs(&self) -> Vec<StartupRun> {
+        self.scripts
+            .lock()
+            .expect("no holder of the lock panics")
+            .clone()
     }
 
     fn live(&self) -> MutexGuard<'_, HashMap<String, Spawned>> {
