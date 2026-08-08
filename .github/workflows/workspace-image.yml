@@ -21,7 +21,7 @@ env:
     --read-only
     --cap-drop ALL
     --security-opt no-new-privileges:true
-    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=1024m
 
 jobs:
   build:

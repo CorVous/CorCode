@@ -44,6 +44,7 @@ Serving (the default action) reads its configuration from the environment:
 | `CORCODE_BIND_ADDR`         | no       | `0.0.0.0:8080` |
 | `CORCODE_CONTAINER_MEMORY_MB` | no     | `4096`         |
 | `CORCODE_CONTAINER_CPUS`    | no       | `2`            |
+| `CORCODE_SCRATCH_MB`        | no       | `1024`         |
 | `CORCODE_WARM_POOL`         | no       | `2`            |
 | `CORCODE_REGISTRY_USER`     | no       | -              |
 | `CORCODE_REGISTRY_TOKEN`    | no       | -              |
@@ -60,6 +61,12 @@ subscription token, which reaches it as `CLAUDE_CODE_OAUTH_TOKEN`, and the
 settings panel holds one too. `CORCODE_WARM_POOL` is how many chats keep a
 container: the rest are parked, workspaces kept. A chat taking a turn keeps
 its container until the turn ends, so the pool can sit one over its size.
+
+`CORCODE_SCRATCH_MB` sizes the scratch tmpfs an agent's toolchain caches live
+on — a cargo registry alone runs to hundreds of megabytes, and a build that
+outgrows the tmpfs fails on `ENOSPC`. A tmpfs is memory: what it holds is
+charged to `CORCODE_CONTAINER_MEMORY_MB`, so the two are raised together and a
+scratch as large as the ceiling leaves the agent nothing to run in.
 
 `CORCODE_HOST_DATA_DIR` is the dataset root as the Docker daemon sees it,
 which differs from `CORCODE_DATA_DIR` when the core is itself containerised:

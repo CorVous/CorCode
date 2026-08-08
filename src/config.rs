@@ -18,6 +18,9 @@ pub const DEFAULT_CONTAINER_MEMORY_MB: u32 = 4096;
 /// CPU ceiling of a workspace container when `CORCODE_CONTAINER_CPUS` is
 /// unset.
 pub const DEFAULT_CONTAINER_CPUS: u32 = 2;
+/// Size of a workspace container's scratch tmpfs when `CORCODE_SCRATCH_MB` is
+/// unset — room for the toolchain caches that live on it (ADR-0004).
+pub const DEFAULT_SCRATCH_MB: u32 = 1024;
 /// How many chats keep a container when `CORCODE_WARM_POOL` is unset
 /// (ADR-0002: a cap, and no TTL behind it).
 pub const DEFAULT_WARM_POOL: usize = 2;
@@ -69,6 +72,10 @@ pub struct Config {
     pub container_memory_mb: u32,
     /// CPU ceiling of one workspace container (ADR-0001).
     pub container_cpus: u32,
+    /// Size of the scratch tmpfs a workspace container writes its toolchain
+    /// caches to (ADR-0004). It is memory, and it is spent out of
+    /// `container_memory_mb`.
+    pub scratch_mb: u32,
     /// How many chats keep a live container at once (ADR-0002).
     pub warm_pool: usize,
     /// Login for the registry holding the workspace image (ADR-0009).
@@ -117,6 +124,7 @@ impl Config {
                 DEFAULT_CONTAINER_MEMORY_MB,
             )?,
             container_cpus: number(&vars, "CORCODE_CONTAINER_CPUS", DEFAULT_CONTAINER_CPUS)?,
+            scratch_mb: number(&vars, "CORCODE_SCRATCH_MB", DEFAULT_SCRATCH_MB)?,
             warm_pool: number(&vars, "CORCODE_WARM_POOL", DEFAULT_WARM_POOL)?,
             registry: registry(&vars)?,
             repos: repos(&vars)?,
@@ -198,6 +206,7 @@ impl fmt::Debug for Config {
             .field("workspace_image", &self.workspace_image)
             .field("container_memory_mb", &self.container_memory_mb)
             .field("container_cpus", &self.container_cpus)
+            .field("scratch_mb", &self.scratch_mb)
             .field("warm_pool", &self.warm_pool)
             .field("registry", &self.registry)
             .field("repos", &self.repos)

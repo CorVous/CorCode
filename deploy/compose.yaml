@@ -28,6 +28,11 @@ services:
       CORCODE_WARM_POOL: "2"
       CORCODE_CONTAINER_MEMORY_MB: "4096"
       CORCODE_CONTAINER_CPUS: "2"
+      # The agent's scratch tmpfs, where its toolchain caches live: a cargo
+      # registry alone runs to hundreds of megabytes. A tmpfs is memory, and
+      # what it holds is charged to CORCODE_CONTAINER_MEMORY_MB above — a
+      # scratch as large as the ceiling leaves the agent nothing to run in.
+      CORCODE_SCRATCH_MB: "1024"
       # Pulls the workspace image from GHCR: a GitHub username and a
       # classic token carrying read:packages.
       CORCODE_REGISTRY_USER: REPLACE_WITH_YOUR_GITHUB_USERNAME

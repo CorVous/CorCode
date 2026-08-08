@@ -56,6 +56,7 @@ fn chats(config: &Config, secrets: Arc<Secrets>) -> Result<Chats<DockerPlane, Do
         image: config.workspace_image.clone(),
         memory_mb: config.container_memory_mb,
         cpus: config.container_cpus,
+        scratch_mb: config.scratch_mb,
         registry: config.registry.clone(),
     })?;
     Ok(Chats::new(

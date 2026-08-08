@@ -49,6 +49,9 @@ const ROOT: u32 = 0;
 const INTERLOPER: &str = "corcode-test-interloper";
 const MEMORY_MB: u32 = 512;
 const CPUS: u32 = 1;
+/// Small enough to prove the size came from the settings rather than a
+/// default, and big enough for anything this suite writes to scratch.
+const SCRATCH_MB: u32 = 64;
 /// Long enough for an image command to have run out: the adapter reading EOF
 /// off a closed stdin took about a second to bring its container down.
 const SETTLE: Duration = Duration::from_secs(3);
@@ -494,7 +497,7 @@ fn assert_hardened(inspected: ContainerInspectResponse, workspace: &Path, claude
             .expect("the read-only rootfs needs scratch")
             .get("/tmp")
             .map(String::as_str),
-        Some("rw,nosuid,nodev,noexec,size=256m")
+        Some(format!("rw,nosuid,nodev,noexec,size={SCRATCH_MB}m").as_str())
     );
     assert_eq!(host_config.memory, Some(i64::from(MEMORY_MB) * 1024 * 1024));
     assert_eq!(
@@ -537,6 +540,7 @@ fn settings() -> PlaneSettings {
         image: TEST_IMAGE.to_owned(),
         memory_mb: MEMORY_MB,
         cpus: CPUS,
+        scratch_mb: SCRATCH_MB,
         registry: None,
     }
 }

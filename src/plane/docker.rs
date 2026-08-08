@@ -28,7 +28,6 @@ const CLAUDE_MOUNT: &str = "/home/agent/.claude";
 /// The only writable spot outside the two mounts, since the rootfs is
 /// read-only.
 const SCRATCH_MOUNT: &str = "/tmp";
-const SCRATCH_OPTIONS: &str = "rw,nosuid,nodev,noexec,size=256m";
 /// What PID 1 does for a living: nothing, until the container is torn down.
 /// The agent is started by `docker exec` (ADR-0001), so an image's own command
 /// running as PID 1 would only be a second, stdin-less adapter — one that
@@ -52,6 +51,7 @@ pub struct PlaneSettings {
     pub image: String,
     pub memory_mb: u32,
     pub cpus: u32,
+    pub scratch_mb: u32,
     pub registry: Option<RegistryCredentials>,
 }
 
@@ -312,7 +312,7 @@ fn create_body(
             readonly_rootfs: Some(true),
             tmpfs: Some(HashMap::from([(
                 SCRATCH_MOUNT.to_owned(),
-                SCRATCH_OPTIONS.to_owned(),
+                scratch_options(settings.scratch_mb),
             )])),
             memory: Some(memory),
             memory_swap: Some(memory),
@@ -322,6 +322,12 @@ fn create_body(
         }),
         ..ContainerCreateBody::default()
     })
+}
+
+/// How the scratch tmpfs is mounted at the size this deployment allows it:
+/// writable, and nothing a container could be made more dangerous by.
+fn scratch_options(scratch_mb: u32) -> String {
+    format!("rw,nosuid,nodev,noexec,size={scratch_mb}m")
 }
 
 /// A network the agents may be put on: the plane's own bridge, routing out to
