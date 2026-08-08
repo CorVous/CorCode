@@ -106,6 +106,19 @@ run_hook "$no_upstream" '{"stop_hook_active": false}'
 expect_status 'a branch with no upstream blocks the stop' 2
 expect_stderr_mentions 'the missing upstream is named in the block reason' 'upstream'
 
+head_on_origin="$(seeded_repo head-on-origin)"
+git -C "$head_on_origin" push --quiet origin main
+run_hook "$head_on_origin" '{"stop_hook_active": false}'
+expect_status 'no upstream but HEAD already on origin allows the stop' 0
+
+local_only="$(seeded_repo local-only)"
+git -C "$local_only" push --quiet origin main
+printf 'ahead\n' >>"$local_only/seed.txt"
+git -C "$local_only" commit --quiet --all -m 'A commit on no remote'
+run_hook "$local_only" '{"stop_hook_active": false}'
+expect_status 'no upstream with a commit on no remote blocks the stop' 2
+expect_stderr_mentions 'the unpushed commit is counted for a branch with no upstream' 'commit'
+
 run_hook "$tmp_root" '{"stop_hook_active": false}'
 expect_status 'a workspace that is not a git repository allows the stop' 0
 
