@@ -65,7 +65,13 @@ problems=()
 if in_workspace rev-parse --verify --quiet HEAD >/dev/null; then
   upstream="$(in_workspace rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)"
   if [ -z "$upstream" ]; then
-    problems+=('- the branch has no upstream, so none of its commits are on the remote')
+    unpushed="$(in_workspace rev-list --count HEAD --not --remotes=origin 2>/dev/null)"
+    if [[ "$unpushed" =~ ^[0-9]+$ ]]; then
+      [ "$unpushed" -eq 0 ] ||
+        problems+=("- $unpushed commit(s) are on no remote and the branch has no upstream")
+    else
+      problems+=('- the branch has no upstream and its commits could not be checked against the remote')
+    fi
   else
     unpushed="$(in_workspace rev-list --count "$upstream..HEAD")"
     [ "$unpushed" -eq 0 ] ||
