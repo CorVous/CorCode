@@ -42,6 +42,28 @@ the Dockerfile — not the image store — is the artifact to preserve.
   dotfiles. Secrets stay env-at-spawn; per-repo instructions stay in each
   repo's CLAUDE.md.
 
+## Amendment (2026-08-07): toolchain caches live on the scratch tmpfs
+
+The baked `CARGO_HOME`, npm cache and `~/.cache` all sat on paths the runtime
+mounts read-only, so the first `cargo build`, `npm install` or `pip install`
+in any chat failed on a write the toolchain could not make
+([#48](https://github.com/CorVous/CorCode/issues/48)). A container gets
+exactly two writable binds and one tmpfs (ADR-0001); the repo workspace is the
+agent's work, not a cache, so the caches go to the tmpfs:
+`CARGO_HOME`, `npm_config_cache`, `PIP_CACHE_DIR`, `XDG_CACHE_HOME` and
+`GH_CONFIG_DIR` all point under `/tmp/cache`. `RUSTUP_HOME` stays on the
+read-only rootfs — cargo reads the baked toolchain from there and writes only
+through `CARGO_HOME`.
+
+What that costs: caches die with the container, so a parked-and-resumed chat
+re-downloads its dependencies. Accepted for the MVP — a third bind is a core
+change, and this one is confined to the image. The scratch tmpfs is also
+`noexec`, which the caches do not mind (builds execute out of the workspace
+bind, where `node_modules` and `target/` live) but `cargo install` does: a
+binary it drops in `$CARGO_HOME/bin` cannot be run. Nothing persists `gh`
+config either, and nothing needs to — the agent's GitHub credential arrives
+as environment at spawn.
+
 ## Consequences
 
 - The image is fat (three toolchains) but boring: every workspace is
