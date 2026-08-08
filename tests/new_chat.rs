@@ -85,6 +85,8 @@ async fn the_workspace_a_new_chat_is_given_belongs_to_the_agent_that_will_work_i
             base_branch: "main".to_owned(),
             slug: "handed over".to_owned(),
             direct_on_base: false,
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
         })
         .await
         .expect("the chat should be created");
@@ -214,8 +216,77 @@ fn typed_into(field: &str) -> &'static str {
         "base_branch" => "main",
         "slug" => "from the console",
         "direct_on_base" => "on",
+        "env" => "EDITOR=helix",
+        "startup_script" => "echo ready",
         other => panic!("the form offers {other}, which the handler was never shown"),
     }
+}
+
+/// The form carries the two per-chat settings into the manifest: the env block
+/// parsed one KEY=VALUE a line, the script kept verbatim (issue #14).
+#[tokio::test]
+async fn the_env_block_and_startup_script_reach_the_manifest() {
+    let app = TestApp::start().await;
+
+    let response = app
+        .create(&[
+            ("repo", REPO),
+            ("base_branch", "main"),
+            ("slug", "configured"),
+            ("env", "# a note\nEDITOR=helix\nFLAGS=--set a=b c"),
+            ("startup_script", "npm ci"),
+        ])
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let manifest = app.manifest(&chat_id_of(&response));
+    assert_eq!(manifest["env"]["EDITOR"], "helix");
+    assert_eq!(
+        manifest["env"]["FLAGS"], "--set a=b c",
+        "the value should keep its spaces after the first equals"
+    );
+    assert_eq!(manifest["startup_script"], "npm ci");
+    app.stop().await;
+}
+
+/// An env block the handler cannot believe is turned away before a chat is cut,
+/// so a container is never spawned with an env it could not honour (issue #14).
+#[tokio::test]
+async fn a_malformed_env_line_is_refused_before_anything_is_built() {
+    let app = TestApp::start().await;
+
+    let response = app
+        .create(&[
+            ("repo", REPO),
+            ("base_branch", "main"),
+            ("slug", "doomed-env"),
+            ("env", "EDITOR helix"),
+        ])
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(app.chats_on_disk(), 0, "a rejected env still built a chat");
+    app.stop().await;
+}
+
+/// A user var named after a credential the core holds is turned away at the
+/// form, the fail-closed twin of the spawn-time guard (issue #14).
+#[tokio::test]
+async fn a_reserved_variable_name_is_refused_before_anything_is_built() {
+    let app = TestApp::start().await;
+
+    let response = app
+        .create(&[
+            ("repo", REPO),
+            ("base_branch", "main"),
+            ("slug", "doomed-reserved"),
+            ("env", "GH_TOKEN=mine"),
+        ])
+        .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(app.chats_on_disk(), 0, "a reserved name still built a chat");
+    app.stop().await;
 }
 
 #[tokio::test]

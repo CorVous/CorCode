@@ -226,6 +226,73 @@ async fn a_token_that_cannot_be_read_stops_the_archive_and_names_the_file() {
     assert!(!said.contains(TOKEN), "the token leaked: {said}");
 }
 
+/// A per-chat custom variable is injected into the agent container on spawn,
+/// alongside the credentials the core holds (issue #14).
+#[tokio::test]
+async fn a_container_carries_the_chats_own_custom_env() {
+    let dataset = Dataset::bootstrapped_with(Some(BOOTSTRAPPED_KEY));
+
+    let chat = dataset
+        .create_with(
+            "customised",
+            std::collections::BTreeMap::from([("EDITOR".to_owned(), "helix".to_owned())]),
+        )
+        .await;
+
+    assert_eq!(dataset.env_of(&chat, "EDITOR").as_deref(), Some("helix"));
+    assert_eq!(
+        dataset.key_of(&chat).as_deref(),
+        Some(BOOTSTRAPPED_KEY),
+        "the custom var displaced the credential the core holds"
+    );
+}
+
+/// System credentials always win a name clash: a user var named after one is
+/// dropped so the agent can never be pointed at a key the operator typed
+/// (ADR-0001, issue #14).
+#[tokio::test]
+async fn a_custom_var_never_overrides_a_system_var() {
+    let dataset = Dataset::bootstrapped_with(Some(BOOTSTRAPPED_KEY));
+    dataset.write(Secret::GithubToken, TOKEN);
+
+    let chat = dataset
+        .create_with(
+            "contained",
+            std::collections::BTreeMap::from([
+                (GH_TOKEN.to_owned(), "user-value".to_owned()),
+                (API_KEY.to_owned(), "user-key".to_owned()),
+            ]),
+        )
+        .await;
+
+    assert_eq!(
+        dataset.env_of(&chat, GH_TOKEN).as_deref(),
+        Some(TOKEN),
+        "a user var displaced the github token the core holds"
+    );
+    assert_eq!(
+        dataset.key_of(&chat).as_deref(),
+        Some(BOOTSTRAPPED_KEY),
+        "a user var displaced the anthropic key the core holds"
+    );
+}
+
+/// A chat that sets nothing spawns with exactly the credentials the core
+/// holds and no other variable (issue #14): nothing changed for the many
+/// chats that will never touch the new fields.
+#[tokio::test]
+async fn a_chat_with_no_custom_env_spawns_with_the_system_env_alone() {
+    let dataset = Dataset::bootstrapped_with(Some(BOOTSTRAPPED_KEY));
+
+    let chat = dataset.create("plain").await;
+
+    assert_eq!(
+        dataset.env_names(&chat),
+        vec![API_KEY.to_owned()],
+        "an untouched chat gained or lost a variable"
+    );
+}
+
 /// One dataset, its remote, and the secrets both are reached over.
 struct Dataset {
     chats: Chats<MemoryPlane, ScriptedAdapter>,
@@ -265,12 +332,23 @@ impl Dataset {
     }
 
     async fn create(&self, slug: &str) -> String {
+        self.create_with(slug, std::collections::BTreeMap::new())
+            .await
+    }
+
+    async fn create_with(
+        &self,
+        slug: &str,
+        env: std::collections::BTreeMap<String, String>,
+    ) -> String {
         self.chats
             .create(WantedChat {
                 repo: REPO.to_owned(),
                 base_branch: "main".to_owned(),
                 slug: slug.to_owned(),
                 direct_on_base: false,
+                env,
+                startup_script: None,
             })
             .await
             .expect("a chat should be cut")
@@ -316,6 +394,15 @@ impl Dataset {
             .expect("the chat should be holding a container")
             .get(variable)
             .cloned()
+    }
+
+    /// Every variable name the chat's container was spawned with, sorted.
+    fn env_names(&self, chat_id: &str) -> Vec<String> {
+        self.plane
+            .env_of(chat_id)
+            .expect("the chat should be holding a container")
+            .into_keys()
+            .collect()
     }
 
     fn workspace(&self, chat_id: &str) -> PathBuf {

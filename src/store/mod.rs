@@ -536,6 +536,8 @@ mod tests {
             repo: "CorVous/CorCode".to_owned(),
             branch: format!("chat/{title}"),
             base_branch: "main".to_owned(),
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
         }
     }
 
@@ -839,6 +841,35 @@ mod tests {
 
         assert_eq!(older.checkpoint_branch, None);
         assert_eq!(older.schema, MANIFEST_SCHEMA);
+    }
+
+    /// The custom env and startup script were added to schema 1 after chats
+    /// had already been written: a manifest without them is an older chat, not
+    /// damage, so it reads with no env and no script (issue #14).
+    #[test]
+    fn a_manifest_written_before_env_and_startup_script_reads_with_neither() {
+        let (_root, store) = store();
+        let manifest = store
+            .create_chat(new_chat("older"))
+            .expect("chat should be created");
+        let path = store.manifest_path(&manifest.chat_id);
+        let mut fields: Value =
+            serde_json::from_str(&fs::read_to_string(&path).expect("manifest should be readable"))
+                .expect("manifest should be json");
+        let object = fields.as_object_mut().expect("a manifest is an object");
+        object.remove("env");
+        object.remove("startup_script");
+        fs::write(&path, fields.to_string()).expect("manifest should be rewritable");
+
+        let older = store
+            .read_manifest(&manifest.chat_id)
+            .expect("an older manifest should still read");
+
+        assert!(older.env.is_empty(), "an older chat carried no env");
+        assert_eq!(
+            older.startup_script, None,
+            "an older chat carried no script"
+        );
     }
 
     #[test]

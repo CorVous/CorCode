@@ -91,3 +91,25 @@ nudge is cheaper than losing every turn to an impossible demand.
   the dataset is already trusted with transcripts.
 - The web UI's new-chat dialog needs repo, base branch, optional branch name,
   and a work-directly-on-branch toggle (UI ticket).
+
+## Amendment (2026-08-08): per-chat startup script runs inside the agent's container
+
+A chat may carry a startup script set on the new-chat form
+([#14](https://github.com/CorVous/CorCode/issues/14)). It is executed
+**inside that chat's own workspace container, as the agent (uid 1000), with
+the workspace as cwd and the chat's spawn env visible** — the same sandbox the
+agent itself runs in (ADR-0001). It is not run on the host and is handed no
+credential the agent would not already hold, so it adds no privilege: whatever
+the script can reach, the agent could reach anyway.
+
+- **Every (re)spawn runs it.** Containers are ephemeral (ADR-0002), so the
+  script runs on creation and again whenever a parked chat is spun back up,
+  before the ACP session opens and after the workspace and env are ready.
+- **Failure is non-blocking.** A non-zero exit or an exec that could not run
+  never fails the spawn; the chat still opens. The exit code and combined
+  output (truncated past 16 KiB) are written to the transcript as a core
+  notice, the operator's only record of what setup did.
+- **User env cannot shadow system vars.** Custom variables are added only
+  where they name nothing the core already set (ADR-0001), and reserved names
+  are refused at the form, so a script can never be pointed at a credential the
+  operator typed.

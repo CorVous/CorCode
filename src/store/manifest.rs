@@ -1,5 +1,7 @@
 //! The per-chat `manifest.json` (ADR-0006).
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
@@ -34,6 +36,17 @@ pub struct Manifest {
     pub checkpoint_branch: Option<String>,
     pub last_pushed_commit: Option<String>,
     pub acp_session_id: Option<String>,
+    /// Custom environment injected into the agent container on every spawn,
+    /// system credentials always winning a name clash (issue #14). Chats cut
+    /// before this field existed carry none, so a manifest without it reads as
+    /// empty rather than as a broken file.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// A shell run inside the container after the workspace and env are ready
+    /// and before the session opens, on every (re)spawn (issue #14). Chats cut
+    /// before this field existed carry none.
+    #[serde(default)]
+    pub startup_script: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_active_at: DateTime<Utc>,
 }
@@ -50,6 +63,8 @@ pub struct NewChat {
     pub repo: String,
     pub branch: String,
     pub base_branch: String,
+    pub env: BTreeMap<String, String>,
+    pub startup_script: Option<String>,
 }
 
 impl Manifest {
@@ -68,6 +83,8 @@ impl Manifest {
             checkpoint_branch: None,
             last_pushed_commit: None,
             acp_session_id: None,
+            env: new_chat.env,
+            startup_script: new_chat.startup_script,
             created_at: now,
             last_active_at: now,
         }

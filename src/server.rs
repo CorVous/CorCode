@@ -24,7 +24,7 @@ use ulid::Ulid;
 use crate::acp::AcpTransport;
 use crate::auth::gate::{Gate, SignIn};
 use crate::auth::session;
-use crate::chats::{ArchiveError, Chats, PromptError, WantedChat};
+use crate::chats::{ArchiveError, Chats, EnvError, PromptError, WantedChat, parse_env};
 use crate::config::Config;
 use crate::plane::ContainerPlane;
 use crate::secrets::{Secret, SecretsError};
@@ -294,7 +294,11 @@ where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
     T: AcpTransport + Send + Sync + 'static,
 {
-    match chats.create(form.into()).await {
+    let wanted = match form.into_wanted() {
+        Ok(wanted) => wanted,
+        Err(refusal) => return (StatusCode::BAD_REQUEST, format!("{refusal}\n")).into_response(),
+    };
+    match chats.create(wanted).await {
         Ok(chat_id) => Redirect::to(&format!("{}/{chat_id}", ui::CHATS_PATH)).into_response(),
         Err(refusal) if refusal.is_refusal() => {
             (StatusCode::BAD_REQUEST, format!("{refusal}\n")).into_response()
@@ -311,23 +315,34 @@ where
 }
 
 /// What the new-chat form submits. An unticked checkbox sends nothing at all,
-/// which is how the opt-out reads as false.
+/// which is how the opt-out reads as false. The env and script textareas send
+/// an empty string when left blank.
 #[derive(Deserialize)]
 struct NewChatForm {
     repo: String,
     base_branch: String,
     slug: String,
     direct_on_base: Option<String>,
+    #[serde(default)]
+    env: String,
+    #[serde(default)]
+    startup_script: String,
 }
 
-impl From<NewChatForm> for WantedChat {
-    fn from(form: NewChatForm) -> Self {
-        Self {
-            repo: form.repo,
-            base_branch: form.base_branch,
-            slug: form.slug,
-            direct_on_base: form.direct_on_base.is_some(),
-        }
+impl NewChatForm {
+    /// The chat this form wants, once its env block parses and validates. A
+    /// blank script textarea is no script at all (issue #14).
+    fn into_wanted(self) -> Result<WantedChat, EnvError> {
+        let env = parse_env(&self.env)?;
+        let startup_script = Some(self.startup_script).filter(|script| !script.trim().is_empty());
+        Ok(WantedChat {
+            repo: self.repo,
+            base_branch: self.base_branch,
+            slug: self.slug,
+            direct_on_base: self.direct_on_base.is_some(),
+            env,
+            startup_script,
+        })
     }
 }
 

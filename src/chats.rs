@@ -14,7 +14,7 @@ use ulid::Ulid;
 use crate::acp::{AcpError, AcpTransport, Adapter, Connection, Connections, Held, Turn};
 use crate::config::Config;
 use crate::git::{self, Remotes};
-use crate::plane::{ContainerPlane, container_name};
+use crate::plane::{ContainerPlane, ScriptRun, container_name};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
 use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
@@ -32,6 +32,12 @@ pub struct WantedChat {
     pub base_branch: String,
     pub slug: String,
     pub direct_on_base: bool,
+    /// Custom environment for the agent container, already parsed and validated
+    /// at the form (issue #14). System credentials still win a name clash at
+    /// spawn.
+    pub env: BTreeMap<String, String>,
+    /// A shell to run in the container once it is ready, or nothing.
+    pub startup_script: Option<String>,
 }
 
 /// Why a chat was not created. A refusal is the request's fault and says so;
@@ -145,11 +151,124 @@ const RESET_NOTICE: &str = "reset_notice";
 /// What a prompt that never got as far as an agent calls itself there.
 const WAKE_FAILURE: &str = "wake_failure";
 
+/// What a startup script's outcome calls itself in a chat's log (issue #14).
+const STARTUP_SCRIPT: &str = "startup_script";
+
+/// How much of a startup script's output the transcript keeps: enough to read,
+/// not so much it buries the chat (issue #14).
+const STARTUP_OUTPUT_LIMIT: usize = 16 * 1024;
+
+/// What the chat's log is told a startup script did: its exit code always, and
+/// its output when it produced any, cut to a readable length (issue #14). A
+/// clean run is a brief line; a failure names the code the operator must act on.
+fn startup_summary(run: &ScriptRun) -> String {
+    let mut told = if run.exit_code == 0 {
+        "The startup script finished (exit 0).".to_owned()
+    } else {
+        format!("The startup script exited {}.", run.exit_code)
+    };
+    let output = run.output.trim();
+    if !output.is_empty() {
+        told.push_str("\n\n");
+        told.push_str(&truncated(output));
+    }
+    told
+}
+
+/// `output` cut to the transcript's limit on a character boundary, marked when
+/// anything was dropped.
+fn truncated(output: &str) -> String {
+    if output.len() <= STARTUP_OUTPUT_LIMIT {
+        return output.to_owned();
+    }
+    let mut end = STARTUP_OUTPUT_LIMIT;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n(truncated)", &output[..end])
+}
+
 /// The names an agent's tooling reads the GitHub token from: `gh` — which the
 /// image's credential helper answers over — prefers the first, and everything
 /// else looks for the second. An agent pushes its own work (ADR-0005), so it
 /// is handed the same token the core clones and archives over.
 const GITHUB_TOKEN_VARIABLES: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
+
+/// Why a chat's custom env block could not be believed, refused before any
+/// chat is cut so a container is never spawned with an env it could not honour
+/// (issue #14). Each names what to fix.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum EnvError {
+    #[error("line {line} is not NAME=VALUE: every variable needs an '='")]
+    NoEquals { line: usize },
+    #[error("line {line} names no variable before its '='")]
+    NoName { line: usize },
+    #[error(
+        "{name} is not a usable variable name: use letters, digits and underscore, and do not start with a digit"
+    )]
+    BadName { name: String },
+    #[error("{name} is set by CorCode itself and cannot be overridden")]
+    Reserved { name: String },
+}
+
+/// Every variable name the core sets for itself, so a form can turn a colliding
+/// user var away before it would be dropped at spawn (ADR-0001). Derived from
+/// the one place each name is spelled, so the guard cannot drift from the merge.
+fn reserved_env_names() -> HashSet<String> {
+    let mut names: HashSet<String> = GITHUB_TOKEN_VARIABLES
+        .iter()
+        .map(|&n| n.to_owned())
+        .collect();
+    names.insert(AnthropicCredential::OauthToken.variable().to_owned());
+    names.insert(AnthropicCredential::ApiKey.variable().to_owned());
+    names
+}
+
+/// Whether `name` is a shell variable name: a letter or underscore, then
+/// letters, digits and underscores.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
+}
+
+/// Parse the form's env block into the variables a container is spawned with.
+///
+/// One `NAME=VALUE` per line, blank lines and lines beginning with `#` ignored,
+/// the value everything after the first `=` kept verbatim. A name that is
+/// missing, malformed, or one the core sets itself is refused (issue #14).
+pub fn parse_env(raw: &str) -> Result<BTreeMap<String, String>, EnvError> {
+    let reserved = reserved_env_names();
+    let mut env = BTreeMap::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line_number = index + 1;
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (name, value) = line
+            .split_once('=')
+            .ok_or(EnvError::NoEquals { line: line_number })?;
+        if name.is_empty() {
+            return Err(EnvError::NoName { line: line_number });
+        }
+        if !is_env_name(name) {
+            return Err(EnvError::BadName {
+                name: name.to_owned(),
+            });
+        }
+        if reserved.contains(name) {
+            return Err(EnvError::Reserved {
+                name: name.to_owned(),
+            });
+        }
+        env.insert(name.to_owned(), value.to_owned());
+    }
+    Ok(env)
+}
 
 /// The right to decide who gives a container up, held by one capping at a
 /// time.
@@ -883,6 +1002,8 @@ where
                 repo: wanted.repo.clone(),
                 branch: branch.clone(),
                 base_branch: wanted.base_branch.clone(),
+                env: wanted.env.clone(),
+                startup_script: wanted.startup_script.clone(),
             })
             .map_err(broke)?;
         let chat_id = manifest.chat_id.clone();
@@ -935,6 +1056,55 @@ where
     /// moment ago is the one the next container is spawned with, and a
     /// deployment holding none hands the agent none.
     async fn spawn(&self, chat_id: &str) -> Result<String> {
+        let manifest = self.store.read_manifest(chat_id)?;
+        let env = self.spawn_env(&manifest.env)?;
+        let container = self
+            .plane
+            .spawn(
+                chat_id,
+                &self.store.host_workspace_dir(chat_id),
+                &self.store.host_claude_dir(chat_id),
+                &env,
+            )
+            .await?
+            .name;
+        if let Some(script) = &manifest.startup_script {
+            self.run_startup_script(chat_id, script, &env).await;
+        }
+        Ok(container)
+    }
+
+    /// Run the chat's startup script in the container this spawn just started,
+    /// over the same env, and write what it did to the chat's log — every spawn
+    /// path runs it, since containers are ephemeral (issue #14).
+    ///
+    /// A script that fails does not fail the spawn: the chat still opens, and
+    /// the exit code and output are the operator's to read in the transcript.
+    async fn run_startup_script(
+        &self,
+        chat_id: &str,
+        script: &str,
+        env: &BTreeMap<String, String>,
+    ) {
+        match self.plane.run_startup_script(chat_id, script, env).await {
+            Ok(run) => self.note(chat_id, STARTUP_SCRIPT, &startup_summary(&run)),
+            Err(failure) => {
+                warn!("{chat_id} could not run its startup script: {failure:#}");
+                self.note(
+                    chat_id,
+                    STARTUP_SCRIPT,
+                    &format!("The startup script could not be run: {failure}."),
+                );
+            }
+        }
+    }
+
+    /// The container's environment: the credentials the core holds now, then
+    /// the chat's own custom variables, each added only where it names nothing
+    /// the core already set. System credentials always win a name clash, so a
+    /// user var can never point the agent at a key the operator typed
+    /// (ADR-0001).
+    fn spawn_env(&self, custom: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
         let mut env = BTreeMap::new();
         if let Some(credential) = self.secrets.read(Secret::AnthropicKey)? {
             let variable = AnthropicCredential::of(&credential).variable();
@@ -945,16 +1115,10 @@ where
                 env.insert(variable.to_owned(), token.clone());
             }
         }
-        Ok(self
-            .plane
-            .spawn(
-                chat_id,
-                &self.store.host_workspace_dir(chat_id),
-                &self.store.host_claude_dir(chat_id),
-                &env,
-            )
-            .await?
-            .name)
+        for (name, value) in custom {
+            env.entry(name.clone()).or_insert_with(|| value.clone());
+        }
+        Ok(env)
     }
 
     /// Open the ACP session, write its id into the manifest — the only trace
@@ -972,5 +1136,93 @@ where
             .hold(&manifest.chat_id, connection)
             .map_err(broke)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_value_line_becomes_one_variable() {
+        let env = parse_env("EDITOR=helix").expect("a plain line should parse");
+
+        assert_eq!(
+            env,
+            BTreeMap::from([("EDITOR".to_owned(), "helix".to_owned())])
+        );
+    }
+
+    #[test]
+    fn blank_lines_and_comments_are_ignored() {
+        let env = parse_env("\n# a note\n\nFOO=bar\n   \n# BAZ=qux\n")
+            .expect("comments and blanks should be skipped");
+
+        assert_eq!(env, BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]));
+    }
+
+    #[test]
+    fn the_value_keeps_every_equals_and_space_after_the_first() {
+        let env = parse_env("FLAGS=--set a=b  c=d ").expect("a rich value should parse");
+
+        assert_eq!(env["FLAGS"], "--set a=b  c=d ");
+    }
+
+    #[test]
+    fn a_carriage_return_ending_leaves_no_stray_byte_in_key_or_value() {
+        let env = parse_env("A=one\r\nB=two\r").expect("both endings should parse");
+
+        assert_eq!(
+            env,
+            BTreeMap::from([
+                ("A".to_owned(), "one".to_owned()),
+                ("B".to_owned(), "two".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_equals_is_refused() {
+        assert_eq!(
+            parse_env("EDITOR helix"),
+            Err(EnvError::NoEquals { line: 1 })
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_name_before_the_equals_is_refused() {
+        assert_eq!(parse_env("=orphan"), Err(EnvError::NoName { line: 1 }));
+    }
+
+    #[test]
+    fn a_name_that_breaks_the_shape_is_refused() {
+        assert_eq!(
+            parse_env("1BADNAME=x"),
+            Err(EnvError::BadName {
+                name: "1BADNAME".to_owned()
+            })
+        );
+        assert!(matches!(
+            parse_env("has space=x"),
+            Err(EnvError::BadName { .. })
+        ));
+    }
+
+    #[test]
+    fn a_name_the_core_sets_itself_is_refused() {
+        for reserved in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ] {
+            assert_eq!(
+                parse_env(&format!("{reserved}=mine")),
+                Err(EnvError::Reserved {
+                    name: reserved.to_owned()
+                }),
+                "{reserved} was not guarded"
+            );
+        }
     }
 }

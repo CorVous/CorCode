@@ -211,6 +211,14 @@ fn new_chat_form(repos: &[String]) -> String {
          <p>Branch: <output id=\"branch\">{prefix}</output></p>\
          <p><label><input type=\"checkbox\" name=\"direct_on_base\"> \
          Work directly on the base branch</label></p>\
+         <p><label>Environment <textarea name=\"env\" rows=\"3\"></textarea></label>\
+         <br><small>One KEY=VALUE per line, injected into the container. Blank \
+         lines and #comments are ignored; CorCode's own variables always \
+         win.</small></p>\
+         <p><label>Startup script <textarea name=\"startup_script\" rows=\"3\">\
+         </textarea></label><br><small>Shell run in the container after setup and \
+         before the agent, on every respawn. A non-zero exit does not block the \
+         chat.</small></p>\
          <p><button type=\"submit\">Create</button></p></form></details>",
         text(default_repo(repos)),
         suggested(repos),
@@ -321,6 +329,8 @@ mod tests {
             checkpoint_branch: None,
             last_pushed_commit: Some("abc1234".to_owned()),
             acp_session_id: None,
+            env: std::collections::BTreeMap::new(),
+            startup_script: None,
             created_at: now,
             last_active_at: now,
         };

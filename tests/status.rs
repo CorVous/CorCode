@@ -122,6 +122,8 @@ impl Dataset {
                 repo: "CorVous/CorCode".to_owned(),
                 branch: format!("chat/2026-08-05-{title}"),
                 base_branch: "main".to_owned(),
+                env: std::collections::BTreeMap::new(),
+                startup_script: None,
             })
             .expect("fixture chat should be created");
         let chat_id = manifest.chat_id.clone();

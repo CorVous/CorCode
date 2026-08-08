@@ -464,6 +464,8 @@ impl TestApp {
                 repo: "CorVous/CorCode".to_owned(),
                 branch: "chat/2026-08-05-resume-ladder".to_owned(),
                 base_branch: "main".to_owned(),
+                env: std::collections::BTreeMap::new(),
+                startup_script: None,
             })
             .expect("fixture chat should be created")
             .chat_id
