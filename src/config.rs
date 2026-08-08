@@ -379,13 +379,16 @@ mod tests {
         assert_eq!(tuned.warm_pool, 3);
     }
 
+    /// Spelled out rather than read off the constants: these are the numbers
+    /// the README publishes and the compose file writes down, and a deployment
+    /// that never sets them gets them.
     #[test]
     fn container_limits_default_when_unset() {
         let config = Config::from_vars(required_vars()).expect("defaulted environment should load");
 
-        assert_eq!(config.container_memory_mb, DEFAULT_CONTAINER_MEMORY_MB);
-        assert_eq!(config.container_cpus, DEFAULT_CONTAINER_CPUS);
-        assert_eq!(config.scratch_mb, DEFAULT_SCRATCH_MB);
+        assert_eq!(config.container_memory_mb, 4096);
+        assert_eq!(config.container_cpus, 2);
+        assert_eq!(config.scratch_mb, 1024);
         assert!(config.registry.is_none());
     }
 
