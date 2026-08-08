@@ -157,6 +157,77 @@ const WAKE_FAILURE: &str = "wake_failure";
 /// is handed the same token the core clones and archives over.
 const GITHUB_TOKEN_VARIABLES: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 
+/// Why a chat's custom env block could not be believed, refused before any
+/// chat is cut so a container is never spawned with an env it could not honour
+/// (issue #14). Each names what to fix.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum EnvError {
+    #[error("line {line} is not NAME=VALUE: every variable needs an '='")]
+    NoEquals { line: usize },
+    #[error("line {line} names no variable before its '='")]
+    NoName { line: usize },
+    #[error(
+        "{name} is not a usable variable name: use letters, digits and underscore, and do not start with a digit"
+    )]
+    BadName { name: String },
+    #[error("{name} is set by CorCode itself and cannot be overridden")]
+    Reserved { name: String },
+}
+
+/// Every variable name the core sets for itself, so a form can turn a colliding
+/// user var away before it would be dropped at spawn (ADR-0001). Derived from
+/// the one place each name is spelled, so the guard cannot drift from the merge.
+fn reserved_env_names() -> HashSet<String> {
+    let mut names: HashSet<String> = GITHUB_TOKEN_VARIABLES.iter().map(|&n| n.to_owned()).collect();
+    names.insert(AnthropicCredential::OauthToken.variable().to_owned());
+    names.insert(AnthropicCredential::ApiKey.variable().to_owned());
+    names
+}
+
+/// Whether `name` is a shell variable name: a letter or underscore, then
+/// letters, digits and underscores.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
+}
+
+/// Parse the form's env block: one `NAME=VALUE` per line, blank lines and lines
+/// beginning with `#` ignored, the value everything after the first `=` kept
+/// verbatim. A name that is missing, malformed, or one the core sets itself is
+/// refused (issue #14).
+pub fn parse_env(raw: &str) -> Result<BTreeMap<String, String>, EnvError> {
+    let reserved = reserved_env_names();
+    let mut env = BTreeMap::new();
+    for (index, line) in raw.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (name, value) = line
+            .split_once('=')
+            .ok_or(EnvError::NoEquals { line: line_number })?;
+        if name.is_empty() {
+            return Err(EnvError::NoName { line: line_number });
+        }
+        if !is_env_name(name) {
+            return Err(EnvError::BadName {
+                name: name.to_owned(),
+            });
+        }
+        if reserved.contains(name) {
+            return Err(EnvError::Reserved {
+                name: name.to_owned(),
+            });
+        }
+        env.insert(name.to_owned(), value.to_owned());
+    }
+    Ok(env)
+}
+
 /// The right to decide who gives a container up, held by one capping at a
 /// time.
 type ParkingLock = tokio::sync::Mutex<()>;
@@ -994,5 +1065,69 @@ where
             .hold(&manifest.chat_id, connection)
             .map_err(broke)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_value_line_becomes_one_variable() {
+        let env = parse_env("EDITOR=helix").expect("a plain line should parse");
+
+        assert_eq!(env, BTreeMap::from([("EDITOR".to_owned(), "helix".to_owned())]));
+    }
+
+    #[test]
+    fn blank_lines_and_comments_are_ignored() {
+        let env = parse_env("\n# a note\n\nFOO=bar\n   \n# BAZ=qux\n")
+            .expect("comments and blanks should be skipped");
+
+        assert_eq!(env, BTreeMap::from([("FOO".to_owned(), "bar".to_owned())]));
+    }
+
+    #[test]
+    fn the_value_keeps_every_equals_and_space_after_the_first() {
+        let env = parse_env("FLAGS=--set a=b  c=d ").expect("a rich value should parse");
+
+        assert_eq!(env["FLAGS"], "--set a=b  c=d ");
+    }
+
+    #[test]
+    fn a_line_with_no_equals_is_refused() {
+        assert_eq!(parse_env("EDITOR helix"), Err(EnvError::NoEquals { line: 1 }));
+    }
+
+    #[test]
+    fn a_line_with_no_name_before_the_equals_is_refused() {
+        assert_eq!(parse_env("=orphan"), Err(EnvError::NoName { line: 1 }));
+    }
+
+    #[test]
+    fn a_name_that_breaks_the_shape_is_refused() {
+        assert_eq!(
+            parse_env("1BADNAME=x"),
+            Err(EnvError::BadName {
+                name: "1BADNAME".to_owned()
+            })
+        );
+        assert!(matches!(
+            parse_env("has space=x"),
+            Err(EnvError::BadName { .. })
+        ));
+    }
+
+    #[test]
+    fn a_name_the_core_sets_itself_is_refused() {
+        for reserved in ["GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY"] {
+            assert_eq!(
+                parse_env(&format!("{reserved}=mine")),
+                Err(EnvError::Reserved {
+                    name: reserved.to_owned()
+                }),
+                "{reserved} was not guarded"
+            );
+        }
     }
 }
