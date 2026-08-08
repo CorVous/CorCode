@@ -77,9 +77,15 @@ ENV CARGO_HOME=/tmp/cache/cargo \
     XDG_CACHE_HOME=/tmp/cache/xdg \
     GH_CONFIG_DIR=/tmp/cache/gh
 
+# The agent pushes its own commits (ADR-0005) over the token the core spawns
+# it with. gh turns that token into a credential; the helper is scoped to
+# github.com so no other host is ever offered one, the way the core splices a
+# token into github.com URLs and nothing else. A container spawned without the
+# token answers nothing here, and the stop hook stands down.
 RUN git config --global user.name 'Cor' \
  && git config --global user.email 'birb@cor.gg' \
- && git config --global --add safe.directory /workspace
+ && git config --global --add safe.directory /workspace \
+ && git config --global 'credential.https://github.com.helper' '!gh auth git-credential'
 
 WORKDIR /workspace
 CMD ["claude-agent-acp"]

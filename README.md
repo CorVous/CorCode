@@ -44,6 +44,7 @@ Serving (the default action) reads its configuration from the environment:
 | `CORCODE_BIND_ADDR`         | no       | `0.0.0.0:8080` |
 | `CORCODE_CONTAINER_MEMORY_MB` | no     | `4096`         |
 | `CORCODE_CONTAINER_CPUS`    | no       | `2`            |
+| `CORCODE_SCRATCH_MB`        | no       | `1024`         |
 | `CORCODE_WARM_POOL`         | no       | `2`            |
 | `CORCODE_REGISTRY_USER`     | no       | -              |
 | `CORCODE_REGISTRY_TOKEN`    | no       | -              |
@@ -54,12 +55,20 @@ Serving (the default action) reads its configuration from the environment:
 suggests, first entry the default; a chat can be cut from any other
 `owner/name` repository, or from any `https://` clone URL, by typing it in.
 `CORCODE_GITHUB_TOKEN` clones private repositories and pushes at archive, and
-reaches github.com and no other host; `CORCODE_ANTHROPIC_API_KEY` takes either
-an API key, which reaches the agent as `ANTHROPIC_API_KEY`, or an `sk-ant-oat`
-subscription token, which reaches it as `CLAUDE_CODE_OAUTH_TOKEN`, and the
-settings panel holds one too. `CORCODE_WARM_POOL` is how many chats keep a
+reaches github.com and no other host. Agents push their own commits, so it is
+also handed to each workspace container as `GH_TOKEN` and `GITHUB_TOKEN`,
+where the image's credential helper answers github.com with it and nothing
+else. `CORCODE_ANTHROPIC_API_KEY` takes either an API key, which reaches the
+agent as `ANTHROPIC_API_KEY`, or an `sk-ant-oat` subscription token, which
+reaches it as `CLAUDE_CODE_OAUTH_TOKEN`, and the settings panel holds one too. `CORCODE_WARM_POOL` is how many chats keep a
 container: the rest are parked, workspaces kept. A chat taking a turn keeps
 its container until the turn ends, so the pool can sit one over its size.
+
+`CORCODE_SCRATCH_MB` sizes the scratch tmpfs an agent's toolchain caches live
+on — a cargo registry alone runs to hundreds of megabytes, and a build that
+outgrows the tmpfs fails on `ENOSPC`. A tmpfs is memory: what it holds is
+charged to `CORCODE_CONTAINER_MEMORY_MB`, so the two are raised together and a
+scratch as large as the ceiling leaves the agent nothing to run in.
 
 `CORCODE_HOST_DATA_DIR` is the dataset root as the Docker daemon sees it,
 which differs from `CORCODE_DATA_DIR` when the core is itself containerised:

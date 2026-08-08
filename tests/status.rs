@@ -13,7 +13,8 @@ use tempfile::TempDir;
 use cor_code::acp::ScriptedAdapter;
 use cor_code::chats::Chats;
 use cor_code::config::{
-    Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_WARM_POOL,
+    Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_SCRATCH_MB,
+    DEFAULT_WARM_POOL,
 };
 use cor_code::git::{GITHUB, Remotes};
 use cor_code::plane::{ContainerPlane as _, MemoryPlane};
@@ -175,6 +176,7 @@ fn config(data_dir: &Path) -> Config {
         workspace_image: IMAGE.to_owned(),
         container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
         container_cpus: DEFAULT_CONTAINER_CPUS,
+        scratch_mb: DEFAULT_SCRATCH_MB,
         warm_pool: DEFAULT_WARM_POOL,
         registry: None,
         repos: vec!["CorVous/CorCode".to_owned()],

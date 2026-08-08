@@ -18,7 +18,9 @@ use ulid::Ulid;
 
 use cor_code::acp::ScriptedAdapter;
 use cor_code::chats::{ArchiveError, Chats, WantedChat};
-use cor_code::config::{Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB};
+use cor_code::config::{
+    Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_SCRATCH_MB,
+};
 use cor_code::git::Remotes;
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::{Secret, Secrets};
@@ -33,6 +35,11 @@ const API_KEY: &str = "ANTHROPIC_API_KEY";
 
 /// The variable it reads a subscription token from instead.
 const OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// The variable `gh` reads the GitHub token from, and the one everything else
+/// looks for (ADR-0005).
+const GH_TOKEN: &str = "GH_TOKEN";
+const GITHUB_TOKEN: &str = "GITHUB_TOKEN";
 
 const BOOTSTRAPPED_KEY: &str = "sk-ant-bootstrapped";
 const ROTATED_KEY: &str = "sk-ant-rotated";
@@ -101,6 +108,73 @@ async fn a_rotated_key_reaches_the_next_container() {
         dataset.key_of(&before).as_deref(),
         Some(BOOTSTRAPPED_KEY),
         "a container already up was somehow handed the new key"
+    );
+}
+
+/// The agent pushes its own commits (ADR-0005), so the container is handed the
+/// token under both names its tooling looks for: `gh` prefers one and
+/// everything else the other.
+#[tokio::test]
+async fn a_container_is_spawned_with_the_github_token_under_both_the_names_its_tools_read() {
+    let dataset = Dataset::bootstrapped_with(None);
+    dataset.write(Secret::GithubToken, TOKEN);
+
+    let chat = dataset.create("credentialed").await;
+
+    assert_eq!(dataset.env_of(&chat, GH_TOKEN).as_deref(), Some(TOKEN));
+    assert_eq!(dataset.env_of(&chat, GITHUB_TOKEN).as_deref(), Some(TOKEN));
+}
+
+/// A deployment holding no token spawns an agent that holds none either: the
+/// image's credential helper then answers nothing and the stop hook stands
+/// down (ADR-0005), which is only true while neither name is set to anything.
+#[tokio::test]
+async fn a_container_spawned_where_no_github_token_is_held_carries_neither_name() {
+    let dataset = Dataset::bootstrapped_with(Some(BOOTSTRAPPED_KEY));
+
+    let chat = dataset.create("tokenless").await;
+
+    assert_eq!(dataset.env_of(&chat, GH_TOKEN), None);
+    assert_eq!(dataset.env_of(&chat, GITHUB_TOKEN), None);
+}
+
+#[tokio::test]
+async fn a_rotated_github_token_reaches_the_next_container() {
+    let dataset = Dataset::bootstrapped_with(None);
+    dataset.write(Secret::GithubToken, TOKEN);
+    let before = dataset.create("before").await;
+
+    dataset.write(Secret::GithubToken, ROTATED_TOKEN);
+    let after = dataset.create("after").await;
+
+    assert_eq!(
+        dataset.env_of(&after, GH_TOKEN).as_deref(),
+        Some(ROTATED_TOKEN),
+        "the container was spawned with the token the core booted with"
+    );
+    assert_eq!(
+        dataset.env_of(&before, GH_TOKEN).as_deref(),
+        Some(TOKEN),
+        "a container already up was somehow handed the new token"
+    );
+}
+
+/// Cutting a chat hands the token to a container and writes a great deal to
+/// the dataset — the manifest, the event log, a workspace tree with its own
+/// git config — and none of that is a place a token belongs. What the clone
+/// URL itself carries is `git`'s to answer for, and does:
+/// `a_token_rides_in_the_url_and_nowhere_else`.
+#[tokio::test]
+async fn a_chat_cut_over_a_token_writes_it_nowhere_on_the_dataset() {
+    let dataset = Dataset::bootstrapped_with(None);
+    dataset.write(Secret::GithubToken, TOKEN);
+
+    dataset.create("contained").await;
+
+    assert_eq!(
+        dataset.dataset_files_holding(TOKEN),
+        Vec::<PathBuf>::new(),
+        "the token was written where the agent, or anyone reading the dataset, can find it"
     );
 }
 
@@ -248,6 +322,31 @@ impl Dataset {
         self.data_dir.path().join("workspaces").join(chat_id)
     }
 
+    /// Every file on the dataset spelling `secret` out, but for the secrets
+    /// directory, which is the one place a secret is kept.
+    fn dataset_files_holding(&self, secret: &str) -> Vec<PathBuf> {
+        let mut holding = Vec::new();
+        let mut looking = vec![self.data_dir.path().to_path_buf()];
+        while let Some(dir) = looking.pop() {
+            if dir == self.secrets_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&dir).expect("the dataset should be readable") {
+                let path = entry.expect("an entry should be readable").path();
+                if path.is_dir() {
+                    looking.push(path);
+                } else if fs::read(&path)
+                    .expect("a dataset file should be readable")
+                    .windows(secret.len())
+                    .any(|window| window == secret.as_bytes())
+                {
+                    holding.push(path);
+                }
+            }
+        }
+        holding
+    }
+
     fn branches_on_the_remote(&self) -> String {
         git_says(
             &self.origin.path().join(BARE),
@@ -315,6 +414,7 @@ fn test_config(data_dir: PathBuf, anthropic_api_key: Option<&str>) -> Config {
         workspace_image: "ghcr.io/corvous/corcode-workspace:2026-08-05".to_owned(),
         container_memory_mb: DEFAULT_CONTAINER_MEMORY_MB,
         container_cpus: DEFAULT_CONTAINER_CPUS,
+        scratch_mb: DEFAULT_SCRATCH_MB,
         warm_pool: 2,
         registry: None,
         repos: vec![REPO.to_owned()],

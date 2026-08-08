@@ -28,11 +28,19 @@ services:
       CORCODE_WARM_POOL: "2"
       CORCODE_CONTAINER_MEMORY_MB: "4096"
       CORCODE_CONTAINER_CPUS: "2"
+      # The agent's scratch tmpfs, where its toolchain caches live: a cargo
+      # registry alone runs to hundreds of megabytes. A tmpfs is memory, and
+      # what it holds is charged to CORCODE_CONTAINER_MEMORY_MB above — a
+      # scratch as large as the ceiling leaves the agent nothing to run in.
+      CORCODE_SCRATCH_MB: "1024"
       # Pulls the workspace image from GHCR: a GitHub username and a
       # classic token carrying read:packages.
       CORCODE_REGISTRY_USER: REPLACE_WITH_YOUR_GITHUB_USERNAME
       CORCODE_REGISTRY_TOKEN: REPLACE_WITH_A_READ_PACKAGES_TOKEN
-      # Clones private repositories and pushes at archive.
+      # Clones private repositories and pushes at archive, and is handed to
+      # each agent so it can push its own commits: inside the container it is
+      # GH_TOKEN and GITHUB_TOKEN, and the image answers github.com with it
+      # and no other host.
       CORCODE_GITHUB_TOKEN: REPLACE_WITH_A_REPO_SCOPED_TOKEN
       # Either an API key, which reaches the agent as ANTHROPIC_API_KEY, or a
       # Claude subscription token, which reaches it as

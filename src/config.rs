@@ -18,6 +18,9 @@ pub const DEFAULT_CONTAINER_MEMORY_MB: u32 = 4096;
 /// CPU ceiling of a workspace container when `CORCODE_CONTAINER_CPUS` is
 /// unset.
 pub const DEFAULT_CONTAINER_CPUS: u32 = 2;
+/// Size of a workspace container's scratch tmpfs when `CORCODE_SCRATCH_MB` is
+/// unset — room for the toolchain caches that live on it (ADR-0004).
+pub const DEFAULT_SCRATCH_MB: u32 = 1024;
 /// How many chats keep a container when `CORCODE_WARM_POOL` is unset
 /// (ADR-0002: a cap, and no TTL behind it).
 pub const DEFAULT_WARM_POOL: usize = 2;
@@ -69,6 +72,10 @@ pub struct Config {
     pub container_memory_mb: u32,
     /// CPU ceiling of one workspace container (ADR-0001).
     pub container_cpus: u32,
+    /// Size of the scratch tmpfs a workspace container writes its toolchain
+    /// caches to (ADR-0004). It is memory, and it is spent out of
+    /// `container_memory_mb`.
+    pub scratch_mb: u32,
     /// How many chats keep a live container at once (ADR-0002).
     pub warm_pool: usize,
     /// Login for the registry holding the workspace image (ADR-0009).
@@ -117,6 +124,7 @@ impl Config {
                 DEFAULT_CONTAINER_MEMORY_MB,
             )?,
             container_cpus: number(&vars, "CORCODE_CONTAINER_CPUS", DEFAULT_CONTAINER_CPUS)?,
+            scratch_mb: scratch_mb(&vars)?,
             warm_pool: number(&vars, "CORCODE_WARM_POOL", DEFAULT_WARM_POOL)?,
             registry: registry(&vars)?,
             repos: repos(&vars)?,
@@ -152,6 +160,16 @@ where
             .parse()
             .with_context(|| format!("{key} is not a whole number: {value}"))
     })
+}
+
+/// How big the scratch tmpfs may grow. A tmpfs asked for `size=0m` is not a
+/// tmpfs with no room in it — it is one with no limit at all, which is the
+/// opposite of what a deployment writing 0 is asking for.
+fn scratch_mb(vars: &HashMap<String, String>) -> Result<u32> {
+    match number(vars, "CORCODE_SCRATCH_MB", DEFAULT_SCRATCH_MB)? {
+        0 => bail!("CORCODE_SCRATCH_MB must be at least 1: a scratch of 0 has no limit at all"),
+        megabytes => Ok(megabytes),
+    }
 }
 
 /// The repositories the new-chat form suggests. Each is checked here rather
@@ -198,6 +216,7 @@ impl fmt::Debug for Config {
             .field("workspace_image", &self.workspace_image)
             .field("container_memory_mb", &self.container_memory_mb)
             .field("container_cpus", &self.container_cpus)
+            .field("scratch_mb", &self.scratch_mb)
             .field("warm_pool", &self.warm_pool)
             .field("registry", &self.registry)
             .field("repos", &self.repos)
@@ -370,12 +389,16 @@ mod tests {
         assert_eq!(tuned.warm_pool, 3);
     }
 
+    /// Spelled out rather than read off the constants: these are the numbers
+    /// the README publishes and the compose file writes down, and a deployment
+    /// that never sets them gets them.
     #[test]
     fn container_limits_default_when_unset() {
         let config = Config::from_vars(required_vars()).expect("defaulted environment should load");
 
-        assert_eq!(config.container_memory_mb, DEFAULT_CONTAINER_MEMORY_MB);
-        assert_eq!(config.container_cpus, DEFAULT_CONTAINER_CPUS);
+        assert_eq!(config.container_memory_mb, 4096);
+        assert_eq!(config.container_cpus, 2);
+        assert_eq!(config.scratch_mb, 1024);
         assert!(config.registry.is_none());
     }
 
@@ -384,11 +407,28 @@ mod tests {
         let mut vars = required_vars();
         vars.push(("CORCODE_CONTAINER_MEMORY_MB".to_owned(), "8192".to_owned()));
         vars.push(("CORCODE_CONTAINER_CPUS".to_owned(), "6".to_owned()));
+        vars.push(("CORCODE_SCRATCH_MB".to_owned(), "2048".to_owned()));
 
         let config = Config::from_vars(vars).expect("tuned environment should load");
 
         assert_eq!(config.container_memory_mb, 8192);
         assert_eq!(config.container_cpus, 6);
+        assert_eq!(config.scratch_mb, 2048);
+    }
+
+    /// `size=0m` is how a tmpfs is asked for no limit at all, so a deployment
+    /// that means "no scratch" would get an unbounded one.
+    #[test]
+    fn a_scratch_of_no_size_is_refused_rather_than_read_as_no_limit() {
+        let mut vars = required_vars();
+        vars.push(("CORCODE_SCRATCH_MB".to_owned(), "0".to_owned()));
+
+        let error = Config::from_vars(vars).expect_err("a scratch of no size should fail");
+
+        assert!(
+            format!("{error:#}").contains("CORCODE_SCRATCH_MB"),
+            "error should name the offending variable, got: {error:#}"
+        );
     }
 
     #[test]
