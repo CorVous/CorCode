@@ -943,16 +943,8 @@ where
     /// moment ago is the one the next container is spawned with, and a
     /// deployment holding none hands the agent none.
     async fn spawn(&self, chat_id: &str) -> Result<String> {
-        let mut env = BTreeMap::new();
-        if let Some(credential) = self.secrets.read(Secret::AnthropicKey)? {
-            let variable = AnthropicCredential::of(&credential).variable();
-            env.insert(variable.to_owned(), credential);
-        }
-        if let Some(token) = self.secrets.read(Secret::GithubToken)? {
-            for variable in GITHUB_TOKEN_VARIABLES {
-                env.insert(variable.to_owned(), token.clone());
-            }
-        }
+        let manifest = self.store.read_manifest(chat_id)?;
+        let env = self.spawn_env(&manifest.env)?;
         Ok(self
             .plane
             .spawn(
@@ -963,6 +955,28 @@ where
             )
             .await?
             .name)
+    }
+
+    /// The container's environment: the credentials the core holds now, then
+    /// the chat's own custom variables, each added only where it names nothing
+    /// the core already set. System credentials always win a name clash, so a
+    /// user var can never point the agent at a key the operator typed
+    /// (ADR-0001).
+    fn spawn_env(&self, custom: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
+        let mut env = BTreeMap::new();
+        if let Some(credential) = self.secrets.read(Secret::AnthropicKey)? {
+            let variable = AnthropicCredential::of(&credential).variable();
+            env.insert(variable.to_owned(), credential);
+        }
+        if let Some(token) = self.secrets.read(Secret::GithubToken)? {
+            for variable in GITHUB_TOKEN_VARIABLES {
+                env.insert(variable.to_owned(), token.clone());
+            }
+        }
+        for (name, value) in custom {
+            env.entry(name.clone()).or_insert_with(|| value.clone());
+        }
+        Ok(env)
     }
 
     /// Open the ACP session, write its id into the manifest — the only trace
