@@ -55,6 +55,17 @@ jobs:
             --volume "$PWD/docker/workspace/tests:/tests:ro" \
             "$IMAGE:candidate" bash /tests/toolchain-cache.sh
 
+      - name: Answer github.com for the container's token, and no other host
+        run: |
+          set -euo pipefail
+          workspace="$(mktemp -d)" && chmod 0777 "$workspace"
+          claude="$(mktemp -d)" && chmod 0777 "$claude"
+          docker run --rm $HARDENED \
+            --volume "$workspace:/workspace" \
+            --volume "$claude:/home/agent/.claude" \
+            --volume "$PWD/docker/workspace/tests:/tests:ro" \
+            "$IMAGE:candidate" bash /tests/git-credential.sh
+
       - name: Resolve the baked settings to auto mode
         run: |
           set -euo pipefail
