@@ -112,6 +112,15 @@ elsewhere="$(workspace_on elsewhere "$foreign")"
 expect_hook_status 'the stop hook stands down over a host the token never reaches' \
   "$(hook_status_over "$elsewhere" "GH_TOKEN=$token")" 0
 
+# An askpass answers where a person would have been asked, and no one is here
+# to be asked. Whatever it says, the container still cannot push.
+askpass="$tmp_root/askpass"
+printf '#!/usr/bin/env bash\nprintf %%s\\\\n what-a-person-would-type\n' >"$askpass"
+chmod +x "$askpass"
+prompted="$(workspace_on prompted "$github")"
+expect_hook_status 'the stop hook stands down where only a prompt would answer' \
+  "$(hook_status_over "$prompted" --unset=GH_TOKEN --unset=GITHUB_TOKEN "GIT_ASKPASS=$askpass")" 0
+
 if [ "$failures" -gt 0 ]; then
   printf '%d check(s) failed\n' "$failures" >&2
   exit 1
