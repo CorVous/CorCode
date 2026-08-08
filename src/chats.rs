@@ -14,7 +14,7 @@ use ulid::Ulid;
 use crate::acp::{AcpError, AcpTransport, Adapter, Connection, Connections, Held, Turn};
 use crate::config::Config;
 use crate::git::{self, Remotes};
-use crate::plane::{ContainerPlane, container_name};
+use crate::plane::{ContainerPlane, ScriptRun, container_name};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
 use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
@@ -151,6 +151,43 @@ const RESET_NOTICE: &str = "reset_notice";
 /// What a prompt that never got as far as an agent calls itself there.
 const WAKE_FAILURE: &str = "wake_failure";
 
+/// What a startup script's outcome calls itself in a chat's log (issue #14).
+const STARTUP_SCRIPT: &str = "startup_script";
+
+/// How much of a startup script's output the transcript keeps: enough to read,
+/// not so much it buries the chat (issue #14).
+const STARTUP_OUTPUT_LIMIT: usize = 16 * 1024;
+
+/// What the chat's log is told a startup script did: its exit code always, and
+/// its output when it produced any, cut to a readable length (issue #14). A
+/// clean run is a brief line; a failure names the code the operator must act on.
+fn startup_summary(run: &ScriptRun) -> String {
+    let mut told = if run.exit_code == 0 {
+        "The startup script finished (exit 0).".to_owned()
+    } else {
+        format!("The startup script exited {}.", run.exit_code)
+    };
+    let output = run.output.trim();
+    if !output.is_empty() {
+        told.push_str("\n\n");
+        told.push_str(&truncated(output));
+    }
+    told
+}
+
+/// `output` cut to the transcript's limit on a character boundary, marked when
+/// anything was dropped.
+fn truncated(output: &str) -> String {
+    if output.len() <= STARTUP_OUTPUT_LIMIT {
+        return output.to_owned();
+    }
+    let mut end = STARTUP_OUTPUT_LIMIT;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n(truncated)", &output[..end])
+}
+
 /// The names an agent's tooling reads the GitHub token from: `gh` — which the
 /// image's credential helper answers over — prefers the first, and everything
 /// else looks for the second. An agent pushes its own work (ADR-0005), so it
@@ -178,7 +215,10 @@ pub enum EnvError {
 /// user var away before it would be dropped at spawn (ADR-0001). Derived from
 /// the one place each name is spelled, so the guard cannot drift from the merge.
 fn reserved_env_names() -> HashSet<String> {
-    let mut names: HashSet<String> = GITHUB_TOKEN_VARIABLES.iter().map(|&n| n.to_owned()).collect();
+    let mut names: HashSet<String> = GITHUB_TOKEN_VARIABLES
+        .iter()
+        .map(|&n| n.to_owned())
+        .collect();
     names.insert(AnthropicCredential::OauthToken.variable().to_owned());
     names.insert(AnthropicCredential::ApiKey.variable().to_owned());
     names
@@ -194,10 +234,11 @@ fn is_env_name(name: &str) -> bool {
         && chars.all(|char| char.is_ascii_alphanumeric() || char == '_')
 }
 
-/// Parse the form's env block: one `NAME=VALUE` per line, blank lines and lines
-/// beginning with `#` ignored, the value everything after the first `=` kept
-/// verbatim. A name that is missing, malformed, or one the core sets itself is
-/// refused (issue #14).
+/// Parse the form's env block into the variables a container is spawned with.
+///
+/// One `NAME=VALUE` per line, blank lines and lines beginning with `#` ignored,
+/// the value everything after the first `=` kept verbatim. A name that is
+/// missing, malformed, or one the core sets itself is refused (issue #14).
 pub fn parse_env(raw: &str) -> Result<BTreeMap<String, String>, EnvError> {
     let reserved = reserved_env_names();
     let mut env = BTreeMap::new();
@@ -1016,7 +1057,7 @@ where
     async fn spawn(&self, chat_id: &str) -> Result<String> {
         let manifest = self.store.read_manifest(chat_id)?;
         let env = self.spawn_env(&manifest.env)?;
-        Ok(self
+        let container = self
             .plane
             .spawn(
                 chat_id,
@@ -1025,7 +1066,36 @@ where
                 &env,
             )
             .await?
-            .name)
+            .name;
+        if let Some(script) = &manifest.startup_script {
+            self.run_startup_script(chat_id, script, &env).await;
+        }
+        Ok(container)
+    }
+
+    /// Run the chat's startup script in the container this spawn just started,
+    /// over the same env, and write what it did to the chat's log — every spawn
+    /// path runs it, since containers are ephemeral (issue #14).
+    ///
+    /// A script that fails does not fail the spawn: the chat still opens, and
+    /// the exit code and output are the operator's to read in the transcript.
+    async fn run_startup_script(
+        &self,
+        chat_id: &str,
+        script: &str,
+        env: &BTreeMap<String, String>,
+    ) {
+        match self.plane.run_startup_script(chat_id, script, env).await {
+            Ok(run) => self.note(chat_id, STARTUP_SCRIPT, &startup_summary(&run)),
+            Err(failure) => {
+                warn!("{chat_id} could not run its startup script: {failure:#}");
+                self.note(
+                    chat_id,
+                    STARTUP_SCRIPT,
+                    &format!("The startup script could not be run: {failure}."),
+                );
+            }
+        }
     }
 
     /// The container's environment: the credentials the core holds now, then
@@ -1076,7 +1146,10 @@ mod tests {
     fn a_key_value_line_becomes_one_variable() {
         let env = parse_env("EDITOR=helix").expect("a plain line should parse");
 
-        assert_eq!(env, BTreeMap::from([("EDITOR".to_owned(), "helix".to_owned())]));
+        assert_eq!(
+            env,
+            BTreeMap::from([("EDITOR".to_owned(), "helix".to_owned())])
+        );
     }
 
     #[test]
@@ -1096,7 +1169,10 @@ mod tests {
 
     #[test]
     fn a_line_with_no_equals_is_refused() {
-        assert_eq!(parse_env("EDITOR helix"), Err(EnvError::NoEquals { line: 1 }));
+        assert_eq!(
+            parse_env("EDITOR helix"),
+            Err(EnvError::NoEquals { line: 1 })
+        );
     }
 
     #[test]

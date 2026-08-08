@@ -334,8 +334,7 @@ impl NewChatForm {
     /// blank script textarea is no script at all (issue #14).
     fn into_wanted(self) -> Result<WantedChat, EnvError> {
         let env = parse_env(&self.env)?;
-        let startup_script = Some(self.startup_script)
-            .filter(|script| !script.trim().is_empty());
+        let startup_script = Some(self.startup_script).filter(|script| !script.trim().is_empty());
         Ok(WantedChat {
             repo: self.repo,
             base_branch: self.base_branch,

@@ -332,7 +332,8 @@ impl Dataset {
     }
 
     async fn create(&self, slug: &str) -> String {
-        self.create_with(slug, std::collections::BTreeMap::new()).await
+        self.create_with(slug, std::collections::BTreeMap::new())
+            .await
     }
 
     async fn create_with(

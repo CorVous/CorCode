@@ -866,7 +866,10 @@ mod tests {
             .expect("an older manifest should still read");
 
         assert!(older.env.is_empty(), "an older chat carried no env");
-        assert_eq!(older.startup_script, None, "an older chat carried no script");
+        assert_eq!(
+            older.startup_script, None,
+            "an older chat carried no script"
+        );
     }
 
     #[test]
