@@ -124,7 +124,7 @@ impl Config {
                 DEFAULT_CONTAINER_MEMORY_MB,
             )?,
             container_cpus: number(&vars, "CORCODE_CONTAINER_CPUS", DEFAULT_CONTAINER_CPUS)?,
-            scratch_mb: number(&vars, "CORCODE_SCRATCH_MB", DEFAULT_SCRATCH_MB)?,
+            scratch_mb: scratch_mb(&vars)?,
             warm_pool: number(&vars, "CORCODE_WARM_POOL", DEFAULT_WARM_POOL)?,
             registry: registry(&vars)?,
             repos: repos(&vars)?,
@@ -160,6 +160,16 @@ where
             .parse()
             .with_context(|| format!("{key} is not a whole number: {value}"))
     })
+}
+
+/// How big the scratch tmpfs may grow. A tmpfs asked for `size=0m` is not a
+/// tmpfs with no room in it — it is one with no limit at all, which is the
+/// opposite of what a deployment writing 0 is asking for.
+fn scratch_mb(vars: &HashMap<String, String>) -> Result<u32> {
+    match number(vars, "CORCODE_SCRATCH_MB", DEFAULT_SCRATCH_MB)? {
+        0 => bail!("CORCODE_SCRATCH_MB must be at least 1: a scratch of 0 has no limit at all"),
+        megabytes => Ok(megabytes),
+    }
 }
 
 /// The repositories the new-chat form suggests. Each is checked here rather
