@@ -924,6 +924,43 @@ mod tests {
         assert!(fragment.contains("<p>on it</p>"));
     }
 
+    /// What a live chat asks for between resyncs is only what it has not seen
+    /// yet, so a long transcript is not re-sent every couple of seconds.
+    #[test]
+    fn the_hot_log_is_the_tail_from_an_index_on_and_polls_for_the_next() {
+        let events = log(&[
+            outbound_prompt("ship it"),
+            chunk("agent_message_chunk", "on it"),
+        ]);
+
+        let fragment = hot_log(CHAT_ID, &events, 1);
+
+        assert!(
+            fragment.contains("<p>on it</p>") && !fragment.contains("ship it"),
+            "the hot region is not the tail alone: {fragment}"
+        );
+        assert!(
+            fragment.contains("id=\"log-hot\"")
+                && fragment.contains(&format!("hx-get=\"{}?from=1\"", chat_events_path(CHAT_ID)))
+                && fragment.contains("hx-trigger=\"every 2s\""),
+            "the hot region does not poll on for what comes next: {fragment}"
+        );
+    }
+
+    /// A page that has already read the whole log asks from past its end, and
+    /// keeps polling from there.
+    #[test]
+    fn a_hot_log_asked_from_past_the_end_is_empty_rather_than_a_panic() {
+        let events = log(&[chunk("agent_message_chunk", "on it")]);
+
+        let fragment = hot_log(CHAT_ID, &events, 9);
+
+        assert!(
+            fragment.contains("id=\"log-hot\"") && !fragment.contains("on it"),
+            "asking past the end did not give an empty region: {fragment}"
+        );
+    }
+
     #[test]
     fn the_chat_page_carries_the_log_and_the_script_that_polls_it() {
         let manifest = manifest(RuntimeStatus::Live);

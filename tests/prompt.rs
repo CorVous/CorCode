@@ -126,6 +126,32 @@ async fn a_prompt_lands_on_disk_and_in_the_log_the_browser_reads() {
     app.stop().await;
 }
 
+/// A poll that says where it got to is answered with the tail from there,
+/// while a poll that says nothing still gets the whole log (ADR-0006).
+#[tokio::test]
+async fn a_poll_from_an_index_reads_the_tail_and_a_poll_from_none_the_whole_log() {
+    let app = TestApp::start(ScriptedAdapter::answering(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ))
+    .await;
+    let chat_id = app.create_chat().await;
+    app.prompt(&chat_id, SAID).await;
+
+    let tail = app.body(&format!("/chats/{chat_id}/events?from=1")).await;
+
+    assert!(
+        tail.contains("id=\"log-hot\"") && tail.contains("<p>on it</p>") && !tail.contains(SAID),
+        "the poll was answered with more than the tail it asked for: {tail}"
+    );
+    let whole = app.body(&format!("/chats/{chat_id}/events")).await;
+    assert!(
+        whole.contains("id=\"log\"") && whole.contains(&format!("<b>you:</b> {SAID}")),
+        "a poll that named no index lost the log it used to get: {whole}"
+    );
+    app.stop().await;
+}
+
 #[tokio::test]
 async fn a_second_prompt_while_the_first_turn_runs_is_refused() {
     let app = TestApp::start(ScriptedAdapter::dawdling(
