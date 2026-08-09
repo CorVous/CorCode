@@ -1315,6 +1315,21 @@ mod tests {
     }
 
     #[test]
+    fn a_user_who_says_only_a_list_is_still_named() {
+        let events = log(&[outbound_prompt("- a\n- b")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p class=\"dim\"><b>you:</b> </p>",
+                "<ul class=\"dim\"><li>a</li><li>b</li></ul>",
+            )),
+            "a turn of nothing but a list lost whose turn it was: {rendered}"
+        );
+    }
+
+    #[test]
     fn code_in_a_thought_stands_back_beside_it_rather_than_inside_it() {
         let events = log(&[chunk("agent_thought_chunk", "maybe:\n```\nmake test\n```")]);
 
@@ -1732,6 +1747,20 @@ mod tests {
         assert!(
             rendered.contains("<ul><li>a</li></ul><p><br>after</p>"),
             "the list did not close where the bullets stopped: {rendered}"
+        );
+    }
+
+    /// The line break a message ends on is the last item's punctuation, not
+    /// a paragraph of its own, the way the blank line under a fence is.
+    #[test]
+    fn a_list_the_message_ends_on_leaves_no_empty_paragraph() {
+        let events = log(&[chunk("agent_message_chunk", "- a\n- b\n")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>a</li><li>b</li></ul></div>"),
+            "a list at the end of a message grew a paragraph: {rendered}"
         );
     }
 
