@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn a_hyphen_in_a_word_or_between_words_is_not_a_change() {
-        let coloured = colorize("a - b and site-packages and test-1");
+        let coloured = colorize("a - b and site-packages and test-1 and i--");
 
         assert!(
             !coloured.contains("tok-del"),
