@@ -717,6 +717,49 @@ mod tests {
         );
     }
 
+    /// The transcript is the record of the run: a long result is worth reading
+    /// to the end, and the element it sits in is what holds its lines apart.
+    #[test]
+    fn what_a_tool_printed_reaches_the_page_whole_and_broken_where_it_broke() {
+        let printed = (1..=200)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let events = log(&[
+            tool_call("call_1", "git diff"),
+            tool_result("call_1", &format!("```console\n{printed}\n```")),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(&format!("<pre class=\"dim\">{printed}</pre>")),
+            "what the tool printed did not reach the page whole ({} chars rendered)",
+            rendered.len()
+        );
+        assert!(
+            !rendered.contains("<br>"),
+            "the line breaks were rewritten as markup: {rendered}"
+        );
+    }
+
+    /// A tool prints whatever it was pointed at, so its output is the least
+    /// trusted string on the page.
+    #[test]
+    fn what_a_tool_printed_cannot_smuggle_markup_into_the_log() {
+        let events = log(&[
+            tool_call("call_1", "cat x"),
+            tool_result("call_1", "```console\n<script>alert(1)</script>\n```"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<script>"),
+            "a tool's output let markup through: {rendered}"
+        );
+    }
+
     #[test]
     fn a_later_word_on_a_call_does_not_wipe_what_it_printed() {
         let events = log(&[
