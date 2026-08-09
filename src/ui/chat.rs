@@ -5,6 +5,8 @@
 //! out. One rendering serves both the page and the fragment htmx polls, so a
 //! chat reads the same on load as it does while it streams.
 
+use std::fmt::Write as _;
+
 use serde_json::Value;
 
 use crate::store::{Event, Manifest, RuntimeStatus};
@@ -316,7 +318,166 @@ fn tool_line(call: &ToolCall) -> String {
 /// What a tool printed, kept as it was printed: the element holds the line
 /// breaks and the columns, and the stylesheet keeps a wide line in its own box.
 fn printed_html(printed: &str) -> String {
-    dimmed("pre", &text(printed).to_string())
+    dimmed("pre", &colorize(&text(printed).to_string()))
+}
+
+/// Tool output with the tokens an operator scans for named for the stylesheet:
+/// links, paths, counts and the marks of a change (ADR-0008 §3).
+///
+/// The text arrives escaped, so every escaped character is stepped over whole
+/// — a span opened inside one would put the raw character back on the page.
+/// Each token is claimed where it starts and the scan resumes after it, so
+/// nothing inside a claimed token is read again as a token of its own.
+fn colorize(escaped: &str) -> String {
+    let mut colored = String::with_capacity(escaped.len());
+    let mut rest = escaped;
+    let mut previous = None;
+    while !rest.is_empty() {
+        let (taken, class) = piece(rest, previous);
+        match class {
+            Some(class) => write!(colored, "<span class=\"tok-{class}\">{taken}</span>")
+                .expect("a String cannot fail to be written to"),
+            None => colored.push_str(taken),
+        }
+        rest = &rest[taken.len()..];
+        previous = taken.chars().next_back();
+    }
+    colored
+}
+
+/// The next piece of the text, and the token class it reads as if it is a
+/// token at all. An escaped character is a piece of its own, ahead of every
+/// token, which is what keeps a span from opening inside one.
+fn piece(rest: &str, previous: Option<char>) -> (&str, Option<&'static str>) {
+    if let Some(entity) = entity(rest) {
+        return (entity, None);
+    }
+    if let Some((token, class)) = token(rest, previous) {
+        return (token, Some(class));
+    }
+    let plain = rest.chars().next().expect("the rest is not empty");
+    (&rest[..plain.len_utf8()], None)
+}
+
+/// The escaped character starting here, whole, if one starts here at all.
+fn entity(rest: &str) -> Option<&str> {
+    let inside = rest.strip_prefix('&')?;
+    let end = inside.find(';')?;
+    let named = &inside[..end];
+    let escaped = !named.is_empty()
+        && named
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '#');
+    escaped.then(|| &rest[..end + 2])
+}
+
+/// The token starting here, highest priority first: what a link is made of
+/// would otherwise read as a path, and what a path is made of as a count.
+fn token(rest: &str, previous: Option<char>) -> Option<(&str, &'static str)> {
+    link(rest)
+        .or_else(|| path(rest))
+        .or_else(|| count(rest, previous))
+        .or_else(|| change(rest, previous))
+        .or_else(|| mark(rest))
+}
+
+/// A link, to wherever the run of it stops. Nothing in escaped text ends a
+/// URL but a space, since the markup characters are no longer in it.
+fn link(rest: &str) -> Option<(&str, &'static str)> {
+    if !rest.starts_with("https://") && !rest.starts_with("http://") {
+        return None;
+    }
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some((&rest[..end], "url"))
+}
+
+/// A path: a run with a directory in it, ending in a name with a suffix, and
+/// the line number some tools hang off it.
+fn path(rest: &str) -> Option<(&str, &'static str)> {
+    let run = &rest[..rest
+        .find(|character| !is_path(character))
+        .unwrap_or(rest.len())];
+    let (_, name) = run.rsplit_once('/')?;
+    let (stem, suffix) = name.rsplit_once('.')?;
+    if stem.is_empty() || suffix.is_empty() || !suffix.chars().all(char::is_alphanumeric) {
+        return None;
+    }
+    Some((
+        &rest[..run.len() + numbered_line(&rest[run.len()..])],
+        "path",
+    ))
+}
+
+/// How much of what follows a path is the line number hung off it.
+fn numbered_line(rest: &str) -> usize {
+    let Some(digits) = rest.strip_prefix(':') else {
+        return 0;
+    };
+    let end = digits
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if end == 0 { 0 } else { end + 1 }
+}
+
+/// What a path is spelled with. A path is claimed from the first character of
+/// the run it is in, so no boundary of its own is needed: any later start
+/// inside that run ends at the same name and would read the same.
+fn is_path(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+}
+
+/// A count, where one begins and to the last digit of it. The two ends are
+/// not symmetric: a digit glued to the end of a word is part of the word
+/// (`v2`, `sha1`), while a unit glued to the end of a count is not part of
+/// the count, so `200ms` colours its `200`. The separators a number is
+/// written with belong to it; the punctuation that follows one does not.
+fn count(rest: &str, previous: Option<char>) -> Option<(&str, &'static str)> {
+    if previous.is_some_and(char::is_alphanumeric)
+        || !rest.starts_with(|first: char| first.is_ascii_digit())
+    {
+        return None;
+    }
+    let run = &rest[..rest
+        .find(|character| !matches!(character, '0'..='9' | '.' | ','))
+        .unwrap_or(rest.len())];
+    let last = run
+        .rfind(|character: char| character.is_ascii_digit())
+        .expect("the run starts with a digit");
+    Some((&run[..=last], "num"))
+}
+
+/// The mark a diff hangs off a line or a stat: a run of one sign, standing on
+/// its own. A mark heads a line, or is a stat of more than one sign after a
+/// space; either way the signs run out into whitespace, which is what tells a
+/// mark from the `--lib` of a command line.
+fn change(rest: &str, previous: Option<char>) -> Option<(&str, &'static str)> {
+    let sign = rest
+        .chars()
+        .next()
+        .filter(|first| matches!(first, '+' | '-'))?;
+    let run = &rest[..rest.len() - rest.trim_start_matches(sign).len()];
+    let signs = &rest[..rest.len() - rest.trim_start_matches(['+', '-']).len()];
+    let runs_out = rest[signs.len()..]
+        .chars()
+        .next()
+        .is_none_or(char::is_whitespace);
+    let heads_a_line = matches!(previous, None | Some('\n'));
+    let stands_apart = previous
+        .is_some_and(|before| before.is_whitespace() || matches!(before, '+' | '-'))
+        && run.len() > 1;
+    (runs_out && (heads_a_line || stands_apart))
+        .then_some((run, if sign == '+' { "add" } else { "del" }))
+}
+
+/// The glyph a tool signs a result with.
+fn mark(rest: &str) -> Option<(&str, &'static str)> {
+    let glyph = rest.chars().next()?;
+    let class = match glyph {
+        '✓' => "ok",
+        '✗' => "err",
+        _ => return None,
+    };
+    Some((&rest[..glyph.len_utf8()], class))
 }
 
 /// Said words as HTML: escaped, keeping the line breaks the speaker meant.
@@ -743,7 +904,7 @@ mod tests {
     fn what_a_tool_printed_lands_under_the_line_it_belongs_to() {
         let events = log(&[
             tool_call("call_1", "git commit"),
-            tool_result("call_1", "```console\n1 file changed\n```"),
+            tool_result("call_1", "```console\nnothing to commit\n```"),
         ]);
 
         let rendered = event_log(CHAT_ID, &events);
@@ -751,7 +912,7 @@ mod tests {
         assert!(
             rendered.contains(
                 "<p class=\"dim\"><small>git commit · completed</small></p>\
-                 <pre class=\"dim\">1 file changed</pre>"
+                 <pre class=\"dim\">nothing to commit</pre>"
             ),
             "what the tool printed is not under its own line: {rendered}"
         );
@@ -766,8 +927,14 @@ mod tests {
     /// to the end, and the element it sits in is what holds its lines apart.
     #[test]
     fn what_a_tool_printed_reaches_the_page_whole_and_broken_where_it_broke() {
-        let printed = (1..=200)
-            .map(|line| format!("line {line}"))
+        let printed = (0..200u8)
+            .map(|line| {
+                format!(
+                    "line {}{}",
+                    char::from(b'a' + line / 26),
+                    char::from(b'a' + line % 26)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let events = log(&[
@@ -806,17 +973,224 @@ mod tests {
     }
 
     #[test]
+    fn a_link_in_tool_output_reads_as_a_link() {
+        assert_eq!(
+            colorize("see https://corvous.dev/x?a=1 now"),
+            "see <span class=\"tok-url\">https://corvous.dev/x?a=1</span> now"
+        );
+    }
+
+    #[test]
+    fn a_path_is_one_token_whether_or_not_it_names_a_line() {
+        assert_eq!(
+            colorize("src/ui/chat.rs"),
+            "<span class=\"tok-path\">src/ui/chat.rs</span>"
+        );
+        assert_eq!(
+            colorize("src/ui/chat.rs:47"),
+            "<span class=\"tok-path\">src/ui/chat.rs:47</span>"
+        );
+    }
+
+    #[test]
+    fn a_count_reads_as_a_count() {
+        assert_eq!(
+            colorize("47 files, 1.5 s"),
+            "<span class=\"tok-num\">47</span> files, <span class=\"tok-num\">1.5</span> s"
+        );
+    }
+
+    #[test]
+    fn a_diff_mark_reads_as_what_it_adds_or_takes_away() {
+        let coloured = colorize("chat.rs | 6 ++++--\n+ kept\n- gone");
+
+        for marked in [
+            "<span class=\"tok-add\">++++</span>",
+            "<span class=\"tok-del\">--</span>",
+            "<span class=\"tok-add\">+</span> kept",
+            "<span class=\"tok-del\">-</span> gone",
+        ] {
+            assert!(
+                coloured.contains(marked),
+                "{marked} is not marked as a change: {coloured}"
+            );
+        }
+
+        let ending = colorize("47 ++++----");
+
+        assert!(
+            ending
+                .contains("<span class=\"tok-add\">++++</span><span class=\"tok-del\">----</span>"),
+            "a stat at the end of a line is not marked as a change: {ending}"
+        );
+    }
+
+    /// A flag is spelled like a diff mark and means nothing of the sort, and
+    /// tool output is mostly command lines.
+    #[test]
+    fn a_flag_is_not_a_change() {
+        for flagged in [
+            "cargo test --lib",
+            "diff --git a/x b/x",
+            "docker compose --no-cache",
+        ] {
+            let coloured = colorize(flagged);
+
+            assert!(
+                !coloured.contains("tok-del"),
+                "a flag was read as what a diff takes away: {coloured}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hyphen_in_a_word_or_between_words_is_not_a_change() {
+        let coloured = colorize("a - b and site-packages and test-1 and i--");
+
+        assert!(
+            !coloured.contains("tok-del"),
+            "a hyphen was read as what a diff takes away: {coloured}"
+        );
+    }
+
+    #[test]
+    fn a_digit_glued_to_a_word_is_not_a_count() {
+        assert_eq!(colorize("abc123 v2"), "abc123 v2");
+    }
+
+    /// Colouring is for what a tool printed. What the agent said is prose,
+    /// and a path in prose is part of the sentence (ADR-0008 §3).
+    #[test]
+    fn what_the_agent_said_is_left_uncoloured() {
+        let events = log(&[chunk("agent_message_chunk", "see src/a.rs 47")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>see src/a.rs 47</p>"),
+            "the agent's message did not come through as prose: {rendered}"
+        );
+        assert!(
+            !rendered.contains("tok-"),
+            "prose was coloured like tool output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_tick_and_a_cross_read_as_pass_and_fail() {
+        assert_eq!(
+            colorize("✓ ✗"),
+            "<span class=\"tok-ok\">✓</span> <span class=\"tok-err\">✗</span>"
+        );
+    }
+
+    /// Colouring runs over text that is already escaped, so an escaped
+    /// character has to come through it exactly as it went in — a span opened
+    /// inside one would put the raw character back on the page.
+    #[test]
+    fn colouring_never_breaks_an_escaped_character() {
+        let escaped = text("<script>alert(1)</script> it's 39").to_string();
+
+        let coloured = colorize(&escaped);
+
+        assert!(
+            !coloured.contains("<script>"),
+            "colouring let markup back through: {coloured}"
+        );
+        for entity in ["&lt;script&gt;", "&lt;/script&gt;", "&#39;"] {
+            assert!(
+                coloured.contains(entity),
+                "{entity} was broken open: {coloured}"
+            );
+        }
+    }
+
+    /// A token is claimed once: what a path is made of is not read again as a
+    /// number, or the path comes apart into pieces on the page.
+    #[test]
+    fn a_path_with_digits_in_it_is_one_token_and_not_several() {
+        for path in ["src/v2/a.rs:47", "2026-08-09/report.md:12"] {
+            let coloured = colorize(path);
+
+            assert_eq!(
+                coloured.matches("<span").count(),
+                1,
+                "the path came apart: {coloured}"
+            );
+            assert!(
+                !coloured.contains("tok-num"),
+                "a number was read inside the path: {coloured}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_tool_printed_carries_its_tokens_inside_the_dimmed_block() {
+        let events = log(&[
+            tool_call("call_1", "git status"),
+            tool_result("call_1", "```console\nsrc/ui/chat.rs\n```"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(
+                "<pre class=\"dim\"><span class=\"tok-path\">src/ui/chat.rs</span></pre>"
+            ),
+            "the tokens are not inside the dimmed block: {rendered}"
+        );
+    }
+
+    /// A token class only colours anything if the one stylesheet says what it
+    /// is worth, and says it twice: once for each scheme (ADR-0008 §3).
+    #[test]
+    fn what_colours_a_token_stands_in_the_stylesheet() {
+        for rule in [
+            "--tok-num:#b8791b;",
+            "--tok-path:#2f6bd8;",
+            "--tok-url:#1c7a86;",
+            "--tok-add:#1a7f37;",
+            "--tok-del:#cf222e;",
+            ".tok-num{color:var(--tok-num);}",
+            ".tok-path{color:var(--tok-path);}",
+            ".tok-url{color:var(--tok-url);}",
+            ".tok-add,.tok-ok{color:var(--tok-add);}",
+            ".tok-del,.tok-err{color:var(--tok-del);}",
+        ] {
+            assert!(
+                crate::ui::CSS.contains(rule),
+                "the stylesheet is missing {rule}: {}",
+                crate::ui::CSS
+            );
+        }
+        for dark in [
+            "--tok-num:#f5a742;",
+            "--tok-path:#61afef;",
+            "--tok-url:#56b6c2;",
+            "--tok-add:#56d364;",
+            "--tok-del:#f47067;",
+        ] {
+            assert!(
+                position(crate::ui::CSS, "@media(prefers-color-scheme:dark)")
+                    < position(crate::ui::CSS, dark),
+                "{dark} is not behind the scheme it is for: {}",
+                crate::ui::CSS
+            );
+        }
+    }
+
+    #[test]
     fn a_later_word_on_a_call_does_not_wipe_what_it_printed() {
         let events = log(&[
             tool_call("call_1", "git commit"),
-            tool_result("call_1", "```console\n1 file changed\n```"),
+            tool_result("call_1", "```console\nnothing to commit\n```"),
             tool_update("call_1", "failed"),
         ]);
 
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered.contains("<pre class=\"dim\">1 file changed</pre>"),
+            rendered.contains("<pre class=\"dim\">nothing to commit</pre>"),
             "a later update carrying no output cleared the output: {rendered}"
         );
     }
@@ -950,7 +1324,7 @@ mod tests {
             outbound_prompt("ship it"),
             chunk("agent_thought_chunk", "the ladder first"),
             tool_call("call_1", "git commit"),
-            tool_result("call_1", "```console\n1 file changed\n```"),
+            tool_result("call_1", "```console\nnothing to commit\n```"),
             json!({"sessionUpdate": "plan", "entries": []}),
             json!({"corcode": "reset_notice", "text": "Agent memory was reset."}),
             chunk("agent_message_chunk", "on it"),
@@ -962,7 +1336,7 @@ mod tests {
             "<p class=\"dim\"><b>you:</b> ship it</p>",
             "<p class=\"dim\">the ladder first</p>",
             "<p class=\"dim\"><small>git commit · completed</small></p>",
-            "<pre class=\"dim\">1 file changed</pre>",
+            "<pre class=\"dim\">nothing to commit</pre>",
             "<p class=\"dim\"><small>plan</small></p>",
             "<blockquote class=\"dim\">Agent memory was reset.</blockquote>",
         ] {
