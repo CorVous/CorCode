@@ -69,6 +69,8 @@ pre{overflow-x:auto;}\
 .hl-keyword,.hl-storage{color:var(--tok-kw);}\
 .hl-support{color:var(--tok-type);}\
 .hl-entity{color:var(--tok-path);}\
+.hl-inserted{color:var(--tok-add);}\
+.hl-deleted{color:var(--tok-del);}\
 @media(prefers-color-scheme:dark){:root{\
 --tok-num:#f5a742;--tok-path:#61afef;--tok-url:#56b6c2;\
 --tok-add:#56d364;--tok-del:#f47067;\

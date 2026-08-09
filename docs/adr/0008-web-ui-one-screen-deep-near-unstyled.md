@@ -56,8 +56,18 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    Only the first word after a fence names the language: the rest is
    said to a markdown reader, and taking it would let a message name
    the page's own classes. A run of more than three backticks is not
-   read as a fence of its own. Colouring the code is a later decision;
-   the block only names its language for whoever makes it.)_
+   read as a fence of its own.)_ _(Amended 2026-08-09: the code in a
+   block is read by syntect — the bundled syntaxes, the pure-Rust
+   fancy-regex engine so nothing links against oniguruma, and no themes,
+   since the colours are the stylesheet's. It names each word of the code
+   with classes prefixed `hl-`, clear of the page's own, and escapes the
+   code as it reads it. The set of syntaxes is unpacked once for the
+   process, because a chat re-reads its whole log on every poll. A
+   language nothing here knows, a fence that names none, a block longer
+   than 100 KiB — a dump rather than something read on a screen, and one
+   that would be read again on every poll for as long as the chat is open
+   — or a reader that gives up on the code all fall back to the plain
+   escaped block.)_
 3. **Near-zero CSS.** Semantic HTML on browser defaults; the styling
    budget is on the order of a dozen lines (viewport meta,
    `color-scheme: light dark` so default link and form-control colors
@@ -84,7 +94,16 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    part of the word (`v2`), while a unit glued to the end of a count is
    not part of the count (`200ms` colours its `200`). A run of `+` or
    `-` is a diff mark only where it runs out into whitespace, so
-   `--no-cache` is a flag and not a deletion.)_
+   `--no-cache` is a flag and not a deletion.)_ _(Amended 2026-08-09: the
+   cap is lifted again, to three dozen, for the same palette spent on
+   highlighted code — comment, string, constant, keyword and storage,
+   support and entity, each a class the highlighter emits under its `hl-`
+   prefix, and the two marks of a diff. Four colours join the palette
+   (keyword, string, type, comment) and the rest are the ones tool output
+   already spends — a diff the agent pastes is marked in the same green
+   and red as a diff a tool printed, so the colours mean one thing on the
+   page. Every one is still a custom property answered under the dark
+   scheme.)_
 4. **Reference artifact:** variant D on the `prototype/web-ui-screens`
    branch is the shape to imitate; variants A–C are rejected directions
    kept only as prototype history.

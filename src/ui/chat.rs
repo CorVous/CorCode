@@ -6,8 +6,12 @@
 //! chat reads the same on load as it does while it streams.
 
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 
 use serde_json::Value;
+use syntect::html::{ClassStyle, ClassedHTMLGenerator};
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
 
 use crate::store::{Event, Manifest, RuntimeStatus};
 
@@ -24,6 +28,11 @@ const CORE_LINE: &str = "corcode";
 
 /// What a tool call that names neither itself nor an id is called.
 const UNNAMED_TOOL: &str = "tool call";
+
+/// How much code is read for what it says before it is simply shown. Reading
+/// costs time on every poll a chat is open for, and a block this long is a
+/// dump rather than something anyone reads on a screen.
+const MOST_CODE_READ: usize = 100 * 1024;
 
 /// How a code fence is spelled. An adapter wraps a tool's output in one for a
 /// markdown reader, and an agent fences the code it writes; the transcript is
@@ -613,7 +622,8 @@ struct Fenced<'a> {
 }
 
 impl Fenced<'_> {
-    /// The block as HTML: escaped, and named for whoever colours it. The
+    /// The block as HTML: read for what the code says where the language is
+    /// one we know, escaped either way, and named for whoever colours it. The
     /// element holds the line breaks, so nothing is turned into markup here.
     fn html(&self, set_back: bool) -> String {
         let named = if self.language.is_empty() {
@@ -622,11 +632,45 @@ impl Fenced<'_> {
             format!(" class=\"lang-{}\"", text(self.language))
         };
         let stands_back = if set_back { " dim" } else { "" };
-        format!(
-            "<pre class=\"code{stands_back}\"><code{named}>{}</code></pre>",
-            text(&self.lines.join("\n"))
-        )
+        let code = self.lines.join("\n");
+        let read = read_as(&code, self.language).unwrap_or_else(|| text(&code).to_string());
+        format!("<pre class=\"code{stands_back}\"><code{named}>{read}</code></pre>")
     }
+}
+
+/// Code with each word of it named for what it is doing, or nothing at all if
+/// no syntax here is written in that language, the block is longer than one
+/// worth reading, or the reader gives up on it — the caller shows the code
+/// plainly for any of the three. The reader escapes the code as it goes, so
+/// what comes back is already safe to put on the page.
+///
+/// The classes carry a prefix of their own: a syntax names scopes as broadly
+/// as `source` and `text`, and the page has classes of its own to keep clear
+/// of (ADR-0008 §3).
+fn read_as(code: &str, language: &str) -> Option<String> {
+    if code.len() > MOST_CODE_READ {
+        return None;
+    }
+    let syntaxes = syntaxes();
+    let syntax = syntaxes.find_syntax_by_token(language)?;
+    let mut reader = ClassedHTMLGenerator::new_with_class_style(
+        syntax,
+        syntaxes,
+        ClassStyle::SpacedPrefixed { prefix: "hl-" },
+    );
+    for line in LinesWithEndings::from(code) {
+        reader
+            .parse_html_for_line_which_includes_newline(line)
+            .ok()?;
+    }
+    Some(reader.finalize())
+}
+
+/// Every syntax the highlighter knows, unpacked once: the set is a dump of a
+/// few megabytes, and a chat re-reads its whole log on every poll.
+fn syntaxes() -> &'static SyntaxSet {
+    static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
+    SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
 /// Lines of prose as HTML, keeping the line breaks the speaker meant.
