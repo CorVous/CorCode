@@ -343,11 +343,16 @@ const NOTICE: Reading = Reading {
 impl Reading {
     /// One passage of prose in the element this voice reads in.
     fn paragraph(&self, said: &str) -> String {
-        if self.set_back {
-            dimmed(self.tag, said)
-        } else {
-            format!("<{tag}>{said}</{tag}>", tag = self.tag)
-        }
+        element(self.tag, said, self.set_back)
+    }
+}
+
+/// One block of a message, standing back from the agent's own words or not.
+fn element(tag: &str, inner: &str, set_back: bool) -> String {
+    if set_back {
+        dimmed(tag, inner)
+    } else {
+        format!("<{tag}>{inner}</{tag}>")
     }
 }
 
@@ -551,6 +556,7 @@ fn said_html(said: &str, reading: &Reading) -> String {
                 html.push_str(&reading.paragraph(&format!("{label}{}", prose_html(lines))));
                 label = "";
             }
+            Passage::List(items) => html.push_str(&list_html(items, reading.set_back)),
             Passage::Code(fenced) => html.push_str(&fenced.html(reading.set_back)),
         }
     }
@@ -590,8 +596,10 @@ fn passages(said: &str) -> Vec<Passage<'_>> {
     }
     match fenced {
         Some(open) => passages.push(Passage::Code(open)),
-        None if passages.is_empty() => passages.push(Passage::Prose(prose)),
         None => push_prose(&mut passages, &mut prose),
+    }
+    if passages.is_empty() {
+        passages.push(Passage::Prose(prose));
     }
     passages
 }
@@ -599,17 +607,64 @@ fn passages(said: &str) -> Vec<Passage<'_>> {
 /// One stretch of a message, read as what it is.
 enum Passage<'a> {
     Prose(Vec<&'a str>),
+    List(Vec<&'a str>),
     Code(Fenced<'a>),
 }
 
 /// Prose beside code stands as a passage only when it says something: the
 /// blank line under a fence is the fence's punctuation, not a paragraph.
 fn push_prose<'a>(passages: &mut Vec<Passage<'a>>, prose: &mut Vec<&'a str>) {
-    let says_something = prose.iter().any(|line| !line.is_empty());
-    let prose = std::mem::take(prose);
-    if says_something {
-        passages.push(Passage::Prose(prose));
+    if prose.iter().any(|line| !line.is_empty()) {
+        passages.extend(read_prose(std::mem::take(prose)));
     }
+}
+
+/// Prose read as the paragraphs and the lists it is: a run of lines the
+/// speaker bulleted is one list, and each item is the line without its
+/// bullet. Anything else, a blank line included, ends the run.
+fn read_prose(prose: Vec<&str>) -> Vec<Passage<'_>> {
+    let mut read = Vec::new();
+    let mut said = Vec::new();
+    let mut listing = false;
+    for line in prose {
+        let item = bulleted(line);
+        if item.is_some() != listing {
+            push_read(&mut read, &mut said, listing);
+            listing = item.is_some();
+        }
+        said.push(item.unwrap_or(line));
+    }
+    push_read(&mut read, &mut said, listing);
+    read
+}
+
+/// What the speaker bulleted on this line, if they bulleted it: the marker
+/// and the one space after it are the bullet, and the rest is the item.
+fn bulleted(line: &str) -> Option<&str> {
+    line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
+}
+
+fn push_read<'a>(read: &mut Vec<Passage<'a>>, said: &mut Vec<&'a str>, listing: bool) {
+    if said.is_empty() {
+        return;
+    }
+    let said = std::mem::take(said);
+    read.push(if listing {
+        Passage::List(said)
+    } else {
+        Passage::Prose(said)
+    });
+}
+
+/// A list as a block of its own beside the paragraphs — a paragraph would
+/// not hold one — with every item read the way a line of prose is read.
+fn list_html(items: &[&str], set_back: bool) -> String {
+    let items = items.iter().fold(String::new(), |mut said, item| {
+        write!(said, "<li>{}</li>", prose_line_html(item))
+            .expect("a String cannot fail to be written to");
+        said
+    });
+    element("ul", &items, set_back)
 }
 
 /// A run of lines the speaker fenced off as code, and the one word of what
