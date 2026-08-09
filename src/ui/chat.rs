@@ -343,11 +343,16 @@ const NOTICE: Reading = Reading {
 impl Reading {
     /// One passage of prose in the element this voice reads in.
     fn paragraph(&self, said: &str) -> String {
-        if self.set_back {
-            dimmed(self.tag, said)
-        } else {
-            format!("<{tag}>{said}</{tag}>", tag = self.tag)
-        }
+        element(self.tag, said, self.set_back)
+    }
+}
+
+/// One block of a message, standing back from the agent's own words or not.
+fn element(tag: &str, inner: &str, set_back: bool) -> String {
+    if set_back {
+        dimmed(tag, inner)
+    } else {
+        format!("<{tag}>{inner}</{tag}>")
     }
 }
 
@@ -551,6 +556,7 @@ fn said_html(said: &str, reading: &Reading) -> String {
                 html.push_str(&reading.paragraph(&format!("{label}{}", prose_html(lines))));
                 label = "";
             }
+            Passage::List(items) => html.push_str(&list_html(items, reading.set_back)),
             Passage::Code(fenced) => html.push_str(&fenced.html(reading.set_back)),
         }
     }
@@ -590,8 +596,10 @@ fn passages(said: &str) -> Vec<Passage<'_>> {
     }
     match fenced {
         Some(open) => passages.push(Passage::Code(open)),
-        None if passages.is_empty() => passages.push(Passage::Prose(prose)),
         None => push_prose(&mut passages, &mut prose),
+    }
+    if passages.is_empty() {
+        passages.push(Passage::Prose(said.split('\n').collect()));
     }
     passages
 }
@@ -599,17 +607,64 @@ fn passages(said: &str) -> Vec<Passage<'_>> {
 /// One stretch of a message, read as what it is.
 enum Passage<'a> {
     Prose(Vec<&'a str>),
+    List(Vec<&'a str>),
     Code(Fenced<'a>),
 }
 
-/// Prose beside code stands as a passage only when it says something: the
-/// blank line under a fence is the fence's punctuation, not a paragraph.
+/// The prose gathered so far, read and set down as the passages it is.
 fn push_prose<'a>(passages: &mut Vec<Passage<'a>>, prose: &mut Vec<&'a str>) {
-    let says_something = prose.iter().any(|line| !line.is_empty());
-    let prose = std::mem::take(prose);
-    if says_something {
-        passages.push(Passage::Prose(prose));
+    passages.extend(read_prose(std::mem::take(prose)));
+}
+
+/// Prose read as the paragraphs and the lists it is: a run of lines the
+/// speaker bulleted is one list, and each item is the line without its
+/// bullet. Anything else, a blank line included, ends the run.
+fn read_prose(prose: Vec<&str>) -> Vec<Passage<'_>> {
+    let mut read = Vec::new();
+    let mut said = Vec::new();
+    let mut listing = false;
+    for line in prose {
+        let item = bulleted(line);
+        if item.is_some() != listing {
+            push_read(&mut read, &mut said, listing);
+            listing = item.is_some();
+        }
+        said.push(item.unwrap_or(line));
     }
+    push_read(&mut read, &mut said, listing);
+    read
+}
+
+/// What the speaker bulleted on this line, if they bulleted it: the marker
+/// and the one space after it are the bullet, and the rest is the item.
+fn bulleted(line: &str) -> Option<&str> {
+    line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
+}
+
+/// A run stands as a passage of its own only when it says something: the
+/// blank line under a fence, or the one a message ends on, is the
+/// punctuation of what it follows and not a paragraph.
+fn push_read<'a>(read: &mut Vec<Passage<'a>>, said: &mut Vec<&'a str>, listing: bool) {
+    let said = std::mem::take(said);
+    if !said.iter().any(|line| !line.is_empty()) {
+        return;
+    }
+    read.push(if listing {
+        Passage::List(said)
+    } else {
+        Passage::Prose(said)
+    });
+}
+
+/// A list as a block of its own beside the paragraphs — a paragraph would
+/// not hold one — with every item read the way a line of prose is read.
+fn list_html(items: &[&str], set_back: bool) -> String {
+    let items = items.iter().fold(String::new(), |mut said, item| {
+        write!(said, "<li>{}</li>", prose_line_html(item))
+            .expect("a String cannot fail to be written to");
+        said
+    });
+    element("ul", &items, set_back)
 }
 
 /// A run of lines the speaker fenced off as code, and the one word of what
@@ -833,7 +888,7 @@ mod tests {
     fn nests_a_block_inside_prose(rendered: &str) -> bool {
         let mut open = false;
         for tag in rendered.match_indices('<').map(|(at, _)| &rendered[at..]) {
-            if open && tag.starts_with("<pre") {
+            if open && (tag.starts_with("<pre") || tag.starts_with("<ul")) {
                 return true;
             }
             if tag.starts_with("<p>") || tag.starts_with("<p ") || tag.starts_with("<blockquote") {
@@ -1260,6 +1315,21 @@ mod tests {
     }
 
     #[test]
+    fn a_user_who_says_only_a_list_is_still_named() {
+        let events = log(&[outbound_prompt("- a\n- b")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p class=\"dim\"><b>you:</b> </p>",
+                "<ul class=\"dim\"><li>a</li><li>b</li></ul>",
+            )),
+            "a turn of nothing but a list lost whose turn it was: {rendered}"
+        );
+    }
+
+    #[test]
     fn code_in_a_thought_stands_back_beside_it_rather_than_inside_it() {
         let events = log(&[chunk("agent_thought_chunk", "maybe:\n```\nmake test\n```")]);
 
@@ -1564,6 +1634,175 @@ mod tests {
         assert!(
             rendered.contains("<p>a `b<br>c` d</p>"),
             "a marking reached across a line break: {rendered}"
+        );
+    }
+
+    /// A message that says nothing is still a message, and reads as the one
+    /// empty passage it is rather than as no block at all.
+    #[test]
+    fn a_message_of_nothing_but_a_line_break_still_reads_as_a_paragraph() {
+        let events = log(&[chunk("agent_message_chunk", "\n")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p><br></p>"),
+            "a message that says nothing lost its paragraph: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_run_of_bulleted_lines_reads_as_one_list() {
+        let events = log(&[chunk("agent_message_chunk", "- one\n- two\n- three")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>one</li><li>two</li><li>three</li></ul>"),
+            "a run of bullets did not read as one list: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_line_bulleted_with_a_star_is_an_item_too() {
+        let events = log(&[chunk("agent_message_chunk", "* one\n* two")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>one</li><li>two</li></ul>"),
+            "a star did not bullet an item: {rendered}"
+        );
+    }
+
+    /// One bulleted line is a list of one item, as a markdown reader has it.
+    #[test]
+    fn a_single_bulleted_line_is_a_list_of_one() {
+        let events = log(&[chunk("agent_message_chunk", "- only this")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>only this</li></ul>"),
+            "a lone bullet did not read as a list: {rendered}"
+        );
+    }
+
+    /// A bullet is the marker and the space after it. A dash that opens a
+    /// word is part of the word, the way a flag is written.
+    #[test]
+    fn a_dash_with_no_space_after_it_bullets_nothing() {
+        let events = log(&[chunk("agent_message_chunk", "-x is a flag\n*y too")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>-x is a flag<br>*y too</p>"),
+            "a dash inside a word opened a list: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_item_is_read_the_way_a_sentence_is() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "- see `src/x.rs` at https://x.dev",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<li>see <code class=\"tok-path\">src/x.rs</code> at ",
+                "<span class=\"tok-url\">https://x.dev</span></li>",
+            )),
+            "an item was not read the way a sentence is: {rendered}"
+        );
+    }
+
+    /// A list is a block, and a paragraph does not hold a block: it stands
+    /// beside the prose it was said among (ADR-0008).
+    #[test]
+    fn a_list_stands_beside_the_prose_rather_than_inside_it() {
+        let events = log(&[chunk("agent_message_chunk", "intro\n- a\n- b\noutro")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>intro</p><ul><li>a</li><li>b</li></ul><p>outro</p>"),
+            "the blocks are not in the order they were said: {rendered}"
+        );
+        assert!(
+            !nests_a_block_inside_prose(&rendered),
+            "a block opened inside prose: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_bulleted_closes_the_list() {
+        let events = log(&[chunk("agent_message_chunk", "- a\n\nafter")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>a</li></ul><p><br>after</p>"),
+            "the list did not close where the bullets stopped: {rendered}"
+        );
+    }
+
+    /// The blank line a fence opens under belongs to the fence, so what
+    /// follows the block opens its paragraph on its own first line.
+    #[test]
+    fn a_blank_line_before_a_fence_is_the_fences_own() {
+        let events = log(&[chunk("agent_message_chunk", "\n```\nx\n```\nafter")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("</pre><p>after</p>"),
+            "a blank line before a fence was kept for the prose after it: {rendered}"
+        );
+    }
+
+    /// The line break a message ends on is the last item's punctuation, not
+    /// a paragraph of its own, the way the blank line under a fence is.
+    #[test]
+    fn a_list_the_message_ends_on_leaves_no_empty_paragraph() {
+        let events = log(&[chunk("agent_message_chunk", "- a\n- b\n")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>a</li><li>b</li></ul></div>"),
+            "a list at the end of a message grew a paragraph: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_list_in_a_thought_stands_back_with_the_rest_of_it() {
+        let events = log(&[chunk("agent_thought_chunk", "maybe:\n- a\n- b")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p class=\"dim\">maybe:</p><ul class=\"dim\"><li>a</li>"),
+            "a list in a thought did not stand back with it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_bulleted_line_inside_a_fence_stays_code() {
+        let events = log(&[chunk("agent_message_chunk", "```diff\n- a\n+ b\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            code_body(&rendered).contains("hl-deleted"),
+            "a diff was not read as a diff: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<li>"),
+            "code was read as a list: {rendered}"
         );
     }
 

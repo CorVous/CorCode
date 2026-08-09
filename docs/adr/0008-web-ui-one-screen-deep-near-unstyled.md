@@ -117,7 +117,24 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    does, is not done: a backtick with no partner, and a pair with
    nothing between them, are the backticks they look like, and the
    double-backtick idiom is a candidate for later. Real bullet lists, as
-   sibling blocks beside the paragraphs, are the next step.)_
+   sibling blocks beside the paragraphs, are the next step.)_ _(Amended
+   2026-08-09: they are here. A run of lines the speaker bulleted with
+   `-` or `*` and a space is one `<ul>`, an `<li>` a line, the marker
+   spent on the reading rather than shown, and every item read inline
+   the way any other line is. The list is a block beside the paragraphs,
+   never inside one, the way a fenced block already stands, and it
+   stands back with the voice it was said in. Anything not bulleted,
+   a blank line included, ends the run. Flat and single-level for now:
+   a numbered list, a list indented under an item, and telling one list
+   from the next by which marker it uses are all later, and the
+   stylesheet still says nothing about any of it — a list reads as the
+   browser draws one. What that costs until then is worth saying: an
+   indented bullet or a numbered line inside a run splits the list
+   rather than nesting under it, so `- a`, `  - b`, `- c` reads as a
+   list, a paragraph and a list, in the order they were said. That is a
+   worse shape than the one paragraph they used to make, and it is the
+   price of the other four in five lists being right until nesting
+   lands.)_
 4. **Reference artifact:** variant D on the `prototype/web-ui-screens`
    branch is the shape to imitate; variants A–C are rejected directions
    kept only as prototype history.
