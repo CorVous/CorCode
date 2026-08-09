@@ -889,17 +889,19 @@ mod tests {
     /// number, or the path comes apart into pieces on the page.
     #[test]
     fn a_path_with_digits_in_it_is_one_token_and_not_several() {
-        let coloured = colorize("src/v2/a.rs:47");
+        for path in ["src/v2/a.rs:47", "2026-08-09/report.md:12"] {
+            let coloured = colorize(path);
 
-        assert_eq!(
-            coloured.matches("<span").count(),
-            1,
-            "the path came apart: {coloured}"
-        );
-        assert!(
-            !coloured.contains("tok-num"),
-            "a number was read inside the path: {coloured}"
-        );
+            assert_eq!(
+                coloured.matches("<span").count(),
+                1,
+                "the path came apart: {coloured}"
+            );
+            assert!(
+                !coloured.contains("tok-num"),
+                "a number was read inside the path: {coloured}"
+            );
+        }
     }
 
     #[test]
