@@ -710,9 +710,11 @@ fn prose_line_html(line: &str) -> String {
     html
 }
 
-/// A run the speaker put in backticks, and how much of the line it took. A
-/// backtick with no partner on the line is a backtick, and so is a pair with
-/// nothing between them: a fence run mid-sentence stays the text it is.
+/// What the speaker put in backticks, and how much of the line it took: the
+/// next single backtick closes the marking, whatever run it sits in, rather
+/// than a run being matched against a run of its own length. A backtick with
+/// no partner on the line is a backtick, and so is a pair with nothing
+/// between them, so a fence run mid-sentence stays the text it is.
 fn inline_code(rest: &str) -> Option<(String, usize)> {
     let said = rest.strip_prefix('`')?;
     let end = said.find('`').filter(|end| *end > 0)?;
