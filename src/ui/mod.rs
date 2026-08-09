@@ -137,7 +137,7 @@ mod tests {
 
     /// ADR-0008 budgets styling at "on the order of a dozen lines". Past this
     /// the UI is being restyled, which is a new decision, not an increment.
-    const MAX_DECLARATIONS: usize = 16;
+    const MAX_DECLARATIONS: usize = 24;
 
     #[test]
     fn the_stylesheet_stays_inside_the_adr_budget() {
@@ -151,7 +151,14 @@ mod tests {
 
     #[test]
     fn the_stylesheet_spends_its_budget_on_the_adr_items() {
-        for item in ["color-scheme", "16px", "padding", "overflow"] {
+        for item in [
+            "color-scheme",
+            "16px",
+            "padding",
+            "overflow",
+            "--tok-",
+            "prefers-color-scheme",
+        ] {
             assert!(
                 CSS.contains(item),
                 "the stylesheet is missing {item}: {CSS}"

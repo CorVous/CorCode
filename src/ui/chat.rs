@@ -743,7 +743,7 @@ mod tests {
     fn what_a_tool_printed_lands_under_the_line_it_belongs_to() {
         let events = log(&[
             tool_call("call_1", "git commit"),
-            tool_result("call_1", "```console\n1 file changed\n```"),
+            tool_result("call_1", "```console\nnothing to commit\n```"),
         ]);
 
         let rendered = event_log(CHAT_ID, &events);
@@ -751,7 +751,7 @@ mod tests {
         assert!(
             rendered.contains(
                 "<p class=\"dim\"><small>git commit · completed</small></p>\
-                 <pre class=\"dim\">1 file changed</pre>"
+                 <pre class=\"dim\">nothing to commit</pre>"
             ),
             "what the tool printed is not under its own line: {rendered}"
         );
@@ -766,8 +766,14 @@ mod tests {
     /// to the end, and the element it sits in is what holds its lines apart.
     #[test]
     fn what_a_tool_printed_reaches_the_page_whole_and_broken_where_it_broke() {
-        let printed = (1..=200)
-            .map(|line| format!("line {line}"))
+        let printed = (0..200u8)
+            .map(|line| {
+                format!(
+                    "line {}{}",
+                    char::from(b'a' + line / 26),
+                    char::from(b'a' + line % 26)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let events = log(&[
@@ -806,17 +812,155 @@ mod tests {
     }
 
     #[test]
+    fn a_link_in_tool_output_reads_as_a_link() {
+        assert_eq!(
+            colorize("see https://corvous.dev/x?a=1 now"),
+            "see <span class=\"tok-url\">https://corvous.dev/x?a=1</span> now"
+        );
+    }
+
+    #[test]
+    fn a_path_is_one_token_whether_or_not_it_names_a_line() {
+        assert_eq!(
+            colorize("src/ui/chat.rs"),
+            "<span class=\"tok-path\">src/ui/chat.rs</span>"
+        );
+        assert_eq!(
+            colorize("src/ui/chat.rs:47"),
+            "<span class=\"tok-path\">src/ui/chat.rs:47</span>"
+        );
+    }
+
+    #[test]
+    fn a_count_reads_as_a_count() {
+        assert_eq!(
+            colorize("47 files, 1.5 s"),
+            "<span class=\"tok-num\">47</span> files, <span class=\"tok-num\">1.5</span> s"
+        );
+    }
+
+    #[test]
+    fn a_diff_mark_reads_as_what_it_adds_or_takes_away() {
+        let coloured = colorize("chat.rs | 6 ++++--\n+ kept\n- gone");
+
+        for marked in [
+            "<span class=\"tok-add\">++++</span>",
+            "<span class=\"tok-del\">--</span>",
+            "<span class=\"tok-add\">+</span> kept",
+            "<span class=\"tok-del\">-</span> gone",
+        ] {
+            assert!(
+                coloured.contains(marked),
+                "{marked} is not marked as a change: {coloured}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tick_and_a_cross_read_as_pass_and_fail() {
+        assert_eq!(
+            colorize("✓ ✗"),
+            "<span class=\"tok-ok\">✓</span> <span class=\"tok-err\">✗</span>"
+        );
+    }
+
+    /// Colouring runs over text that is already escaped, so an escaped
+    /// character has to come through it exactly as it went in — a span opened
+    /// inside one would put the raw character back on the page.
+    #[test]
+    fn colouring_never_breaks_an_escaped_character() {
+        let escaped = text("<script>alert(1)</script> it's 39").to_string();
+
+        let coloured = colorize(&escaped);
+
+        assert!(
+            !coloured.contains("<script>"),
+            "colouring let markup back through: {coloured}"
+        );
+        for entity in ["&lt;script&gt;", "&lt;/script&gt;", "&#39;"] {
+            assert!(
+                coloured.contains(entity),
+                "{entity} was broken open: {coloured}"
+            );
+        }
+    }
+
+    /// A token is claimed once: what a path is made of is not read again as a
+    /// number, or the path comes apart into pieces on the page.
+    #[test]
+    fn a_path_with_digits_in_it_is_one_token_and_not_several() {
+        let coloured = colorize("src/v2/a.rs:47");
+
+        assert_eq!(
+            coloured.matches("<span").count(),
+            1,
+            "the path came apart: {coloured}"
+        );
+        assert!(
+            !coloured.contains("tok-num"),
+            "a number was read inside the path: {coloured}"
+        );
+    }
+
+    #[test]
+    fn what_a_tool_printed_carries_its_tokens_inside_the_dimmed_block() {
+        let events = log(&[
+            tool_call("call_1", "git status"),
+            tool_result("call_1", "```console\nsrc/ui/chat.rs\n```"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(
+                "<pre class=\"dim\"><span class=\"tok-path\">src/ui/chat.rs</span></pre>"
+            ),
+            "the tokens are not inside the dimmed block: {rendered}"
+        );
+    }
+
+    /// A token class only colours anything if the one stylesheet says what it
+    /// is worth, and says it twice: once for each scheme (ADR-0008 §3).
+    #[test]
+    fn what_colours_a_token_stands_in_the_stylesheet() {
+        for rule in [
+            "--tok-num:#b8791b;",
+            "--tok-path:#2f6bd8;",
+            "--tok-url:#1c7a86;",
+            "--tok-add:#1a7f37;",
+            "--tok-del:#cf222e;",
+            ".tok-num{color:var(--tok-num);}",
+            ".tok-path{color:var(--tok-path);}",
+            ".tok-url{color:var(--tok-url);}",
+            ".tok-add,.tok-ok{color:var(--tok-add);}",
+            ".tok-del,.tok-err{color:var(--tok-del);}",
+        ] {
+            assert!(
+                crate::ui::CSS.contains(rule),
+                "the stylesheet is missing {rule}: {}",
+                crate::ui::CSS
+            );
+        }
+        assert!(
+            position(crate::ui::CSS, "@media(prefers-color-scheme:dark)")
+                < position(crate::ui::CSS, "--tok-num:#f5a742;"),
+            "the dark palette is not behind the scheme it is for: {}",
+            crate::ui::CSS
+        );
+    }
+
+    #[test]
     fn a_later_word_on_a_call_does_not_wipe_what_it_printed() {
         let events = log(&[
             tool_call("call_1", "git commit"),
-            tool_result("call_1", "```console\n1 file changed\n```"),
+            tool_result("call_1", "```console\nnothing to commit\n```"),
             tool_update("call_1", "failed"),
         ]);
 
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered.contains("<pre class=\"dim\">1 file changed</pre>"),
+            rendered.contains("<pre class=\"dim\">nothing to commit</pre>"),
             "a later update carrying no output cleared the output: {rendered}"
         );
     }
@@ -950,7 +1094,7 @@ mod tests {
             outbound_prompt("ship it"),
             chunk("agent_thought_chunk", "the ladder first"),
             tool_call("call_1", "git commit"),
-            tool_result("call_1", "```console\n1 file changed\n```"),
+            tool_result("call_1", "```console\nnothing to commit\n```"),
             json!({"sessionUpdate": "plan", "entries": []}),
             json!({"corcode": "reset_notice", "text": "Agent memory was reset."}),
             chunk("agent_message_chunk", "on it"),
@@ -962,7 +1106,7 @@ mod tests {
             "<p class=\"dim\"><b>you:</b> ship it</p>",
             "<p class=\"dim\">the ladder first</p>",
             "<p class=\"dim\"><small>git commit · completed</small></p>",
-            "<pre class=\"dim\">1 file changed</pre>",
+            "<pre class=\"dim\">nothing to commit</pre>",
             "<p class=\"dim\"><small>plan</small></p>",
             "<blockquote class=\"dim\">Agent memory was reset.</blockquote>",
         ] {
