@@ -1502,6 +1502,55 @@ mod tests {
         );
     }
 
+    /// The marking a speaker opens is closed by the next single backtick,
+    /// whatever run that backtick sits in: a run is not matched to a run of
+    /// its own length, so what is left over stays the backticks it is.
+    #[test]
+    fn the_next_backtick_closes_the_marking_whatever_run_it_is_in() {
+        let events = log(&[
+            chunk("agent_message_chunk", "a `b and `` c"),
+            json!({"corcode": "reset_notice", "text": "use ``a`b`` here"}),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        for read in [
+            "<p>a <code class=\"tok-path\">b and </code>` c</p>",
+            concat!(
+                "<blockquote class=\"dim\">use `<code class=\"tok-path\">a</code>",
+                "b`` here</blockquote>",
+            ),
+        ] {
+            assert!(
+                rendered.contains(read),
+                "a run of backticks was read some other way, wanted {read}: {rendered}"
+            );
+        }
+    }
+
+    /// Everything on the line is escaped, not only what is marked: the words
+    /// before a marking and the link inside one are text the speaker chose.
+    #[test]
+    fn what_stands_beside_a_marking_cannot_smuggle_markup_into_the_log() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "<b>x</b> see https://x.dev/\"><img src=y> and `z`",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<img"),
+            "a message opened a tag of its own: {rendered}"
+        );
+        for escaped in ["&lt;b&gt;x&lt;/b&gt;", "&lt;img"] {
+            assert!(
+                rendered.contains(escaped),
+                "the message lost its {escaped}: {rendered}"
+            );
+        }
+    }
+
     /// A line break is the end of what was being said on that line, so a
     /// marking cannot reach across one and leave a tag open over the break.
     #[test]
