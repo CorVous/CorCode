@@ -23,6 +23,10 @@ const CORE_LINE: &str = "corcode";
 /// What a tool call that names neither itself nor an id is called.
 const UNNAMED_TOOL: &str = "tool call";
 
+/// How an adapter wraps a tool's output for a markdown reader. The transcript
+/// is not one, so the wrapper would be read out as itself.
+const FENCE: &str = "```";
+
 /// Updates the agent keeps its client's accounting with. They carry no words
 /// for the operator, so the transcript is quieter without them.
 const BOOKKEEPING: [&str; 3] = [
@@ -195,6 +199,7 @@ struct ToolCall {
     id: Option<String>,
     title: Option<String>,
     status: Option<String>,
+    result: Option<String>,
 }
 
 impl ToolCall {
@@ -209,6 +214,7 @@ impl ToolCall {
     fn amend(&mut self, later: Self) {
         self.title = later.title.or_else(|| self.title.take());
         self.status = later.status.or_else(|| self.status.take());
+        self.result = later.result.or_else(|| self.result.take());
     }
 
     /// What the operator can recognise the call by.
@@ -256,6 +262,7 @@ fn entry(event: &Value) -> Entry<'_> {
             id: owned(event, "toolCallId"),
             title: owned(event, "title"),
             status: owned(event, "status"),
+            result: tool_result_text(event),
         }),
         _ => Entry::Aside(kind),
     }
@@ -282,7 +289,11 @@ fn line(block: &Block) -> String {
         Block::Run(Voice::Thought, said) => dimmed("p", &said_html(said)),
         Block::Notice(said) => dimmed("blockquote", &said_html(said)),
         Block::Aside(said) => dimmed("p", &format!("<small>{}</small>", text(said))),
-        Block::Tool(call) => dimmed("p", &format!("<small>{}</small>", tool_line(call))),
+        Block::Tool(call) => format!(
+            "{}{}",
+            dimmed("p", &format!("<small>{}</small>", tool_line(call))),
+            call.result.as_deref().map(printed_html).unwrap_or_default(),
+        ),
     }
 }
 
@@ -302,6 +313,12 @@ fn tool_line(call: &ToolCall) -> String {
     format!("{}{status}", text(call.name()))
 }
 
+/// What a tool printed, kept as it was printed: the element holds the line
+/// breaks and the columns, and the stylesheet keeps a wide line in its own box.
+fn printed_html(printed: &str) -> String {
+    dimmed("pre", &text(printed).to_string())
+}
+
 /// Said words as HTML: escaped, keeping the line breaks the speaker meant.
 fn said_html(said: &str) -> String {
     text(said).to_string().replace('\n', "<br>")
@@ -315,6 +332,34 @@ fn blocks_text(content: &Value) -> Option<String> {
         None => block_text(content)?.to_owned(),
     };
     (!said.is_empty()).then_some(said)
+}
+
+/// What a tool call printed, out of the wrapper the adapter puts it in: a
+/// result block holds its text one content deeper than a message chunk does,
+/// and blocks of anything else (diffs, terminals) carry nothing to read here.
+fn tool_result_text(event: &Value) -> Option<String> {
+    let printed: String = event
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter_map(|block| block.get("content").and_then(block_text))
+        .collect();
+    let printed = unfenced(&printed);
+    (!printed.is_empty()).then(|| printed.to_owned())
+}
+
+/// Output with the one code fence around it taken off, so the transcript reads
+/// what the tool printed rather than how it was marked up.
+fn unfenced(printed: &str) -> &str {
+    let Some((opening, body)) = printed.split_once('\n') else {
+        return printed;
+    };
+    if !opening.starts_with(FENCE) {
+        return printed;
+    }
+    body.trim_end()
+        .strip_suffix(FENCE)
+        .map_or(printed, |inner| inner.strip_suffix('\n').unwrap_or(inner))
 }
 
 fn block_text(block: &Value) -> Option<&str> {
@@ -407,6 +452,17 @@ mod tests {
     /// A later word on the same tool call, carrying only what changed.
     fn tool_update(id: &str, status: &str) -> Value {
         json!({"sessionUpdate": "tool_call_update", "toolCallId": id, "status": status})
+    }
+
+    /// The word on a tool call that carries what it printed: the text sits in
+    /// a content block of its own, fenced for a markdown reader (ADR-0006).
+    fn tool_result(id: &str, printed: &str) -> Value {
+        json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": id,
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": printed}}],
+        })
     }
 
     /// An update the agent keeps its client's accounting with.
@@ -654,6 +710,130 @@ mod tests {
     }
 
     #[test]
+    fn what_a_tool_printed_comes_out_of_the_fence_the_adapter_wrapped_it_in() {
+        let printed = tool_result_text(&tool_result(
+            "call_1",
+            "```console\n1 file changed, 2 insertions(+)\n```",
+        ));
+
+        assert_eq!(printed.as_deref(), Some("1 file changed, 2 insertions(+)"));
+    }
+
+    #[test]
+    fn a_tool_call_with_nothing_to_read_has_no_result() {
+        for content in [
+            json!([]),
+            json!([{"type": "diff", "path": "src/ui/mod.rs"}]),
+        ] {
+            let event = json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "completed",
+                "content": content,
+            });
+
+            assert!(
+                tool_result_text(&event).is_none(),
+                "a call that printed nothing carries a result: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_tool_printed_lands_under_the_line_it_belongs_to() {
+        let events = log(&[
+            tool_call("call_1", "git commit"),
+            tool_result("call_1", "```console\n1 file changed\n```"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(
+                "<p class=\"dim\"><small>git commit · completed</small></p>\
+                 <pre class=\"dim\">1 file changed</pre>"
+            ),
+            "what the tool printed is not under its own line: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("git commit").count(),
+            1,
+            "the result took a line of its own: {rendered}"
+        );
+    }
+
+    /// The transcript is the record of the run: a long result is worth reading
+    /// to the end, and the element it sits in is what holds its lines apart.
+    #[test]
+    fn what_a_tool_printed_reaches_the_page_whole_and_broken_where_it_broke() {
+        let printed = (1..=200)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let events = log(&[
+            tool_call("call_1", "git diff"),
+            tool_result("call_1", &format!("```console\n{printed}\n```")),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(&format!("<pre class=\"dim\">{printed}</pre>")),
+            "what the tool printed did not reach the page whole ({} chars rendered)",
+            rendered.len()
+        );
+        assert!(
+            !rendered.contains("<br>"),
+            "the line breaks were rewritten as markup: {rendered}"
+        );
+    }
+
+    /// A tool prints whatever it was pointed at, so its output is the least
+    /// trusted string on the page.
+    #[test]
+    fn what_a_tool_printed_cannot_smuggle_markup_into_the_log() {
+        let events = log(&[
+            tool_call("call_1", "cat x"),
+            tool_result("call_1", "```console\n<script>alert(1)</script>\n```"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<script>"),
+            "a tool's output let markup through: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_later_word_on_a_call_does_not_wipe_what_it_printed() {
+        let events = log(&[
+            tool_call("call_1", "git commit"),
+            tool_result("call_1", "```console\n1 file changed\n```"),
+            tool_update("call_1", "failed"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"dim\">1 file changed</pre>"),
+            "a later update carrying no output cleared the output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_tool_call_that_printed_nothing_stays_one_line() {
+        let events = log(&[tool_call("call_1", "git commit")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<pre"),
+            "a call with nothing to show opened a block anyway: {rendered}"
+        );
+    }
+
+    #[test]
     fn bookkeeping_updates_are_left_out_of_the_transcript() {
         let events = log(&[
             usage_update(),
@@ -770,6 +950,7 @@ mod tests {
             outbound_prompt("ship it"),
             chunk("agent_thought_chunk", "the ladder first"),
             tool_call("call_1", "git commit"),
+            tool_result("call_1", "```console\n1 file changed\n```"),
             json!({"sessionUpdate": "plan", "entries": []}),
             json!({"corcode": "reset_notice", "text": "Agent memory was reset."}),
             chunk("agent_message_chunk", "on it"),
@@ -780,7 +961,8 @@ mod tests {
         for dimmed in [
             "<p class=\"dim\"><b>you:</b> ship it</p>",
             "<p class=\"dim\">the ladder first</p>",
-            "<p class=\"dim\"><small>git commit · pending</small></p>",
+            "<p class=\"dim\"><small>git commit · completed</small></p>",
+            "<pre class=\"dim\">1 file changed</pre>",
             "<p class=\"dim\"><small>plan</small></p>",
             "<blockquote class=\"dim\">Agent memory was reset.</blockquote>",
         ] {
@@ -802,6 +984,17 @@ mod tests {
         assert!(
             crate::ui::CSS.contains(".dim{opacity:0.6;}"),
             "nothing in the stylesheet dims a dimmed line: {}",
+            crate::ui::CSS
+        );
+    }
+
+    /// A tool prints lines that can run wide; the one stylesheet is what keeps
+    /// them inside their own box rather than the page's (ADR-0008 §3).
+    #[test]
+    fn what_holds_a_wide_result_in_its_box_stands_in_the_stylesheet() {
+        assert!(
+            crate::ui::CSS.contains("pre{overflow-x:auto;}"),
+            "nothing in the stylesheet holds a wide result: {}",
             crate::ui::CSS
         );
     }
