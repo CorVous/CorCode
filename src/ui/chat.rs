@@ -920,6 +920,10 @@ mod tests {
             rendered.contains("<pre class=\"code\"><code></code></pre>"),
             "an empty block did not survive as one: {rendered}"
         );
+        assert!(
+            !rendered.contains("<p></p>"),
+            "the blank either side of the fence became a paragraph: {rendered}"
+        );
     }
 
     #[test]
@@ -969,7 +973,7 @@ mod tests {
 
     #[test]
     fn code_in_a_users_turn_stands_back_with_the_rest_of_the_turn() {
-        let events = log(&[outbound_prompt("try:\n```\nmake test\n```")]);
+        let events = log(&[outbound_prompt("try:\n```\nmake test\n```\nthen ship")]);
 
         let rendered = event_log(CHAT_ID, &events);
 
@@ -977,6 +981,7 @@ mod tests {
             rendered.contains(concat!(
                 "<p class=\"dim\"><b>you:</b> try:</p>",
                 "<pre class=\"code dim\"><code>make test</code></pre>",
+                "<p class=\"dim\">then ship</p>",
             )),
             "the user's code did not stand back with the turn: {rendered}"
         );
