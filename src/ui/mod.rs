@@ -149,7 +149,7 @@ mod tests {
 
     /// ADR-0008 budgets styling at "on the order of a dozen lines". Past this
     /// the UI is being restyled, which is a new decision, not an increment.
-    const MAX_DECLARATIONS: usize = 24;
+    const MAX_DECLARATIONS: usize = 36;
 
     #[test]
     fn the_stylesheet_stays_inside_the_adr_budget() {
@@ -175,6 +175,46 @@ mod tests {
                 CSS.contains(item),
                 "the stylesheet is missing {item}: {CSS}"
             );
+        }
+    }
+
+    /// What the highlighter says a word of code is doing, the stylesheet
+    /// answers with a colour of the one palette; nothing names a hex here.
+    #[test]
+    fn the_stylesheet_colours_what_the_highlighter_reads() {
+        for rule in [
+            ".hl-comment{color:var(--tok-comment);}",
+            ".hl-string{color:var(--tok-str);}",
+            ".hl-constant{color:var(--tok-num);}",
+            ".hl-keyword,.hl-storage{color:var(--tok-kw);}",
+            ".hl-support{color:var(--tok-type);}",
+            ".hl-entity{color:var(--tok-path);}",
+        ] {
+            assert!(
+                CSS.contains(rule),
+                "the stylesheet is missing {rule}: {CSS}"
+            );
+        }
+    }
+
+    /// Each colour of the palette is written once for a light screen and once
+    /// for a dark one, the dark answer coming after the question.
+    #[test]
+    fn the_code_palette_answers_itself_under_a_dark_scheme() {
+        let at = |needle: &str| {
+            CSS.find(needle)
+                .unwrap_or_else(|| panic!("the stylesheet is missing {needle}: {CSS}"))
+        };
+        let media = at("prefers-color-scheme");
+
+        for (light, dark) in [
+            ("--tok-kw:#9a3fb8", "--tok-kw:#c678dd"),
+            ("--tok-str:#2e8b52", "--tok-str:#7fd88f"),
+            ("--tok-type:#8a6d1f", "--tok-type:#e5c07b"),
+            ("--tok-comment:#8a9099", "--tok-comment:#7d8590"),
+        ] {
+            assert!(at(light) < media, "{light} is not the light answer: {CSS}");
+            assert!(at(dark) > media, "{dark} is not the dark answer: {CSS}");
         }
     }
 

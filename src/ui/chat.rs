@@ -972,14 +972,14 @@ mod tests {
     fn a_fenced_block_in_a_message_reads_as_code() {
         let events = log(&[chunk(
             "agent_message_chunk",
-            "look:\nat this:\n```rust\nlet x = 1;\nlet y = 2;\n```\nand done",
+            "look:\nat this:\n```ladder\nlet x = 1;\nlet y = 2;\n```\nand done",
         )]);
 
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
             rendered.contains(
-                "<pre class=\"code\"><code class=\"lang-rust\">let x = 1;\nlet y = 2;</code></pre>"
+                "<pre class=\"code\"><code class=\"lang-ladder\">let x = 1;\nlet y = 2;</code></pre>"
             ),
             "the fenced block did not read as code: {rendered}"
         );
@@ -1023,13 +1023,14 @@ mod tests {
 
     #[test]
     fn a_fence_that_is_never_closed_reads_as_code_to_the_end() {
-        let events = log(&[chunk("agent_message_chunk", "here:\n```rust\nlet x = 1;")]);
+        let events = log(&[chunk("agent_message_chunk", "here:\n```ladder\nlet x = 1;")]);
 
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered
-                .contains("<pre class=\"code\"><code class=\"lang-rust\">let x = 1;</code></pre>"),
+            rendered.contains(
+                "<pre class=\"code\"><code class=\"lang-ladder\">let x = 1;</code></pre>"
+            ),
             "an unclosed fence lost the code under it: {rendered}"
         );
     }
@@ -1039,14 +1040,14 @@ mod tests {
     #[test]
     fn a_fence_that_arrives_in_pieces_is_still_a_fence() {
         let events = log(&[
-            chunk("agent_message_chunk", "```ru"),
-            chunk("agent_message_chunk", "st\nlet x = 1;\n```"),
+            chunk("agent_message_chunk", "```lad"),
+            chunk("agent_message_chunk", "der\nlet x = 1;\n```"),
         ]);
 
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered.contains("<code class=\"lang-rust\">let x = 1;</code>"),
+            rendered.contains("<code class=\"lang-ladder\">let x = 1;</code>"),
             "a fence split across chunks was not read as one: {rendered}"
         );
     }
@@ -1105,7 +1106,7 @@ mod tests {
     fn code_in_a_message_stands_beside_the_prose_rather_than_inside_it() {
         let events = log(&[chunk(
             "agent_message_chunk",
-            "look:\n```rust\nlet x = 1;\n```\nand done",
+            "look:\n```ladder\nlet x = 1;\n```\nand done",
         )]);
 
         let rendered = event_log(CHAT_ID, &events);
@@ -1113,7 +1114,7 @@ mod tests {
         assert!(
             rendered.contains(concat!(
                 "<p>look:</p>",
-                "<pre class=\"code\"><code class=\"lang-rust\">let x = 1;</code></pre>",
+                "<pre class=\"code\"><code class=\"lang-ladder\">let x = 1;</code></pre>",
                 "<p>and done</p>",
             )),
             "the code did not stand beside the prose: {rendered}"
@@ -1203,13 +1204,13 @@ mod tests {
     fn a_fence_names_only_its_first_word_as_the_language() {
         let events = log(&[chunk(
             "agent_message_chunk",
-            "```rust ignore dim\nlet x = 1;\n```",
+            "```ladder ignore dim\nlet x = 1;\n```",
         )]);
 
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered.contains("<code class=\"lang-rust\">let x = 1;</code>"),
+            rendered.contains("<code class=\"lang-ladder\">let x = 1;</code>"),
             "the rest of the fence's line rode in on the class: {rendered}"
         );
         assert!(
@@ -1234,6 +1235,90 @@ mod tests {
         assert!(
             !rendered.contains("onmouseover"),
             "a language named an attribute of its own: {rendered}"
+        );
+    }
+
+    /// Code the agent writes is read for what each word of it is doing, and
+    /// the classes say so; the colours are the stylesheet's (ADR-0008 §3).
+    #[test]
+    fn code_in_a_language_that_is_known_is_read_for_what_it_says() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```rust\n// note\nfn main() {\n    let x = 42;\n    say(\"hi\");\n}\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        for named in [
+            "hl-comment",
+            "hl-storage",
+            "hl-entity",
+            "hl-keyword",
+            "hl-constant",
+            "hl-string",
+        ] {
+            assert!(
+                rendered.contains(named),
+                "the code was not read for its {named}: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("<pre class=\"code\"><code class=\"lang-rust\">"),
+            "the block the colours sit in changed: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_language_nothing_here_knows_reads_as_plain_code() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```nosuchlang\nlet x = 1;\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"lang-nosuchlang\">let x = 1;</code>"),
+            "a language nothing knows lost the code under it: {rendered}"
+        );
+        assert!(
+            !rendered.contains("hl-"),
+            "code was coloured by a reading nothing here has: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_the_fence_names_no_language_for_reads_as_plain_code() {
+        let events = log(&[chunk("agent_message_chunk", "```\nlet x = 1;\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code>let x = 1;</code>"),
+            "an unnamed block lost the code under it: {rendered}"
+        );
+        assert!(
+            !rendered.contains("hl-"),
+            "code was coloured in a language nobody named: {rendered}"
+        );
+    }
+
+    #[test]
+    fn coloured_code_cannot_smuggle_markup_into_the_log() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```rust\nsay(\"<script>alert(1)</script>\");\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<script>"),
+            "coloured code let markup through: {rendered}"
+        );
+        assert!(
+            rendered.contains("&lt;script&gt;"),
+            "the code itself did not survive escaping once: {rendered}"
         );
     }
 
@@ -1274,13 +1359,13 @@ mod tests {
     fn a_fence_closed_over_windows_line_endings_still_closes() {
         let events = log(&[chunk(
             "agent_message_chunk",
-            "here:\r\n```rust\r\nlet x = 1;\r\n```\r\n",
+            "here:\r\n```ladder\r\nlet x = 1;\r\n```\r\n",
         )]);
 
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered.contains("<pre class=\"code\"><code class=\"lang-rust\">let x = 1;"),
+            rendered.contains("<pre class=\"code\"><code class=\"lang-ladder\">let x = 1;"),
             "the block did not read as code: {rendered}"
         );
         assert!(
