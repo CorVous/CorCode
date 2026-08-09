@@ -953,32 +953,15 @@ mod tests {
 
         let rendered = event_log(CHAT_ID, &events);
 
-        let (history, hot) = rendered
-            .split_once("<div id=\"log-hot\"")
-            .unwrap_or_else(|| panic!("the full log carries no hot region: {rendered}"));
-        assert!(
-            history.starts_with(&format!(
+        assert_eq!(
+            rendered,
+            format!(
                 "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every 30s\" \
-                 hx-swap=\"outerHTML\"><div id=\"log-history\">",
-                chat_events_path(CHAT_ID)
-            )),
-            "the log does not resync itself slowly around its history: {rendered}"
-        );
-        assert!(
-            history.contains("<p class=\"dim\"><b>you:</b> ship it</p>")
-                && history.contains("<p>on it</p>"),
-            "the settled lines are not in the history region: {rendered}"
-        );
-        assert!(
-            !hot.contains("<p>"),
-            "the tail repeats lines history already carries: {rendered}"
-        );
-        assert!(
-            rendered.ends_with(&format!(
-                "{}</section>",
+                 hx-swap=\"outerHTML\"><div id=\"log-history\">\
+                 <p class=\"dim\"><b>you:</b> ship it</p><p>on it</p></div>{}</section>",
+                chat_events_path(CHAT_ID),
                 hot_log(CHAT_ID, &events, events.len())
-            )),
-            "the tail does not poll on from where history stops: {rendered}"
+            )
         );
     }
 
