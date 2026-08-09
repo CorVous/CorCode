@@ -25,8 +25,10 @@ const CORE_LINE: &str = "corcode";
 /// What a tool call that names neither itself nor an id is called.
 const UNNAMED_TOOL: &str = "tool call";
 
-/// How an adapter wraps a tool's output for a markdown reader. The transcript
-/// is not one, so the wrapper would be read out as itself.
+/// How a code fence is spelled. An adapter wraps a tool's output in one for a
+/// markdown reader, and an agent fences the code it writes; the transcript is
+/// not markdown, so a fence is acted on rather than read out as itself. A
+/// longer run of backticks is not read as a fence of its own.
 const FENCE: &str = "```";
 
 /// Updates the agent keeps its client's accounting with. They carry no words
@@ -284,18 +286,59 @@ fn voice(kind: &str) -> Option<Voice> {
 /// is read for; every other line stands back from it (ADR-0008).
 fn line(block: &Block) -> String {
     match block {
-        Block::Turn(said) | Block::Run(Voice::User, said) => {
-            dimmed("p", &format!("<b>you:</b> {}", said_html(said)))
-        }
-        Block::Run(Voice::Agent, said) => format!("<p>{}</p>", said_html(said)),
-        Block::Run(Voice::Thought, said) => dimmed("p", &said_html(said)),
-        Block::Notice(said) => dimmed("blockquote", &said_html(said)),
+        Block::Turn(said) | Block::Run(Voice::User, said) => said_html(said, &USER),
+        Block::Run(Voice::Agent, said) => said_html(said, &AGENT),
+        Block::Run(Voice::Thought, said) => said_html(said, &THOUGHT),
+        Block::Notice(said) => said_html(said, &NOTICE),
         Block::Aside(said) => dimmed("p", &format!("<small>{}</small>", text(said))),
         Block::Tool(call) => format!(
             "{}{}",
             dimmed("p", &format!("<small>{}</small>", tool_line(call))),
             call.result.as_deref().map(printed_html).unwrap_or_default(),
         ),
+    }
+}
+
+/// How a voice reads on the page: the element its prose sits in, whether it
+/// stands back from the agent's message, and what names it as it opens.
+struct Reading {
+    tag: &'static str,
+    set_back: bool,
+    label: &'static str,
+}
+
+const AGENT: Reading = Reading {
+    tag: "p",
+    set_back: false,
+    label: "",
+};
+
+const USER: Reading = Reading {
+    tag: "p",
+    set_back: true,
+    label: "<b>you:</b> ",
+};
+
+const THOUGHT: Reading = Reading {
+    tag: "p",
+    set_back: true,
+    label: "",
+};
+
+const NOTICE: Reading = Reading {
+    tag: "blockquote",
+    set_back: true,
+    label: "",
+};
+
+impl Reading {
+    /// One passage of prose in the element this voice reads in.
+    fn paragraph(&self, said: &str) -> String {
+        if self.set_back {
+            dimmed(self.tag, said)
+        } else {
+            format!("<{tag}>{said}</{tag}>", tag = self.tag)
+        }
     }
 }
 
@@ -480,9 +523,119 @@ fn mark(rest: &str) -> Option<(&str, &'static str)> {
     Some((&rest[..glyph.len_utf8()], class))
 }
 
-/// Said words as HTML: escaped, keeping the line breaks the speaker meant.
-fn said_html(said: &str) -> String {
-    text(said).to_string().replace('\n', "<br>")
+/// Said words as HTML: prose escaped with the line breaks the speaker meant,
+/// and code the speaker fenced off kept as code in a block of its own beside
+/// it — never inside it, which a paragraph would not hold (ADR-0008).
+///
+/// Whoever spoke is named as the message opens, on the first words of it;
+/// a message of nothing but code still opens with who is speaking.
+fn said_html(said: &str, reading: &Reading) -> String {
+    let mut passages = passages(said);
+    if !reading.label.is_empty() && !matches!(passages.first(), Some(Passage::Prose(_))) {
+        passages.insert(0, Passage::Prose(Vec::new()));
+    }
+    let mut label = reading.label;
+    let mut html = String::new();
+    for passage in &passages {
+        match passage {
+            Passage::Prose(lines) => {
+                html.push_str(&reading.paragraph(&format!("{label}{}", prose_html(lines))));
+                label = "";
+            }
+            Passage::Code(fenced) => html.push_str(&fenced.html(reading.set_back)),
+        }
+    }
+    html
+}
+
+/// A message read as the run of prose and code it is, in the order it was
+/// said, and never empty: a message that says nothing is one empty passage.
+///
+/// The whole message is read at once rather than chunk by chunk, so a fence
+/// the adapter split across two chunks is still a fence. A fence left open is
+/// read to the end of the message: a turn is shown while it streams, so the
+/// closing fence has usually not arrived yet.
+fn passages(said: &str) -> Vec<Passage<'_>> {
+    let mut passages = Vec::new();
+    let mut prose: Vec<&str> = Vec::new();
+    let mut fenced: Option<Fenced<'_>> = None;
+    for line in said.split('\n') {
+        if let Some(mut open) = fenced.take() {
+            if line.trim_end() == FENCE {
+                passages.push(Passage::Code(open));
+            } else {
+                open.lines.push(line);
+                fenced = Some(open);
+            }
+            continue;
+        }
+        if let Some(said_of_it) = line.strip_prefix(FENCE) {
+            push_prose(&mut passages, &mut prose);
+            fenced = Some(Fenced {
+                language: said_of_it.split_whitespace().next().unwrap_or_default(),
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        prose.push(line);
+    }
+    match fenced {
+        Some(open) => passages.push(Passage::Code(open)),
+        None if passages.is_empty() => passages.push(Passage::Prose(prose)),
+        None => push_prose(&mut passages, &mut prose),
+    }
+    passages
+}
+
+/// One stretch of a message, read as what it is.
+enum Passage<'a> {
+    Prose(Vec<&'a str>),
+    Code(Fenced<'a>),
+}
+
+/// Prose beside code stands as a passage only when it says something: the
+/// blank line under a fence is the fence's punctuation, not a paragraph.
+fn push_prose<'a>(passages: &mut Vec<Passage<'a>>, prose: &mut Vec<&'a str>) {
+    let says_something = prose.iter().any(|line| !line.is_empty());
+    let prose = std::mem::take(prose);
+    if says_something {
+        passages.push(Passage::Prose(prose));
+    }
+}
+
+/// A run of lines the speaker fenced off as code, and the one word of what
+/// they said of it that names what it is written in: the rest is said to a
+/// markdown reader, and naming it here would put words of the agent's
+/// choosing into the page's own classes.
+struct Fenced<'a> {
+    language: &'a str,
+    lines: Vec<&'a str>,
+}
+
+impl Fenced<'_> {
+    /// The block as HTML: escaped, and named for whoever colours it. The
+    /// element holds the line breaks, so nothing is turned into markup here.
+    fn html(&self, set_back: bool) -> String {
+        let named = if self.language.is_empty() {
+            String::new()
+        } else {
+            format!(" class=\"lang-{}\"", text(self.language))
+        };
+        let stands_back = if set_back { " dim" } else { "" };
+        format!(
+            "<pre class=\"code{stands_back}\"><code{named}>{}</code></pre>",
+            text(&self.lines.join("\n"))
+        )
+    }
+}
+
+/// Lines of prose as HTML, keeping the line breaks the speaker meant.
+fn prose_html(prose: &[&str]) -> String {
+    prose
+        .iter()
+        .map(|line| text(line).to_string())
+        .collect::<Vec<_>>()
+        .join("<br>")
 }
 
 /// The words in one content block or a run of them; blocks that carry no text
@@ -578,6 +731,23 @@ mod tests {
                 event: payload.clone(),
             })
             .collect()
+    }
+
+    /// Whether the page opens a block of code while prose is still open, which
+    /// no browser will read as the nesting it looks like.
+    fn nests_a_block_inside_prose(rendered: &str) -> bool {
+        let mut open = false;
+        for tag in rendered.match_indices('<').map(|(at, _)| &rendered[at..]) {
+            if open && tag.starts_with("<pre") {
+                return true;
+            }
+            if tag.starts_with("<p>") || tag.starts_with("<p ") || tag.starts_with("<blockquote") {
+                open = true;
+            } else if tag.starts_with("</p>") || tag.starts_with("</blockquote>") {
+                open = false;
+            }
+        }
+        false
     }
 
     fn position(rendered: &str, needle: &str) -> usize {
@@ -793,6 +963,355 @@ mod tests {
         assert!(
             rendered.contains("first<br>second"),
             "the agent's own line break was swallowed: {rendered}"
+        );
+    }
+
+    /// Code the agent writes is read as code: kept as it was written, in its
+    /// own block, and at the brightness of the message it belongs to.
+    #[test]
+    fn a_fenced_block_in_a_message_reads_as_code() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "look:\nat this:\n```rust\nlet x = 1;\nlet y = 2;\n```\nand done",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(
+                "<pre class=\"code\"><code class=\"lang-rust\">let x = 1;\nlet y = 2;</code></pre>"
+            ),
+            "the fenced block did not read as code: {rendered}"
+        );
+        assert!(
+            rendered.contains("look:<br>at this:") && rendered.contains("and done"),
+            "the prose around the block did not read as prose: {rendered}"
+        );
+        assert!(
+            !rendered.contains('`'),
+            "the fence itself reached the page: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fence_that_names_no_language_names_none() {
+        let events = log(&[chunk("agent_message_chunk", "```\nplain\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"code\"><code>plain</code></pre>"),
+            "a block of no language named one anyway: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_fence_in_it_reads_exactly_as_it_did() {
+        let events = log(&[chunk("agent_message_chunk", "one\ntwo")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>one<br>two</p>"),
+            "prose stopped reading as prose: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<p></p>"),
+            "a message with no code in it grew a block of nothing: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fence_that_is_never_closed_reads_as_code_to_the_end() {
+        let events = log(&[chunk("agent_message_chunk", "here:\n```rust\nlet x = 1;")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered
+                .contains("<pre class=\"code\"><code class=\"lang-rust\">let x = 1;</code></pre>"),
+            "an unclosed fence lost the code under it: {rendered}"
+        );
+    }
+
+    /// The adapter splits a message mid-word, so a fence arrives in pieces;
+    /// what is read for a fence is the message, not the piece.
+    #[test]
+    fn a_fence_that_arrives_in_pieces_is_still_a_fence() {
+        let events = log(&[
+            chunk("agent_message_chunk", "```ru"),
+            chunk("agent_message_chunk", "st\nlet x = 1;\n```"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"lang-rust\">let x = 1;</code>"),
+            "a fence split across chunks was not read as one: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_run_of_backticks_inside_a_line_is_not_a_fence() {
+        let events = log(&[chunk("agent_message_chunk", "see ```rust here")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>see ```rust here</p>"),
+            "backticks mid-line opened a block: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_empty_fenced_block_reads_as_an_empty_block() {
+        let events = log(&[chunk("agent_message_chunk", "```\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"code\"><code></code></pre>"),
+            "an empty block did not survive as one: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<p></p>"),
+            "the blank either side of the fence became a paragraph: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_message_cannot_smuggle_markup_into_the_log() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```\n<script>alert(1)</script>\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<script>"),
+            "code let markup through: {rendered}"
+        );
+        assert!(
+            rendered.contains("&lt;script&gt;"),
+            "the code itself did not survive escaping: {rendered}"
+        );
+    }
+
+    /// A paragraph will not hold a block of code: a browser answers one by
+    /// closing the paragraph early, and the rest of the message falls out of
+    /// the shape the log was written in.
+    #[test]
+    fn code_in_a_message_stands_beside_the_prose_rather_than_inside_it() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "look:\n```rust\nlet x = 1;\n```\nand done",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p>look:</p>",
+                "<pre class=\"code\"><code class=\"lang-rust\">let x = 1;</code></pre>",
+                "<p>and done</p>",
+            )),
+            "the code did not stand beside the prose: {rendered}"
+        );
+        assert!(
+            !nests_a_block_inside_prose(&rendered),
+            "a block opened inside a paragraph: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_users_turn_stands_back_with_the_rest_of_the_turn() {
+        let events = log(&[outbound_prompt("try:\n```\nmake test\n```\nthen ship")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p class=\"dim\"><b>you:</b> try:</p>",
+                "<pre class=\"code dim\"><code>make test</code></pre>",
+                "<p class=\"dim\">then ship</p>",
+            )),
+            "the user's code did not stand back with the turn: {rendered}"
+        );
+    }
+
+    /// A turn of nothing but code is still the user's turn, and still says so.
+    #[test]
+    fn a_user_who_says_only_code_is_still_named() {
+        let events = log(&[outbound_prompt("```\nmake test\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p class=\"dim\"><b>you:</b> </p>",
+                "<pre class=\"code dim\"><code>make test</code></pre>",
+            )),
+            "a turn of pure code lost whose turn it was: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_thought_stands_back_beside_it_rather_than_inside_it() {
+        let events = log(&[chunk("agent_thought_chunk", "maybe:\n```\nmake test\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p class=\"dim\">maybe:</p>",
+                "<pre class=\"code dim\"><code>make test</code></pre>",
+            )),
+            "the thought's code did not stand back beside it: {rendered}"
+        );
+        assert!(
+            !nests_a_block_inside_prose(&rendered),
+            "a block opened inside prose: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_notice_stands_beside_the_quote_rather_than_inside_it() {
+        let events = log(&[json!({
+            "corcode": "reset_notice",
+            "text": "run this again:\n```\nmake test\n```",
+        })]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<blockquote class=\"dim\">run this again:</blockquote>",
+                "<pre class=\"code dim\"><code>make test</code></pre>",
+            )),
+            "the notice's code did not stand beside the quote: {rendered}"
+        );
+        assert!(
+            !nests_a_block_inside_prose(&rendered),
+            "a block opened inside prose: {rendered}"
+        );
+    }
+
+    /// A fence may say more about the code than what it is written in; what
+    /// names the block is the first word, and only that.
+    #[test]
+    fn a_fence_names_only_its_first_word_as_the_language() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```rust ignore dim\nlet x = 1;\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"lang-rust\">let x = 1;</code>"),
+            "the rest of the fence's line rode in on the class: {rendered}"
+        );
+        assert!(
+            !rendered.contains("ignore"),
+            "a word the fence said reached the page: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fence_cannot_name_a_language_that_breaks_out_of_its_attribute() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```x\" onmouseover=\"alert(1)\nlet x = 1;\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"lang-x&quot;\">"),
+            "the language was not named as the text it is: {rendered}"
+        );
+        assert!(
+            !rendered.contains("onmouseover"),
+            "a language named an attribute of its own: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_in_prose_still_reads_as_the_break_it_was() {
+        let events = log(&[chunk("agent_message_chunk", "one\n\ntwo")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>one<br><br>two</p>"),
+            "a blank line broke the paragraph in two: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_message_of_several_blocks_keeps_every_one_of_them() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "a\n```\nx\n```\nb\n```\ny\n```\nc",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p>a</p>",
+                "<pre class=\"code\"><code>x</code></pre>",
+                "<p>b</p>",
+                "<pre class=\"code\"><code>y</code></pre>",
+                "<p>c</p>",
+            )),
+            "a message of several blocks lost some of them: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fence_closed_over_windows_line_endings_still_closes() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "here:\r\n```rust\r\nlet x = 1;\r\n```\r\n",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"code\"><code class=\"lang-rust\">let x = 1;"),
+            "the block did not read as code: {rendered}"
+        );
+        assert!(
+            !rendered.contains('`'),
+            "the closing fence was read as code instead of a close: {rendered}"
+        );
+    }
+
+    /// Only a line that is a fence and nothing else closes a block, so code
+    /// that starts with backticks of its own stays code.
+    #[test]
+    fn a_line_that_only_starts_with_a_fence_does_not_close_the_block() {
+        let events = log(&[chunk("agent_message_chunk", "```\nx\n```end\ny\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code>x\n```end\ny</code>"),
+            "a line that merely starts with a fence closed the block: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_indented_fence_is_not_a_fence() {
+        let events = log(&[chunk("agent_message_chunk", "  ```rust\nlet x = 1;")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>  ```rust<br>let x = 1;</p>"),
+            "an indented fence opened a block: {rendered}"
         );
     }
 
