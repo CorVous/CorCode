@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use anyhow::{Chain, Context as _, Result};
 use axum::Router;
-use axum::extract::{Form, FromRef, FromRequestParts, Path, Request, State};
+use axum::extract::{Form, FromRef, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
@@ -29,7 +29,7 @@ use crate::config::Config;
 use crate::plane::ContainerPlane;
 use crate::secrets::{Secret, SecretsError};
 use crate::settings::{Outcome, Settings};
-use crate::store::ContainerLiveness;
+use crate::store::{ContainerLiveness, Event};
 use crate::ui::{self, page};
 use crate::verify::VerifyClient;
 
@@ -47,6 +47,9 @@ const CHAT_ID: &str = "{chat_id}";
 
 /// The path parameter every per-secret route is spelled with.
 const SECRET: &str = "{secret}";
+
+/// What a poll of the log names the event it has already read to.
+const FROM: &str = "from";
 
 /// The header htmx reads as "render this page again": how a chat that is no
 /// longer open comes back as what it is now.
@@ -374,6 +377,7 @@ where
 async fn chat_events<P, T>(
     State(chats): State<Arc<Chats<P, T>>>,
     Path(chat_id): Path<String>,
+    Query(poll): Query<Vec<(String, String)>>,
 ) -> Response
 where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
@@ -382,7 +386,28 @@ where
     let Ok(chat_id) = chat_id.parse::<Ulid>() else {
         return no_such_chat();
     };
-    rendered_log(&chats, &chat_id)
+    let from = cursor(&poll);
+    rendered_log(&chats, &chat_id, |chat_id, events| {
+        from.map_or_else(
+            || ui::event_log(chat_id, events),
+            |from| ui::hot_log(chat_id, events, from),
+        )
+    })
+}
+
+/// Where a poll says it has read to, if it says so once and plainly. A cursor
+/// this build cannot read — garbled, empty, or given twice — is no cursor at
+/// all: the poll gets the whole log back, which is the resync it would have
+/// come for next anyway.
+fn cursor(poll: &[(String, String)]) -> Option<usize> {
+    let mut named = poll
+        .iter()
+        .filter_map(|(name, value)| (name == FROM).then_some(value));
+    let only = named.next()?;
+    if named.next().is_some() {
+        return None;
+    }
+    only.parse().ok()
 }
 
 /// Put one prompt to a chat's agent and answer with the log it landed in, so
@@ -401,7 +426,7 @@ where
         return no_such_chat();
     };
     match chats.prompt(&chat_id, &form.prompt).await {
-        Ok(()) => rendered_log(&chats, &chat_id),
+        Ok(()) => rendered_log(&chats, &chat_id, ui::event_log),
         Err(failure @ PromptError::Unwoken(_)) => {
             error!("a chat would not wake: {}", with_causes(&failure));
             (
@@ -473,14 +498,18 @@ where
     }
 }
 
-/// The chat's log as it stands on disk right now.
-fn rendered_log<P, T>(chats: &Chats<P, T>, chat_id: &Ulid) -> Response
+/// The chat's log as it stands on disk right now, drawn by `render`.
+fn rendered_log<P, T>(
+    chats: &Chats<P, T>,
+    chat_id: &Ulid,
+    render: impl FnOnce(&str, &[Event]) -> String,
+) -> Response
 where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
     T: AcpTransport + Send + Sync + 'static,
 {
     match chats.events(chat_id) {
-        Ok(Some(events)) => Html(ui::event_log(&chat_id.to_string(), &events)).into_response(),
+        Ok(Some(events)) => Html(render(&chat_id.to_string(), &events)).into_response(),
         Ok(None) => no_such_chat(),
         Err(failure) => broken_invariant(&failure),
     }

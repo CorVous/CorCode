@@ -35,6 +35,11 @@ const BOOKKEEPING: [&str; 3] = [
 /// so this is what "live" means here: polling, not a second connection.
 const POLL_SECONDS: u32 = 2;
 
+/// How often the whole log is sent again. The tail is polled from a cursor,
+/// which nothing moves between resyncs: this is what puts the settled lines
+/// back where they belong and starts the tail over from the end of them.
+const RESYNC_SECONDS: u32 = 30;
+
 /// One chat, top to bottom: what it is, everything that has happened to it,
 /// and the prompt box waiting at the end.
 #[must_use]
@@ -62,16 +67,37 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
     )
 }
 
-/// The event log alone, polling itself for whatever a turn has added since.
+/// The whole event log: everything settled, and an empty region at the end
+/// polling on from where it stops.
 ///
 /// It is rendered from `events.jsonl` and never from the connection, so it
 /// reads the same whether the chat is live or was live last week (ADR-0006).
+/// The section asks for itself again slowly, which is what settles a turn the
+/// tail has been carrying and starts the tail over after it.
 #[must_use]
 pub fn event_log(chat_id: &str, events: &[Event]) -> String {
     let lines: String = blocks(events).iter().map(line).collect();
     format!(
-        "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {POLL_SECONDS}s\" \
-         hx-swap=\"outerHTML\">{lines}</section>",
+        "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {RESYNC_SECONDS}s\" \
+         hx-swap=\"outerHTML\"><div id=\"log-history\">{lines}</div>{}</section>",
+        text(&chat_events_path(chat_id)),
+        hot_log(chat_id, events, events.len()),
+    )
+}
+
+/// The log from an event on, polling from that same event again.
+///
+/// Every poll re-sends everything since `from`, so what the region carries
+/// grows with the turn until whoever renders it moves the cursor up.
+#[must_use]
+pub fn hot_log(chat_id: &str, events: &[Event], from: usize) -> String {
+    let lines: String = blocks(events.get(from..).unwrap_or(&[]))
+        .iter()
+        .map(line)
+        .collect();
+    format!(
+        "<div id=\"log-hot\" hx-get=\"{}?from={from}\" hx-trigger=\"every {POLL_SECONDS}s\" \
+         hx-swap=\"outerHTML\">{lines}</div>",
         text(&chat_events_path(chat_id)),
     )
 }
@@ -902,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn the_log_polls_itself_while_the_page_is_open() {
+    fn the_log_asks_for_itself_again_while_the_page_is_open() {
         let manifest = manifest(RuntimeStatus::Live);
 
         let fragment = event_log(
@@ -918,10 +944,92 @@ mod tests {
             fragment.contains(&format!(
                 "hx-get=\"{}\"",
                 chat_events_path(&manifest.chat_id)
-            )) && fragment.contains("hx-trigger=\"every 2s\""),
-            "the log does not poll itself: {fragment}"
+            )) && fragment.contains("hx-trigger=\"every 30s\""),
+            "the log does not ask for itself again: {fragment}"
         );
         assert!(fragment.contains("<p>on it</p>"));
+    }
+
+    /// What the page is sent whole: everything settled, once, with an empty
+    /// region at the end that polls on from where the settled log stops. The
+    /// slow trigger on the section is what heals the two of them apart.
+    #[test]
+    fn the_full_log_is_settled_history_with_an_empty_tail_polling_after_it() {
+        let events = log(&[
+            outbound_prompt("ship it"),
+            chunk("agent_message_chunk", "on it"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert_eq!(
+            rendered,
+            format!(
+                "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every 30s\" \
+                 hx-swap=\"outerHTML\"><div id=\"log-history\">\
+                 <p class=\"dim\"><b>you:</b> ship it</p><p>on it</p></div>{}</section>",
+                chat_events_path(CHAT_ID),
+                hot_log(CHAT_ID, &events, events.len())
+            )
+        );
+    }
+
+    /// What a live chat asks for between resyncs is only what it has not seen
+    /// yet, so a long transcript is not re-sent every couple of seconds.
+    #[test]
+    fn the_hot_log_is_the_tail_from_an_index_on_and_polls_for_the_next() {
+        let events = log(&[
+            outbound_prompt("ship it"),
+            chunk("agent_message_chunk", "on it"),
+        ]);
+
+        let fragment = hot_log(CHAT_ID, &events, 1);
+
+        assert!(
+            fragment.contains("<p>on it</p>") && !fragment.contains("ship it"),
+            "the hot region is not the tail alone: {fragment}"
+        );
+        assert!(
+            fragment.contains("id=\"log-hot\"")
+                && fragment.contains(&format!("hx-get=\"{}?from=1\"", chat_events_path(CHAT_ID)))
+                && fragment.contains("hx-trigger=\"every 2s\""),
+            "the hot region does not poll on for what comes next: {fragment}"
+        );
+    }
+
+    /// Where `from` counts from: the events on disk, not the blocks they read
+    /// as. A run split across two chunks is one block and two events, so a
+    /// cursor of two is the second half of the sentence and nothing else.
+    #[test]
+    fn the_hot_log_counts_from_in_events_rather_than_in_blocks() {
+        let events = log(&[
+            outbound_prompt("ship it"),
+            chunk("agent_message_chunk", "on "),
+            chunk("agent_message_chunk", "it"),
+        ]);
+
+        let fragment = hot_log(CHAT_ID, &events, 2);
+
+        assert!(
+            fragment.contains("<p>it</p>"),
+            "the cursor counted blocks rather than events: {fragment}"
+        );
+    }
+
+    /// A page that has already read the whole log asks from past its end, and
+    /// gets an empty region that keeps polling from there.
+    #[test]
+    fn a_hot_log_asked_from_past_the_end_is_empty_rather_than_a_panic() {
+        let events = log(&[chunk("agent_message_chunk", "on it")]);
+
+        assert_eq!(
+            hot_log(CHAT_ID, &events, 9),
+            format!(
+                "<div id=\"log-hot\" hx-get=\"{}?from=9\" hx-trigger=\"every 2s\" \
+                 hx-swap=\"outerHTML\"></div>",
+                chat_events_path(CHAT_ID)
+            )
+        );
     }
 
     #[test]

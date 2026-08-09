@@ -7,7 +7,7 @@ mod settings;
 
 use crate::store::{Manifest, RuntimeStatus};
 
-pub use chat::{chat_page, event_log};
+pub use chat::{chat_page, event_log, hot_log};
 pub use console::{chat_list, console_page, status_line, status_picture};
 pub use settings::{secret_settings, settings_panel};
 

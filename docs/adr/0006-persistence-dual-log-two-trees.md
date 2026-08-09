@@ -184,6 +184,32 @@ not name the same branch — the second push would be refused as a
 non-fast-forward and the retry would fail for a reason that has nothing to do
 with what went wrong the first time.
 
+## Amendment (2026-08-08): the render path is two regions and a resync
+
+The UI still renders solely from `events.jsonl`, and still by polling. What
+changed is what a poll carries. A whole render is settled history —
+`#log-history`, every event there is — with an empty `#log-hot` after it that
+asks for `events?from=<count>` every 2s. The tail is rendered from
+`events[from..]`, so an open page is sent the turn in flight and not the
+transcript behind it.
+
+The cursor is fixed at render time and nothing moves it, so the tail re-sends
+the whole of a long turn on every poll. The section asks for itself again
+every 30s, and that whole render is what settles the turn into history and
+starts the tail over from the new end.
+
+The resync is also what heals a read the cursor cuts across. The log is read
+rather than replayed: a run of chunks in one voice is one message however many
+events it arrived as, and a tool call is one line however many updates it took.
+That reading is bounded by whatever slice it is given, so a run or a call that
+began before `from` starts again as its own block in the tail — a split run
+reads as two messages — until the next whole render puts it back together.
+Slow region, correct; fast region, current.
+
+A poll that names no cursor, or one this build cannot read — garbled, empty,
+or given twice — is answered with the whole render rather than an error. A
+section whose cursor has gone wrong therefore heals into a resync.
+
 ## Consequences
 
 - ADR-0002's "transcript flushed" step in park/close is a no-op — no buffered
