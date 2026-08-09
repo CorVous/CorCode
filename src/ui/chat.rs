@@ -919,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn the_log_polls_itself_while_the_page_is_open() {
+    fn the_log_asks_for_itself_again_while_the_page_is_open() {
         let manifest = manifest(RuntimeStatus::Live);
 
         let fragment = event_log(
@@ -935,10 +935,51 @@ mod tests {
             fragment.contains(&format!(
                 "hx-get=\"{}\"",
                 chat_events_path(&manifest.chat_id)
-            )) && fragment.contains("hx-trigger=\"every 2s\""),
-            "the log does not poll itself: {fragment}"
+            )) && fragment.contains("hx-trigger=\"every 30s\""),
+            "the log does not ask for itself again: {fragment}"
         );
         assert!(fragment.contains("<p>on it</p>"));
+    }
+
+    /// What the page is sent whole: everything settled, once, with an empty
+    /// region at the end that polls on from where the settled log stops. The
+    /// slow trigger on the section is what heals the two of them apart.
+    #[test]
+    fn the_full_log_is_settled_history_with_an_empty_tail_polling_after_it() {
+        let events = log(&[
+            outbound_prompt("ship it"),
+            chunk("agent_message_chunk", "on it"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        let (history, hot) = rendered
+            .split_once("<div id=\"log-hot\"")
+            .unwrap_or_else(|| panic!("the full log carries no hot region: {rendered}"));
+        assert!(
+            history.starts_with(&format!(
+                "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every 30s\" \
+                 hx-swap=\"outerHTML\"><div id=\"log-history\">",
+                chat_events_path(CHAT_ID)
+            )),
+            "the log does not resync itself slowly around its history: {rendered}"
+        );
+        assert!(
+            history.contains("<p class=\"dim\"><b>you:</b> ship it</p>")
+                && history.contains("<p>on it</p>"),
+            "the settled lines are not in the history region: {rendered}"
+        );
+        assert!(
+            !hot.contains("<p>"),
+            "the tail repeats lines history already carries: {rendered}"
+        );
+        assert!(
+            rendered.ends_with(&format!(
+                "{}</section>",
+                hot_log(CHAT_ID, &events, events.len())
+            )),
+            "the tail does not poll on from where history stops: {rendered}"
+        );
     }
 
     /// What a live chat asks for between resyncs is only what it has not seen
