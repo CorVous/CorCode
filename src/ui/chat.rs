@@ -35,6 +35,11 @@ const BOOKKEEPING: [&str; 3] = [
 /// so this is what "live" means here: polling, not a second connection.
 const POLL_SECONDS: u32 = 2;
 
+/// How often the whole log is sent again. The tail is polled from a cursor,
+/// which nothing moves between resyncs: this is what puts the settled lines
+/// back where they belong and starts the tail over from the end of them.
+const RESYNC_SECONDS: u32 = 30;
+
 /// One chat, top to bottom: what it is, everything that has happened to it,
 /// and the prompt box waiting at the end.
 #[must_use]
@@ -62,17 +67,21 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
     )
 }
 
-/// The event log alone, polling itself for whatever a turn has added since.
+/// The whole event log: everything settled, and an empty region at the end
+/// polling on from where it stops.
 ///
 /// It is rendered from `events.jsonl` and never from the connection, so it
 /// reads the same whether the chat is live or was live last week (ADR-0006).
+/// The section asks for itself again slowly, which is what settles a turn the
+/// tail has been carrying and starts the tail over after it.
 #[must_use]
 pub fn event_log(chat_id: &str, events: &[Event]) -> String {
     let lines: String = blocks(events).iter().map(line).collect();
     format!(
-        "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {POLL_SECONDS}s\" \
-         hx-swap=\"outerHTML\">{lines}</section>",
+        "<section id=\"log\" hx-get=\"{}\" hx-trigger=\"every {RESYNC_SECONDS}s\" \
+         hx-swap=\"outerHTML\"><div id=\"log-history\">{lines}</div>{}</section>",
         text(&chat_events_path(chat_id)),
+        hot_log(chat_id, events, events.len()),
     )
 }
 
