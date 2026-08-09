@@ -167,7 +167,7 @@ async fn a_poll_whose_cursor_makes_no_sense_falls_back_to_the_whole_log() {
     let chat_id = app.create_chat().await;
     app.prompt(&chat_id, SAID).await;
 
-    for cursor in ["abc", "", "-1"] {
+    for cursor in ["abc", "", "-1", "1&from=2"] {
         let whole = app
             .body(&format!("/chats/{chat_id}/events?from={cursor}"))
             .await;
