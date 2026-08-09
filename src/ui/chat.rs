@@ -45,7 +45,8 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
             "<p><a href=\"/\">← chats</a></p>\
              <p><small>{} · {} · push {} · {}</small></p>\
              {}{}{}\
-             <form hx-post=\"{}\" hx-target=\"#log\" hx-swap=\"outerHTML\">\
+             <form hx-post=\"{}\" hx-target=\"#log\" hx-swap=\"outerHTML\" \
+             hx-on::after-request=\"if(event.detail.successful)this.reset()\">\
              <p><input name=\"prompt\" aria-label=\"Prompt\" placeholder=\"prompt\"> \
              <button type=\"submit\">Send</button></p></form>\
              <script src=\"{HTMX_PATH}\" defer></script>",
@@ -832,6 +833,16 @@ mod tests {
         assert!(
             !rendered.contains("disabled"),
             "the prompt box is still inert: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_sent_prompt_clears_the_box_it_was_typed_in() {
+        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &[]);
+
+        assert!(
+            rendered.contains("hx-on::after-request=\"if(event.detail.successful)this.reset()\""),
+            "the prompt box does not clear on a successful send: {rendered}"
         );
     }
 
