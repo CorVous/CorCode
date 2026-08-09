@@ -599,7 +599,7 @@ fn passages(said: &str) -> Vec<Passage<'_>> {
         None => push_prose(&mut passages, &mut prose),
     }
     if passages.is_empty() {
-        passages.push(Passage::Prose(prose));
+        passages.push(Passage::Prose(said.split('\n').collect()));
     }
     passages
 }
@@ -611,12 +611,9 @@ enum Passage<'a> {
     Code(Fenced<'a>),
 }
 
-/// Prose beside code stands as a passage only when it says something: the
-/// blank line under a fence is the fence's punctuation, not a paragraph.
+/// The prose gathered so far, read and set down as the passages it is.
 fn push_prose<'a>(passages: &mut Vec<Passage<'a>>, prose: &mut Vec<&'a str>) {
-    if prose.iter().any(|line| !line.is_empty()) {
-        passages.extend(read_prose(std::mem::take(prose)));
-    }
+    passages.extend(read_prose(std::mem::take(prose)));
 }
 
 /// Prose read as the paragraphs and the lists it is: a run of lines the
@@ -644,11 +641,14 @@ fn bulleted(line: &str) -> Option<&str> {
     line.strip_prefix("- ").or_else(|| line.strip_prefix("* "))
 }
 
+/// A run stands as a passage of its own only when it says something: the
+/// blank line under a fence, or the one a message ends on, is the
+/// punctuation of what it follows and not a paragraph.
 fn push_read<'a>(read: &mut Vec<Passage<'a>>, said: &mut Vec<&'a str>, listing: bool) {
-    if said.is_empty() {
+    let said = std::mem::take(said);
+    if !said.iter().any(|line| !line.is_empty()) {
         return;
     }
-    let said = std::mem::take(said);
     read.push(if listing {
         Passage::List(said)
     } else {

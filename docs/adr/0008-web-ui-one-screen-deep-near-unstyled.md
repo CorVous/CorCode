@@ -128,7 +128,13 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    a numbered list, a list indented under an item, and telling one list
    from the next by which marker it uses are all later, and the
    stylesheet still says nothing about any of it — a list reads as the
-   browser draws one.)_
+   browser draws one. What that costs until then is worth saying: an
+   indented bullet or a numbered line inside a run splits the list
+   rather than nesting under it, so `- a`, `  - b`, `- c` reads as a
+   list, a paragraph and a list, in the order they were said. That is a
+   worse shape than the one paragraph they used to make, and it is the
+   price of the other four in five lists being right until nesting
+   lands.)_
 4. **Reference artifact:** variant D on the `prototype/web-ui-screens`
    branch is the shape to imitate; variants A–C are rejected directions
    kept only as prototype history.
