@@ -1378,6 +1378,177 @@ mod tests {
         );
     }
 
+    /// What a sentence is about is what the speaker marked, not what a
+    /// tokenizer guesses: a count, a date and a pair of signs are words.
+    #[test]
+    fn numbers_and_signs_in_a_sentence_stay_words() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "I changed 3 things, landed 2026-08-06, +12 -4",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>I changed 3 things, landed 2026-08-06, +12 -4</p>"),
+            "a sentence did not come through as a sentence: {rendered}"
+        );
+        assert!(
+            !rendered.contains("tok-"),
+            "a sentence was read for tokens: {rendered}"
+        );
+    }
+
+    #[test]
+    fn what_the_speaker_put_in_backticks_reads_as_code() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "look at `src/ui/mod.rs` and `run` it",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p>look at <code class=\"tok-path\">src/ui/mod.rs</code>",
+                " and <code class=\"tok-path\">run</code> it</p>",
+            )),
+            "backticks did not read as code: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_sentence_cannot_smuggle_markup_into_the_log() {
+        let events = log(&[chunk("agent_message_chunk", "run `<b>&x</b>` now")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"tok-path\">&lt;b&gt;&amp;x&lt;/b&gt;</code>"),
+            "code in a sentence reached the page as markup: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_backtick_with_no_partner_is_just_a_backtick() {
+        let events = log(&[chunk("agent_message_chunk", "a `b and `` c")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>a `b and `` c</p>"),
+            "a lone backtick opened code: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_link_in_a_sentence_is_marked_as_one() {
+        let events = log(&[chunk("agent_message_chunk", "see https://corvous.dev now")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>see <span class=\"tok-url\">https://corvous.dev</span> now</p>"),
+            "a link in a sentence went unmarked: {rendered}"
+        );
+    }
+
+    /// Every voice's words are read the same way, not only the agent's.
+    #[test]
+    fn every_voice_reads_its_words_the_same_way() {
+        let events = log(&[
+            outbound_prompt("read `src/ui/mod.rs`"),
+            chunk("agent_thought_chunk", "maybe https://corvous.dev first"),
+            json!({"corcode": "reset_notice", "text": "run `make test` again"}),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        for read in [
+            "<p class=\"dim\"><b>you:</b> read <code class=\"tok-path\">src/ui/mod.rs</code></p>",
+            concat!(
+                "<p class=\"dim\">maybe <span class=\"tok-url\">https://corvous.dev</span>",
+                " first</p>",
+            ),
+            concat!(
+                "<blockquote class=\"dim\">run <code class=\"tok-path\">make test</code>",
+                " again</blockquote>",
+            ),
+        ] {
+            assert!(
+                rendered.contains(read),
+                "a voice went unread, wanted {read}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sentence_with_nothing_marked_in_it_reads_exactly_as_it_did() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "shipping the ladder now, boss\nand it's one-screen-deep",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered
+                .contains("<p>shipping the ladder now, boss<br>and it&#39;s one-screen-deep</p>"),
+            "prose stopped reading as the prose it is: {rendered}"
+        );
+        for marked in ["tok-", "<code"] {
+            assert!(
+                !rendered.contains(marked),
+                "a plain sentence grew a {marked} of its own: {rendered}"
+            );
+        }
+    }
+
+    /// Code in a fence is the highlighter's to read; the inline reading of a
+    /// sentence never reaches inside a block.
+    #[test]
+    fn code_in_a_block_is_read_by_the_highlighter_and_not_as_a_sentence() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "here:\n```rust\nlet x = `42`;\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            code_body(&rendered).contains("hl-"),
+            "the code was not read as code: {rendered}"
+        );
+        for marked in ["tok-", "<code"] {
+            assert!(
+                !code_body(&rendered).contains(marked),
+                "the code was read as a sentence, finding {marked}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_tool_printed_is_still_read_for_every_token() {
+        let events = log(&[
+            tool_call("call_1", "git diff --stat"),
+            tool_result("call_1", "src/ui/mod.rs | 3 +++\n- gone"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        for marked in [
+            "<span class=\"tok-path\">src/ui/mod.rs</span>",
+            "<span class=\"tok-num\">3</span>",
+            "<span class=\"tok-add\">+++</span>",
+            "<span class=\"tok-del\">-</span>",
+        ] {
+            assert!(
+                rendered.contains(marked),
+                "tool output lost its {marked}: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn code_in_a_language_nothing_here_knows_reads_as_plain_code() {
         let events = log(&[chunk(
