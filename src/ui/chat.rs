@@ -796,6 +796,130 @@ mod tests {
         );
     }
 
+    /// Code the agent writes is read as code: kept as it was written, in its
+    /// own block, and at the brightness of the message it belongs to.
+    #[test]
+    fn a_fenced_block_in_a_message_reads_as_code() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "look:\nat this:\n```rust\nlet x = 1;\nlet y = 2;\n```\nand done",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(
+                "<pre class=\"code\"><code class=\"lang-rust\">let x = 1;\nlet y = 2;</code></pre>"
+            ),
+            "the fenced block did not read as code: {rendered}"
+        );
+        assert!(
+            rendered.contains("look:<br>at this:") && rendered.contains("and done"),
+            "the prose around the block did not read as prose: {rendered}"
+        );
+        assert!(
+            !rendered.contains('`'),
+            "the fence itself reached the page: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fence_that_names_no_language_names_none() {
+        let events = log(&[chunk("agent_message_chunk", "```\nplain\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"code\"><code>plain</code></pre>"),
+            "a block of no language named one anyway: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_fence_in_it_reads_exactly_as_it_did() {
+        let events = log(&[chunk("agent_message_chunk", "one\ntwo")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>one<br>two</p>"),
+            "prose stopped reading as prose: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fence_that_is_never_closed_reads_as_code_to_the_end() {
+        let events = log(&[chunk("agent_message_chunk", "here:\n```rust\nlet x = 1;")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered
+                .contains("<pre class=\"code\"><code class=\"lang-rust\">let x = 1;</code></pre>"),
+            "an unclosed fence lost the code under it: {rendered}"
+        );
+    }
+
+    /// The adapter splits a message mid-word, so a fence arrives in pieces;
+    /// what is read for a fence is the message, not the piece.
+    #[test]
+    fn a_fence_that_arrives_in_pieces_is_still_a_fence() {
+        let events = log(&[
+            chunk("agent_message_chunk", "```ru"),
+            chunk("agent_message_chunk", "st\nlet x = 1;\n```"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"lang-rust\">let x = 1;</code>"),
+            "a fence split across chunks was not read as one: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_run_of_backticks_inside_a_line_is_not_a_fence() {
+        let events = log(&[chunk("agent_message_chunk", "see ```rust here")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>see ```rust here</p>"),
+            "backticks mid-line opened a block: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_empty_fenced_block_reads_as_an_empty_block() {
+        let events = log(&[chunk("agent_message_chunk", "```\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"code\"><code></code></pre>"),
+            "an empty block did not survive as one: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_message_cannot_smuggle_markup_into_the_log() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```\n<script>alert(1)</script>\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<script>"),
+            "code let markup through: {rendered}"
+        );
+        assert!(
+            rendered.contains("&lt;script&gt;"),
+            "the code itself did not survive escaping: {rendered}"
+        );
+    }
+
     #[test]
     fn an_event_between_chunks_ends_the_message_it_interrupts() {
         let events = log(&[
