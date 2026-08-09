@@ -854,6 +854,65 @@ mod tests {
                 "{marked} is not marked as a change: {coloured}"
             );
         }
+
+        let ending = colorize("47 ++++----");
+
+        assert!(
+            ending
+                .contains("<span class=\"tok-add\">++++</span><span class=\"tok-del\">----</span>"),
+            "a stat at the end of a line is not marked as a change: {ending}"
+        );
+    }
+
+    /// A flag is spelled like a diff mark and means nothing of the sort, and
+    /// tool output is mostly command lines.
+    #[test]
+    fn a_flag_is_not_a_change() {
+        for flagged in [
+            "cargo test --lib",
+            "diff --git a/x b/x",
+            "docker compose --no-cache",
+        ] {
+            let coloured = colorize(flagged);
+
+            assert!(
+                !coloured.contains("tok-del"),
+                "a flag was read as what a diff takes away: {coloured}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hyphen_in_a_word_or_between_words_is_not_a_change() {
+        let coloured = colorize("a - b and site-packages and test-1");
+
+        assert!(
+            !coloured.contains("tok-del"),
+            "a hyphen was read as what a diff takes away: {coloured}"
+        );
+    }
+
+    #[test]
+    fn a_digit_glued_to_a_word_is_not_a_count() {
+        assert_eq!(colorize("abc123 v2"), "abc123 v2");
+    }
+
+    /// Colouring is for what a tool printed. What the agent said is prose,
+    /// and a path in prose is part of the sentence (ADR-0008 §3).
+    #[test]
+    fn what_the_agent_said_is_left_uncoloured() {
+        let events = log(&[chunk("agent_message_chunk", "see src/a.rs 47")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>see src/a.rs 47</p>"),
+            "the agent's message did not come through as prose: {rendered}"
+        );
+        assert!(
+            !rendered.contains("tok-"),
+            "prose was coloured like tool output: {rendered}"
+        );
     }
 
     #[test]
@@ -943,12 +1002,20 @@ mod tests {
                 crate::ui::CSS
             );
         }
-        assert!(
-            position(crate::ui::CSS, "@media(prefers-color-scheme:dark)")
-                < position(crate::ui::CSS, "--tok-num:#f5a742;"),
-            "the dark palette is not behind the scheme it is for: {}",
-            crate::ui::CSS
-        );
+        for dark in [
+            "--tok-num:#f5a742;",
+            "--tok-path:#61afef;",
+            "--tok-url:#56b6c2;",
+            "--tok-add:#56d364;",
+            "--tok-del:#f47067;",
+        ] {
+            assert!(
+                position(crate::ui::CSS, "@media(prefers-color-scheme:dark)")
+                    < position(crate::ui::CSS, dark),
+                "{dark} is not behind the scheme it is for: {}",
+                crate::ui::CSS
+            );
+        }
     }
 
     #[test]
