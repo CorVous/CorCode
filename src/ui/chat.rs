@@ -580,17 +580,17 @@ mod tests {
             .collect()
     }
 
-    /// Whether the page opens a block element while a paragraph is still open,
-    /// which no browser will read as the nesting it looks like.
-    fn nests_a_block_in_a_paragraph(rendered: &str) -> bool {
+    /// Whether the page opens a block of code while prose is still open, which
+    /// no browser will read as the nesting it looks like.
+    fn nests_a_block_inside_prose(rendered: &str) -> bool {
         let mut open = false;
         for tag in rendered.match_indices('<').map(|(at, _)| &rendered[at..]) {
             if open && tag.starts_with("<pre") {
                 return true;
             }
-            if tag.starts_with("<p>") || tag.starts_with("<p ") {
+            if tag.starts_with("<p>") || tag.starts_with("<p ") || tag.starts_with("<blockquote") {
                 open = true;
-            } else if tag.starts_with("</p>") {
+            } else if tag.starts_with("</p>") || tag.starts_with("</blockquote>") {
                 open = false;
             }
         }
@@ -966,7 +966,7 @@ mod tests {
             "the code did not stand beside the prose: {rendered}"
         );
         assert!(
-            !nests_a_block_in_a_paragraph(&rendered),
+            !nests_a_block_inside_prose(&rendered),
             "a block opened inside a paragraph: {rendered}"
         );
     }
@@ -1000,6 +1000,165 @@ mod tests {
                 "<pre class=\"code dim\"><code>make test</code></pre>",
             )),
             "a turn of pure code lost whose turn it was: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_thought_stands_back_beside_it_rather_than_inside_it() {
+        let events = log(&[chunk("agent_thought_chunk", "maybe:\n```\nmake test\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p class=\"dim\">maybe:</p>",
+                "<pre class=\"code dim\"><code>make test</code></pre>",
+            )),
+            "the thought's code did not stand back beside it: {rendered}"
+        );
+        assert!(
+            !nests_a_block_inside_prose(&rendered),
+            "a block opened inside prose: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_notice_stands_beside_the_quote_rather_than_inside_it() {
+        let events = log(&[json!({
+            "corcode": "reset_notice",
+            "text": "run this again:\n```\nmake test\n```",
+        })]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<blockquote class=\"dim\">run this again:</blockquote>",
+                "<pre class=\"code dim\"><code>make test</code></pre>",
+            )),
+            "the notice's code did not stand beside the quote: {rendered}"
+        );
+        assert!(
+            !nests_a_block_inside_prose(&rendered),
+            "a block opened inside prose: {rendered}"
+        );
+    }
+
+    /// A fence may say more about the code than what it is written in; what
+    /// names the block is the first word, and only that.
+    #[test]
+    fn a_fence_names_only_its_first_word_as_the_language() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```rust ignore dim\nlet x = 1;\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"lang-rust\">let x = 1;</code>"),
+            "the rest of the fence's line rode in on the class: {rendered}"
+        );
+        assert!(
+            !rendered.contains("ignore"),
+            "a word the fence said reached the page: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fence_cannot_name_a_language_that_breaks_out_of_its_attribute() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```x\" onmouseover=\"alert(1)\nlet x = 1;\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"lang-x&quot;\">"),
+            "the language was not named as the text it is: {rendered}"
+        );
+        assert!(
+            !rendered.contains("onmouseover"),
+            "a language named an attribute of its own: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_blank_line_in_prose_still_reads_as_the_break_it_was() {
+        let events = log(&[chunk("agent_message_chunk", "one\n\ntwo")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>one<br><br>two</p>"),
+            "a blank line broke the paragraph in two: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_message_of_several_blocks_keeps_every_one_of_them() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "a\n```\nx\n```\nb\n```\ny\n```\nc",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p>a</p>",
+                "<pre class=\"code\"><code>x</code></pre>",
+                "<p>b</p>",
+                "<pre class=\"code\"><code>y</code></pre>",
+                "<p>c</p>",
+            )),
+            "a message of several blocks lost some of them: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_fence_closed_over_windows_line_endings_still_closes() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "here:\r\n```rust\r\nlet x = 1;\r\n```\r\n",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"code\"><code class=\"lang-rust\">let x = 1;"),
+            "the block did not read as code: {rendered}"
+        );
+        assert!(
+            !rendered.contains('`'),
+            "the closing fence was read as code instead of a close: {rendered}"
+        );
+    }
+
+    /// Only a line that is a fence and nothing else closes a block, so code
+    /// that starts with backticks of its own stays code.
+    #[test]
+    fn a_line_that_only_starts_with_a_fence_does_not_close_the_block() {
+        let events = log(&[chunk("agent_message_chunk", "```\nx\n```end\ny\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code>x\n```end\ny</code>"),
+            "a line that merely starts with a fence closed the block: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_indented_fence_is_not_a_fence() {
+        let events = log(&[chunk("agent_message_chunk", "  ```rust\nlet x = 1;")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>  ```rust<br>let x = 1;</p>"),
+            "an indented fence opened a block: {rendered}"
         );
     }
 
