@@ -42,7 +42,22 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    (re-spin / revive) per ADR-0007's lazy resume. _(Amended 2026-08-08:
    what a tool printed hangs under its line in full, in a `<pre>` and
    out of the code fence the adapter wraps it in, so the transcript is
-   the record of the run rather than a summary of one.)_
+   the record of the run rather than a summary of one.)_ _(Amended
+   2026-08-09: a fence in a message opens a block of its own —
+   `<pre class="code"><code class="lang-…">`, escaped, at the brightness
+   of the message it sits in, since code the agent writes is what the
+   turn is for and not chrome around it. The block stands beside the
+   message's paragraphs rather than inside one, which no browser would
+   read as written. Prose outside a fence is unchanged, and a message
+   with no code in it is the one paragraph it always was. A fence is
+   read on the assembled message, so one split
+   across streamed chunks still counts, and a fence left open runs to
+   the end of the message because a turn is shown while it streams.
+   Only the first word after a fence names the language: the rest is
+   said to a markdown reader, and taking it would let a message name
+   the page's own classes. A run of more than three backticks is not
+   read as a fence of its own. Colouring the code is a later decision;
+   the block only names its language for whoever makes it.)_
 3. **Near-zero CSS.** Semantic HTML on browser defaults; the styling
    budget is on the order of a dozen lines (viewport meta,
    `color-scheme: light dark` so default link and form-control colors

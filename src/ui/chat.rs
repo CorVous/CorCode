@@ -25,8 +25,10 @@ const CORE_LINE: &str = "corcode";
 /// What a tool call that names neither itself nor an id is called.
 const UNNAMED_TOOL: &str = "tool call";
 
-/// How an adapter wraps a tool's output for a markdown reader. The transcript
-/// is not one, so the wrapper would be read out as itself.
+/// How a code fence is spelled. An adapter wraps a tool's output in one for a
+/// markdown reader, and an agent fences the code it writes; the transcript is
+/// not markdown, so a fence is acted on rather than read out as itself. A
+/// longer run of backticks is not read as a fence of its own.
 const FENCE: &str = "```";
 
 /// Updates the agent keeps its client's accounting with. They carry no words
@@ -284,18 +286,59 @@ fn voice(kind: &str) -> Option<Voice> {
 /// is read for; every other line stands back from it (ADR-0008).
 fn line(block: &Block) -> String {
     match block {
-        Block::Turn(said) | Block::Run(Voice::User, said) => {
-            dimmed("p", &format!("<b>you:</b> {}", said_html(said)))
-        }
-        Block::Run(Voice::Agent, said) => format!("<p>{}</p>", said_html(said)),
-        Block::Run(Voice::Thought, said) => dimmed("p", &said_html(said)),
-        Block::Notice(said) => dimmed("blockquote", &said_html(said)),
+        Block::Turn(said) | Block::Run(Voice::User, said) => said_html(said, &USER),
+        Block::Run(Voice::Agent, said) => said_html(said, &AGENT),
+        Block::Run(Voice::Thought, said) => said_html(said, &THOUGHT),
+        Block::Notice(said) => said_html(said, &NOTICE),
         Block::Aside(said) => dimmed("p", &format!("<small>{}</small>", text(said))),
         Block::Tool(call) => format!(
             "{}{}",
             dimmed("p", &format!("<small>{}</small>", tool_line(call))),
             call.result.as_deref().map(printed_html).unwrap_or_default(),
         ),
+    }
+}
+
+/// How a voice reads on the page: the element its prose sits in, whether it
+/// stands back from the agent's message, and what names it as it opens.
+struct Reading {
+    tag: &'static str,
+    set_back: bool,
+    label: &'static str,
+}
+
+const AGENT: Reading = Reading {
+    tag: "p",
+    set_back: false,
+    label: "",
+};
+
+const USER: Reading = Reading {
+    tag: "p",
+    set_back: true,
+    label: "<b>you:</b> ",
+};
+
+const THOUGHT: Reading = Reading {
+    tag: "p",
+    set_back: true,
+    label: "",
+};
+
+const NOTICE: Reading = Reading {
+    tag: "blockquote",
+    set_back: true,
+    label: "",
+};
+
+impl Reading {
+    /// One passage of prose in the element this voice reads in.
+    fn paragraph(&self, said: &str) -> String {
+        if self.set_back {
+            dimmed(self.tag, said)
+        } else {
+            format!("<{tag}>{said}</{tag}>", tag = self.tag)
+        }
     }
 }
 
@@ -480,9 +523,119 @@ fn mark(rest: &str) -> Option<(&str, &'static str)> {
     Some((&rest[..glyph.len_utf8()], class))
 }
 
-/// Said words as HTML: escaped, keeping the line breaks the speaker meant.
-fn said_html(said: &str) -> String {
-    text(said).to_string().replace('\n', "<br>")
+/// Said words as HTML: prose escaped with the line breaks the speaker meant,
+/// and code the speaker fenced off kept as code in a block of its own beside
+/// it — never inside it, which a paragraph would not hold (ADR-0008).
+///
+/// Whoever spoke is named as the message opens, on the first words of it;
+/// a message of nothing but code still opens with who is speaking.
+fn said_html(said: &str, reading: &Reading) -> String {
+    let mut passages = passages(said);
+    if !reading.label.is_empty() && !matches!(passages.first(), Some(Passage::Prose(_))) {
+        passages.insert(0, Passage::Prose(Vec::new()));
+    }
+    let mut label = reading.label;
+    let mut html = String::new();
+    for passage in &passages {
+        match passage {
+            Passage::Prose(lines) => {
+                html.push_str(&reading.paragraph(&format!("{label}{}", prose_html(lines))));
+                label = "";
+            }
+            Passage::Code(fenced) => html.push_str(&fenced.html(reading.set_back)),
+        }
+    }
+    html
+}
+
+/// A message read as the run of prose and code it is, in the order it was
+/// said, and never empty: a message that says nothing is one empty passage.
+///
+/// The whole message is read at once rather than chunk by chunk, so a fence
+/// the adapter split across two chunks is still a fence. A fence left open is
+/// read to the end of the message: a turn is shown while it streams, so the
+/// closing fence has usually not arrived yet.
+fn passages(said: &str) -> Vec<Passage<'_>> {
+    let mut passages = Vec::new();
+    let mut prose: Vec<&str> = Vec::new();
+    let mut fenced: Option<Fenced<'_>> = None;
+    for line in said.split('\n') {
+        if let Some(mut open) = fenced.take() {
+            if line.trim_end() == FENCE {
+                passages.push(Passage::Code(open));
+            } else {
+                open.lines.push(line);
+                fenced = Some(open);
+            }
+            continue;
+        }
+        if let Some(said_of_it) = line.strip_prefix(FENCE) {
+            push_prose(&mut passages, &mut prose);
+            fenced = Some(Fenced {
+                language: said_of_it.split_whitespace().next().unwrap_or_default(),
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        prose.push(line);
+    }
+    match fenced {
+        Some(open) => passages.push(Passage::Code(open)),
+        None if passages.is_empty() => passages.push(Passage::Prose(prose)),
+        None => push_prose(&mut passages, &mut prose),
+    }
+    passages
+}
+
+/// One stretch of a message, read as what it is.
+enum Passage<'a> {
+    Prose(Vec<&'a str>),
+    Code(Fenced<'a>),
+}
+
+/// Prose beside code stands as a passage only when it says something: the
+/// blank line under a fence is the fence's punctuation, not a paragraph.
+fn push_prose<'a>(passages: &mut Vec<Passage<'a>>, prose: &mut Vec<&'a str>) {
+    let says_something = prose.iter().any(|line| !line.is_empty());
+    let prose = std::mem::take(prose);
+    if says_something {
+        passages.push(Passage::Prose(prose));
+    }
+}
+
+/// A run of lines the speaker fenced off as code, and the one word of what
+/// they said of it that names what it is written in: the rest is said to a
+/// markdown reader, and naming it here would put words of the agent's
+/// choosing into the page's own classes.
+struct Fenced<'a> {
+    language: &'a str,
+    lines: Vec<&'a str>,
+}
+
+impl Fenced<'_> {
+    /// The block as HTML: escaped, and named for whoever colours it. The
+    /// element holds the line breaks, so nothing is turned into markup here.
+    fn html(&self, set_back: bool) -> String {
+        let named = if self.language.is_empty() {
+            String::new()
+        } else {
+            format!(" class=\"lang-{}\"", text(self.language))
+        };
+        let stands_back = if set_back { " dim" } else { "" };
+        format!(
+            "<pre class=\"code{stands_back}\"><code{named}>{}</code></pre>",
+            text(&self.lines.join("\n"))
+        )
+    }
+}
+
+/// Lines of prose as HTML, keeping the line breaks the speaker meant.
+fn prose_html(prose: &[&str]) -> String {
+    prose
+        .iter()
+        .map(|line| text(line).to_string())
+        .collect::<Vec<_>>()
+        .join("<br>")
 }
 
 /// The words in one content block or a run of them; blocks that carry no text
