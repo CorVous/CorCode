@@ -103,7 +103,16 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    already spends — a diff the agent pastes is marked in the same green
    and red as a diff a tool printed, so the colours mean one thing on the
    page. Every one is still a custom property answered under the dark
-   scheme.)_
+   scheme.)_ _(Amended 2026-08-09: prose is read by its structure and the
+   lexical reading is now tool output's alone, explicitly. OpenCode is the
+   model: a message is coloured by what the speaker marked up, never by
+   what a run of characters looks like, so a count, a date or a pair of
+   diff signs in a sentence stays words. Two markings so far, both inline
+   and both closing on the line they open on: a backtick run reads as
+   `<code>` in the path colour — where a path in a message now lives —
+   and a bare link is marked as tool output marks it, by the same
+   reading, so the two agree on what a link is. Real bullet lists, as
+   sibling blocks beside the paragraphs, are the next step.)_
 4. **Reference artifact:** variant D on the `prototype/web-ui-screens`
    branch is the shape to imitate; variants A–C are rejected directions
    kept only as prototype history.

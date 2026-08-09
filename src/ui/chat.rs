@@ -677,9 +677,58 @@ fn syntaxes() -> &'static SyntaxSet {
 fn prose_html(prose: &[&str]) -> String {
     prose
         .iter()
-        .map(|line| text(line).to_string())
+        .map(|line| prose_line_html(line))
         .collect::<Vec<_>>()
         .join("<br>")
+}
+
+/// One line of prose as HTML: what the speaker marked with backticks reads as
+/// code and a link reads as a link. Nothing else is read into — a count or a
+/// date in a sentence is words, not a token (ADR-0008 §3). Every marking is
+/// inline and closes on the line it opened on, so none of it crosses the
+/// break between two lines.
+fn prose_line_html(line: &str) -> String {
+    let mut html = String::with_capacity(line.len());
+    let mut rest = line;
+    let mut words = 0;
+    while words < rest.len() {
+        let ahead = &rest[words..];
+        if let Some((marked, taken)) = inline_code(ahead).or_else(|| inline_link(ahead)) {
+            html.push_str(&text(&rest[..words]).to_string());
+            html.push_str(&marked);
+            rest = &ahead[taken..];
+            words = 0;
+        } else {
+            words += ahead
+                .chars()
+                .next()
+                .expect("the rest of the line is not empty")
+                .len_utf8();
+        }
+    }
+    html.push_str(&text(rest).to_string());
+    html
+}
+
+/// A run the speaker put in backticks, and how much of the line it took. A
+/// backtick with no partner on the line is a backtick, and so is a pair with
+/// nothing between them: a fence run mid-sentence stays the text it is.
+fn inline_code(rest: &str) -> Option<(String, usize)> {
+    let said = rest.strip_prefix('`')?;
+    let end = said.find('`').filter(|end| *end > 0)?;
+    Some((
+        format!("<code class=\"tok-path\">{}</code>", text(&said[..end])),
+        end + "``".len(),
+    ))
+}
+
+/// A link in a sentence, marked as the same thing tool output marks it as.
+fn inline_link(rest: &str) -> Option<(String, usize)> {
+    let (url, class) = link(rest)?;
+    Some((
+        format!("<span class=\"tok-{class}\">{}</span>", text(url)),
+        url.len(),
+    ))
 }
 
 /// The words in one content block or a run of them; blocks that carry no text
