@@ -46,7 +46,10 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    adapt to dark mode, 16px form-control font size so iOS Safari
    doesn't auto-zoom on focus, padding, overflow guards). No CSS
    framework, no theming, no custom fonts. A later restyle is additive
-   because the DOM stays semantic.
+   because the DOM stays semantic. _(Amended 2026-08-08: one rule joins
+   the budget — a `.dim` class at `opacity:0.6` on every transcript line
+   except the agent's own message, so the log is read for what the agent
+   said.)_
 4. **Reference artifact:** variant D on the `prototype/web-ui-screens`
    branch is the shape to imitate; variants A–C are rejected directions
    kept only as prototype history.

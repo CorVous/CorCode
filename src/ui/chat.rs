@@ -245,17 +245,25 @@ fn voice(kind: &str) -> Option<Voice> {
     }
 }
 
-/// One block of the log as HTML.
+/// One block of the log as HTML. The agent's message is what the transcript
+/// is read for; every other line stands back from it (ADR-0008).
 fn line(block: &Block) -> String {
     match block {
         Block::Turn(said) | Block::Run(Voice::User, said) => {
-            format!("<p><b>you:</b> {}</p>", said_html(said))
+            dimmed("p", &format!("<b>you:</b> {}", said_html(said)))
         }
-        Block::Run(_, said) => format!("<p>{}</p>", said_html(said)),
-        Block::Notice(said) => format!("<blockquote>{}</blockquote>", said_html(said)),
-        Block::Aside(said) => format!("<p><small>{}</small></p>", text(said)),
-        Block::Tool(call) => format!("<p><small>{}</small></p>", tool_line(call)),
+        Block::Run(Voice::Agent, said) => format!("<p>{}</p>", said_html(said)),
+        Block::Run(Voice::Thought, said) => dimmed("p", &said_html(said)),
+        Block::Notice(said) => dimmed("blockquote", &said_html(said)),
+        Block::Aside(said) => dimmed("p", &format!("<small>{}</small>", text(said))),
+        Block::Tool(call) => dimmed("p", &format!("<small>{}</small>", tool_line(call))),
     }
+}
+
+/// One line set back from the agent's message, in the element it reads as.
+/// What the class costs is the stylesheet's to say (ADR-0008 §3).
+fn dimmed(tag: &str, inner: &str) -> String {
+    format!("<{tag} class=\"dim\">{inner}</{tag}>")
 }
 
 /// A tool call in one line: what it is, and where it last got to.
@@ -511,7 +519,8 @@ mod tests {
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered.contains("<p><b>you:</b> ship it</p>") && rendered.contains("<p>on it</p>"),
+            rendered.contains("<p class=\"dim\"><b>you:</b> ship it</p>")
+                && rendered.contains("<p>on it</p>"),
             "the two voices ran into one: {rendered}"
         );
     }
@@ -526,7 +535,8 @@ mod tests {
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered.contains("<p>weighing it up</p>") && rendered.contains("<p>on it</p>"),
+            rendered.contains("<p class=\"dim\">weighing it up</p>")
+                && rendered.contains("<p>on it</p>"),
             "a thought swallowed the message after it: {rendered}"
         );
     }
@@ -708,7 +718,7 @@ mod tests {
         let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
 
         assert!(
-            rendered.contains("<blockquote>Agent memory was reset"),
+            rendered.contains("<blockquote class=\"dim\">Agent memory was reset"),
             "the reset notice is not a block quote: {rendered}"
         );
     }
@@ -722,6 +732,51 @@ mod tests {
         assert!(
             rendered.contains("<small>plan</small>"),
             "an unknown event vanished instead of naming itself: {rendered}"
+        );
+    }
+
+    /// The transcript is read for what the agent said; the user's own words
+    /// back, its thoughts, notices, asides and tool calls are around it rather
+    /// than in it, so they sit back and let the message carry the eye.
+    #[test]
+    fn every_line_but_the_agents_message_reads_dimmed() {
+        let events = log(&[
+            outbound_prompt("ship it"),
+            chunk("agent_thought_chunk", "the ladder first"),
+            tool_call("call_1", "git commit"),
+            json!({"sessionUpdate": "plan", "entries": []}),
+            json!({"corcode": "reset_notice", "text": "Agent memory was reset."}),
+            chunk("agent_message_chunk", "on it"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        for dimmed in [
+            "<p class=\"dim\"><b>you:</b> ship it</p>",
+            "<p class=\"dim\">the ladder first</p>",
+            "<p class=\"dim\"><small>git commit · pending</small></p>",
+            "<p class=\"dim\"><small>plan</small></p>",
+            "<blockquote class=\"dim\">Agent memory was reset.</blockquote>",
+        ] {
+            assert!(
+                rendered.contains(dimmed),
+                "{dimmed} does not read dimmed: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains("<p>on it</p>"),
+            "the agent's own message reads dimmed too: {rendered}"
+        );
+    }
+
+    /// The class the dimmed lines carry only dims them if the one stylesheet
+    /// says by how much (ADR-0008 §3).
+    #[test]
+    fn what_dimming_is_stands_in_the_stylesheet() {
+        assert!(
+            crate::ui::CSS.contains(".dim{opacity:0.6;}"),
+            "nothing in the stylesheet dims a dimmed line: {}",
+            crate::ui::CSS
         );
     }
 
