@@ -76,6 +76,23 @@ pub fn event_log(chat_id: &str, events: &[Event]) -> String {
     )
 }
 
+/// The log from an event on, polling from that same event again.
+///
+/// Every poll re-sends everything since `from`, so what the region carries
+/// grows with the turn until whoever renders it moves the cursor up.
+#[must_use]
+pub fn hot_log(chat_id: &str, events: &[Event], from: usize) -> String {
+    let lines: String = blocks(events.get(from..).unwrap_or(&[]))
+        .iter()
+        .map(line)
+        .collect();
+    format!(
+        "<div id=\"log-hot\" hx-get=\"{}?from={from}\" hx-trigger=\"every {POLL_SECONDS}s\" \
+         hx-swap=\"outerHTML\">{lines}</div>",
+        text(&chat_events_path(chat_id)),
+    )
+}
+
 /// The gate that pushes a chat's work and gives its workspace back, offered
 /// wherever a workspace is still held — a parked chat has given up only its
 /// container (ADR-0002 rule 2). A success re-renders the page rather than
