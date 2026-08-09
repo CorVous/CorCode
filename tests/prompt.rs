@@ -154,6 +154,47 @@ async fn a_poll_from_an_index_reads_the_tail_and_a_poll_from_none_the_whole_log(
     app.stop().await;
 }
 
+/// The page and the handler have to agree about where the settled log stops:
+/// what the open page's hot region asks for next must come back as the turn
+/// that has happened since it was drawn, and nothing the page already shows.
+#[tokio::test]
+async fn what_an_open_pages_hot_region_asks_for_is_the_turn_it_has_not_seen() {
+    let app = TestApp::start(ScriptedAdapter::answering(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ))
+    .await;
+    let chat_id = app.create_chat().await;
+    app.prompt(&chat_id, SAID).await;
+    let open_page = app.body(&format!("/chats/{chat_id}")).await;
+
+    app.prompt(&chat_id, "still there?").await;
+    let tail = app.body(&hot_poll(&open_page)).await;
+
+    assert!(
+        tail.contains("id=\"log-hot\"") && tail.contains("<b>you:</b> still there?"),
+        "the open page would never see the turn it missed: {tail}"
+    );
+    assert!(
+        !tail.contains(SAID),
+        "the poll brought back lines the page already shows: {tail}"
+    );
+    app.stop().await;
+}
+
+/// What the hot region of a rendered page will ask for on its next poll.
+fn hot_poll(page: &str) -> String {
+    let asking = page
+        .split_once("<div id=\"log-hot\" hx-get=\"")
+        .unwrap_or_else(|| panic!("the page carries no hot region: {page}"))
+        .1;
+    asking
+        .split_once('"')
+        .expect("the hot region names what it polls")
+        .0
+        .to_owned()
+}
+
 /// A cursor this build cannot read is no cursor at all: rather than an error
 /// the operator would have to reload past, the poll gets the whole log, which
 /// is the resync a lost page needs anyway.
