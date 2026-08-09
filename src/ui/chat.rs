@@ -5,6 +5,8 @@
 //! out. One rendering serves both the page and the fragment htmx polls, so a
 //! chat reads the same on load as it does while it streams.
 
+use std::fmt::Write as _;
+
 use serde_json::Value;
 
 use crate::store::{Event, Manifest, RuntimeStatus};
@@ -316,7 +318,166 @@ fn tool_line(call: &ToolCall) -> String {
 /// What a tool printed, kept as it was printed: the element holds the line
 /// breaks and the columns, and the stylesheet keeps a wide line in its own box.
 fn printed_html(printed: &str) -> String {
-    dimmed("pre", &text(printed).to_string())
+    dimmed("pre", &colorize(&text(printed).to_string()))
+}
+
+/// Tool output with the tokens an operator scans for named for the stylesheet:
+/// links, paths, counts and the marks of a change (ADR-0008 §3).
+///
+/// The text arrives escaped, so every escaped character is stepped over whole
+/// — a span opened inside one would put the raw character back on the page.
+/// Each token is claimed where it starts and the scan resumes after it, so
+/// nothing inside a claimed token is read again as a token of its own.
+fn colorize(escaped: &str) -> String {
+    let mut colored = String::with_capacity(escaped.len());
+    let mut rest = escaped;
+    let mut previous = None;
+    while !rest.is_empty() {
+        let (taken, class) = piece(rest, previous);
+        match class {
+            Some(class) => write!(colored, "<span class=\"tok-{class}\">{taken}</span>")
+                .expect("a String cannot fail to be written to"),
+            None => colored.push_str(taken),
+        }
+        rest = &rest[taken.len()..];
+        previous = taken.chars().next_back();
+    }
+    colored
+}
+
+/// The next piece of the text, and the token class it reads as if it is a
+/// token at all. An escaped character is a piece of its own, ahead of every
+/// token, which is what keeps a span from opening inside one.
+fn piece(rest: &str, previous: Option<char>) -> (&str, Option<&'static str>) {
+    if let Some(entity) = entity(rest) {
+        return (entity, None);
+    }
+    if let Some((token, class)) = token(rest, previous) {
+        return (token, Some(class));
+    }
+    let plain = rest.chars().next().expect("the rest is not empty");
+    (&rest[..plain.len_utf8()], None)
+}
+
+/// The escaped character starting here, whole, if one starts here at all.
+fn entity(rest: &str) -> Option<&str> {
+    let inside = rest.strip_prefix('&')?;
+    let end = inside.find(';')?;
+    let named = &inside[..end];
+    let escaped = !named.is_empty()
+        && named
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '#');
+    escaped.then(|| &rest[..end + 2])
+}
+
+/// The token starting here, highest priority first: what a link is made of
+/// would otherwise read as a path, and what a path is made of as a count.
+fn token(rest: &str, previous: Option<char>) -> Option<(&str, &'static str)> {
+    link(rest)
+        .or_else(|| path(rest))
+        .or_else(|| count(rest, previous))
+        .or_else(|| change(rest, previous))
+        .or_else(|| mark(rest))
+}
+
+/// A link, to wherever the run of it stops. Nothing in escaped text ends a
+/// URL but a space, since the markup characters are no longer in it.
+fn link(rest: &str) -> Option<(&str, &'static str)> {
+    if !rest.starts_with("https://") && !rest.starts_with("http://") {
+        return None;
+    }
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some((&rest[..end], "url"))
+}
+
+/// A path: a run with a directory in it, ending in a name with a suffix, and
+/// the line number some tools hang off it.
+fn path(rest: &str) -> Option<(&str, &'static str)> {
+    let run = &rest[..rest
+        .find(|character| !is_path(character))
+        .unwrap_or(rest.len())];
+    let (_, name) = run.rsplit_once('/')?;
+    let (stem, suffix) = name.rsplit_once('.')?;
+    if stem.is_empty() || suffix.is_empty() || !suffix.chars().all(char::is_alphanumeric) {
+        return None;
+    }
+    Some((
+        &rest[..run.len() + numbered_line(&rest[run.len()..])],
+        "path",
+    ))
+}
+
+/// How much of what follows a path is the line number hung off it.
+fn numbered_line(rest: &str) -> usize {
+    let Some(digits) = rest.strip_prefix(':') else {
+        return 0;
+    };
+    let end = digits
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if end == 0 { 0 } else { end + 1 }
+}
+
+/// What a path is spelled with. A path is claimed from the first character of
+/// the run it is in, so no boundary of its own is needed: any later start
+/// inside that run ends at the same name and would read the same.
+fn is_path(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '/' | '.' | '_' | '-')
+}
+
+/// A count, where one begins and to the last digit of it. The two ends are
+/// not symmetric: a digit glued to the end of a word is part of the word
+/// (`v2`, `sha1`), while a unit glued to the end of a count is not part of
+/// the count, so `200ms` colours its `200`. The separators a number is
+/// written with belong to it; the punctuation that follows one does not.
+fn count(rest: &str, previous: Option<char>) -> Option<(&str, &'static str)> {
+    if previous.is_some_and(char::is_alphanumeric)
+        || !rest.starts_with(|first: char| first.is_ascii_digit())
+    {
+        return None;
+    }
+    let run = &rest[..rest
+        .find(|character| !matches!(character, '0'..='9' | '.' | ','))
+        .unwrap_or(rest.len())];
+    let last = run
+        .rfind(|character: char| character.is_ascii_digit())
+        .expect("the run starts with a digit");
+    Some((&run[..=last], "num"))
+}
+
+/// The mark a diff hangs off a line or a stat: a run of one sign, standing on
+/// its own. A mark heads a line, or is a stat of more than one sign after a
+/// space; either way the signs run out into whitespace, which is what tells a
+/// mark from the `--lib` of a command line.
+fn change(rest: &str, previous: Option<char>) -> Option<(&str, &'static str)> {
+    let sign = rest
+        .chars()
+        .next()
+        .filter(|first| matches!(first, '+' | '-'))?;
+    let run = &rest[..rest.len() - rest.trim_start_matches(sign).len()];
+    let signs = &rest[..rest.len() - rest.trim_start_matches(['+', '-']).len()];
+    let runs_out = rest[signs.len()..]
+        .chars()
+        .next()
+        .is_none_or(char::is_whitespace);
+    let heads_a_line = matches!(previous, None | Some('\n'));
+    let stands_apart = previous
+        .is_some_and(|before| before.is_whitespace() || matches!(before, '+' | '-'))
+        && run.len() > 1;
+    (runs_out && (heads_a_line || stands_apart))
+        .then_some((run, if sign == '+' { "add" } else { "del" }))
+}
+
+/// The glyph a tool signs a result with.
+fn mark(rest: &str) -> Option<(&str, &'static str)> {
+    let glyph = rest.chars().next()?;
+    let class = match glyph {
+        '✓' => "ok",
+        '✗' => "err",
+        _ => return None,
+    };
+    Some((&rest[..glyph.len_utf8()], class))
 }
 
 /// Said words as HTML: escaped, keeping the line breaks the speaker meant.

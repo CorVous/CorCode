@@ -54,7 +54,22 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    except the agent's own message, so the log is read for what the agent
    said.)_ _(Amended 2026-08-08: a second rule joins it —
    `pre{overflow-x:auto;}`, so a wide line of tool output scrolls inside
-   its own box instead of widening the page on a phone.)_
+   its own box instead of widening the page on a phone.)_ _(Amended
+   2026-08-09: the declaration cap is lifted from a dozen to two dozen
+   for a token palette on tool output — the link, path, count, diff mark
+   and pass/fail glyph each carry a `tok-` class. The colours are custom
+   properties on `:root`, respelled once under
+   `@media(prefers-color-scheme:dark)`, so a class never names a hex and
+   each colour is written once per scheme. The spans sit inside the
+   dimmed `<pre>`, so they read muted rather than bright: the palette
+   marks what to scan for and does not take the eye off the agent's
+   message. Prose is untouched — this is tool output only. A token is
+   claimed once and never read into again, and the two ends of a count
+   are deliberately not symmetric: a digit glued to the end of a word is
+   part of the word (`v2`), while a unit glued to the end of a count is
+   not part of the count (`200ms` colours its `200`). A run of `+` or
+   `-` is a diff mark only where it runs out into whitespace, so
+   `--no-cache` is a flag and not a deletion.)_
 4. **Reference artifact:** variant D on the `prototype/web-ui-screens`
    branch is the shape to imitate; variants A–C are rejected directions
    kept only as prototype history.
