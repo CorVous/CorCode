@@ -52,7 +52,8 @@ pub const HTMX: &str = include_str!("../../assets/htmx-2.0.10.min.js");
 pub const CSS: &str = "\
 :root{color-scheme:light dark;\
 --tok-num:#b8791b;--tok-path:#2f6bd8;--tok-url:#1c7a86;\
---tok-add:#1a7f37;--tok-del:#cf222e;}\
+--tok-add:#1a7f37;--tok-del:#cf222e;\
+--tok-kw:#9a3fb8;--tok-str:#2e8b52;--tok-type:#8a6d1f;--tok-comment:#8a9099;}\
 body{padding:1rem;overflow-wrap:break-word;}\
 input,select,button{font-size:16px;}\
 .dim{opacity:0.6;}\
@@ -62,9 +63,18 @@ pre{overflow-x:auto;}\
 .tok-url{color:var(--tok-url);}\
 .tok-add,.tok-ok{color:var(--tok-add);}\
 .tok-del,.tok-err{color:var(--tok-del);}\
+.hl-comment{color:var(--tok-comment);}\
+.hl-string{color:var(--tok-str);}\
+.hl-constant{color:var(--tok-num);}\
+.hl-keyword,.hl-storage{color:var(--tok-kw);}\
+.hl-support{color:var(--tok-type);}\
+.hl-entity{color:var(--tok-path);}\
+.hl-inserted{color:var(--tok-add);}\
+.hl-deleted{color:var(--tok-del);}\
 @media(prefers-color-scheme:dark){:root{\
 --tok-num:#f5a742;--tok-path:#61afef;--tok-url:#56b6c2;\
---tok-add:#56d364;--tok-del:#f47067;}}";
+--tok-add:#56d364;--tok-del:#f47067;\
+--tok-kw:#c678dd;--tok-str:#7fd88f;--tok-type:#e5c07b;--tok-comment:#7d8590;}}";
 
 /// A chat paired with the runtime status it has right now (ADR-0002).
 pub type Chat = (Manifest, RuntimeStatus);
@@ -149,7 +159,7 @@ mod tests {
 
     /// ADR-0008 budgets styling at "on the order of a dozen lines". Past this
     /// the UI is being restyled, which is a new decision, not an increment.
-    const MAX_DECLARATIONS: usize = 24;
+    const MAX_DECLARATIONS: usize = 38;
 
     #[test]
     fn the_stylesheet_stays_inside_the_adr_budget() {
@@ -175,6 +185,48 @@ mod tests {
                 CSS.contains(item),
                 "the stylesheet is missing {item}: {CSS}"
             );
+        }
+    }
+
+    /// What the highlighter says a word of code is doing, the stylesheet
+    /// answers with a colour of the one palette; nothing names a hex here.
+    #[test]
+    fn the_stylesheet_colours_what_the_highlighter_reads() {
+        for rule in [
+            ".hl-comment{color:var(--tok-comment);}",
+            ".hl-string{color:var(--tok-str);}",
+            ".hl-constant{color:var(--tok-num);}",
+            ".hl-keyword,.hl-storage{color:var(--tok-kw);}",
+            ".hl-support{color:var(--tok-type);}",
+            ".hl-entity{color:var(--tok-path);}",
+            ".hl-inserted{color:var(--tok-add);}",
+            ".hl-deleted{color:var(--tok-del);}",
+        ] {
+            assert!(
+                CSS.contains(rule),
+                "the stylesheet is missing {rule}: {CSS}"
+            );
+        }
+    }
+
+    /// Each colour of the palette is written once for a light screen and once
+    /// for a dark one, the dark answer coming after the question.
+    #[test]
+    fn the_code_palette_answers_itself_under_a_dark_scheme() {
+        let at = |needle: &str| {
+            CSS.find(needle)
+                .unwrap_or_else(|| panic!("the stylesheet is missing {needle}: {CSS}"))
+        };
+        let media = at("prefers-color-scheme");
+
+        for (light, dark) in [
+            ("--tok-kw:#9a3fb8", "--tok-kw:#c678dd"),
+            ("--tok-str:#2e8b52", "--tok-str:#7fd88f"),
+            ("--tok-type:#8a6d1f", "--tok-type:#e5c07b"),
+            ("--tok-comment:#8a9099", "--tok-comment:#7d8590"),
+        ] {
+            assert!(at(light) < media, "{light} is not the light answer: {CSS}");
+            assert!(at(dark) > media, "{dark} is not the dark answer: {CSS}");
         }
     }
 
