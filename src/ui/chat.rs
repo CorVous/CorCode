@@ -1567,6 +1567,20 @@ mod tests {
         );
     }
 
+    /// A message that says nothing is still a message, and reads as the one
+    /// empty passage it is rather than as no block at all.
+    #[test]
+    fn a_message_of_nothing_but_a_line_break_still_reads_as_a_paragraph() {
+        let events = log(&[chunk("agent_message_chunk", "\n")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p><br></p>"),
+            "a message that says nothing lost its paragraph: {rendered}"
+        );
+    }
+
     #[test]
     fn a_run_of_bulleted_lines_reads_as_one_list() {
         let events = log(&[chunk("agent_message_chunk", "- one\n- two\n- three")]);
