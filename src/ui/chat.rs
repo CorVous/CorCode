@@ -750,6 +750,13 @@ mod tests {
         false
     }
 
+    /// What sits inside the one block of code on the page.
+    fn code_body(rendered: &str) -> &str {
+        let after = &rendered[position(rendered, "<code") + "<code".len()..];
+        let inside = &after[position(after, ">") + 1..];
+        &inside[..position(inside, "</code>")]
+    }
+
     fn position(rendered: &str, needle: &str) -> usize {
         rendered
             .find(needle)
@@ -1244,7 +1251,7 @@ mod tests {
     fn code_in_a_language_that_is_known_is_read_for_what_it_says() {
         let events = log(&[chunk(
             "agent_message_chunk",
-            "```rust\n// note\nfn main() {\n    let x = 42;\n    say(\"hi\");\n}\n```",
+            "```rust\n// note\nfn main() {\n    let v = Vec::new();\n    let x = 42;\n    say(\"hi\");\n}\n```",
         )]);
 
         let rendered = event_log(CHAT_ID, &events);
@@ -1256,6 +1263,7 @@ mod tests {
             "hl-keyword",
             "hl-constant",
             "hl-string",
+            "hl-support",
         ] {
             assert!(
                 rendered.contains(named),
@@ -1265,6 +1273,64 @@ mod tests {
         assert!(
             rendered.contains("<pre class=\"code\"><code class=\"lang-rust\">"),
             "the block the colours sit in changed: {rendered}"
+        );
+        assert!(
+            code_body(&rendered).contains('\n'),
+            "the lines of the code ran together into one: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_thought_is_read_for_what_it_says_and_still_stands_back() {
+        let events = log(&[chunk("agent_thought_chunk", "```rust\nlet x = 42;\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"code dim\"><code class=\"lang-rust\">"),
+            "the thought's code did not stand back: {rendered}"
+        );
+        assert!(
+            rendered.contains("hl-constant"),
+            "a voice that stands back had its code left unread: {rendered}"
+        );
+    }
+
+    /// A diff the agent pastes is marked the way a diff a tool printed is
+    /// (ADR-0008 §3), so the same colours mean the same thing either way.
+    #[test]
+    fn a_diff_the_agent_writes_is_read_for_what_it_changes() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "```diff\n--- a/x.rs\n+++ b/x.rs\n-old line\n+new line\n```",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        for named in ["hl-deleted", "hl-inserted"] {
+            assert!(
+                rendered.contains(named),
+                "the diff was not read for its {named}: {rendered}"
+            );
+        }
+    }
+
+    /// Reading a block costs time on every poll, forever; past a size no one
+    /// reads on a screen anyway, the code is simply shown.
+    #[test]
+    fn code_too_long_to_read_is_shown_rather_than_read() {
+        let long = "let x = 42;\n".repeat(10_000);
+        let events = log(&[chunk("agent_message_chunk", &format!("```rust\n{long}```"))]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<code class=\"lang-rust\">let x = 42;"),
+            "a long block lost the code under it: {rendered}"
+        );
+        assert!(
+            !rendered.contains("hl-"),
+            "a block too long to read was read anyway: {rendered}"
         );
     }
 

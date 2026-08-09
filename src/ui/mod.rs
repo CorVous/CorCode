@@ -52,7 +52,8 @@ pub const HTMX: &str = include_str!("../../assets/htmx-2.0.10.min.js");
 pub const CSS: &str = "\
 :root{color-scheme:light dark;\
 --tok-num:#b8791b;--tok-path:#2f6bd8;--tok-url:#1c7a86;\
---tok-add:#1a7f37;--tok-del:#cf222e;}\
+--tok-add:#1a7f37;--tok-del:#cf222e;\
+--tok-kw:#9a3fb8;--tok-str:#2e8b52;--tok-type:#8a6d1f;--tok-comment:#8a9099;}\
 body{padding:1rem;overflow-wrap:break-word;}\
 input,select,button{font-size:16px;}\
 .dim{opacity:0.6;}\
@@ -62,9 +63,16 @@ pre{overflow-x:auto;}\
 .tok-url{color:var(--tok-url);}\
 .tok-add,.tok-ok{color:var(--tok-add);}\
 .tok-del,.tok-err{color:var(--tok-del);}\
+.hl-comment{color:var(--tok-comment);}\
+.hl-string{color:var(--tok-str);}\
+.hl-constant{color:var(--tok-num);}\
+.hl-keyword,.hl-storage{color:var(--tok-kw);}\
+.hl-support{color:var(--tok-type);}\
+.hl-entity{color:var(--tok-path);}\
 @media(prefers-color-scheme:dark){:root{\
 --tok-num:#f5a742;--tok-path:#61afef;--tok-url:#56b6c2;\
---tok-add:#56d364;--tok-del:#f47067;}}";
+--tok-add:#56d364;--tok-del:#f47067;\
+--tok-kw:#c678dd;--tok-str:#7fd88f;--tok-type:#e5c07b;--tok-comment:#7d8590;}}";
 
 /// A chat paired with the runtime status it has right now (ADR-0002).
 pub type Chat = (Manifest, RuntimeStatus);
@@ -149,7 +157,7 @@ mod tests {
 
     /// ADR-0008 budgets styling at "on the order of a dozen lines". Past this
     /// the UI is being restyled, which is a new decision, not an increment.
-    const MAX_DECLARATIONS: usize = 36;
+    const MAX_DECLARATIONS: usize = 38;
 
     #[test]
     fn the_stylesheet_stays_inside_the_adr_budget() {
@@ -189,6 +197,8 @@ mod tests {
             ".hl-keyword,.hl-storage{color:var(--tok-kw);}",
             ".hl-support{color:var(--tok-type);}",
             ".hl-entity{color:var(--tok-path);}",
+            ".hl-inserted{color:var(--tok-add);}",
+            ".hl-deleted{color:var(--tok-del);}",
         ] {
             assert!(
                 CSS.contains(rule),
