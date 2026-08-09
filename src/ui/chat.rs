@@ -409,6 +409,17 @@ mod tests {
         json!({"sessionUpdate": "tool_call_update", "toolCallId": id, "status": status})
     }
 
+    /// The word on a tool call that carries what it printed: the text sits in
+    /// a content block of its own, fenced for a markdown reader (ADR-0006).
+    fn tool_result(id: &str, printed: &str) -> Value {
+        json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": id,
+            "status": "completed",
+            "content": [{"type": "content", "content": {"type": "text", "text": printed}}],
+        })
+    }
+
     /// An update the agent keeps its client's accounting with.
     fn usage_update() -> Value {
         json!({"sessionUpdate": "usage_update", "usage": {"inputTokens": 12}})
@@ -654,6 +665,87 @@ mod tests {
     }
 
     #[test]
+    fn what_a_tool_printed_comes_out_of_the_fence_the_adapter_wrapped_it_in() {
+        let printed = tool_result_text(&tool_result(
+            "call_1",
+            "```console\n1 file changed, 2 insertions(+)\n```",
+        ));
+
+        assert_eq!(printed.as_deref(), Some("1 file changed, 2 insertions(+)"));
+    }
+
+    #[test]
+    fn a_tool_call_with_nothing_to_read_has_no_result() {
+        for content in [
+            json!([]),
+            json!([{"type": "diff", "path": "src/ui/mod.rs"}]),
+        ] {
+            let event = json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "completed",
+                "content": content,
+            });
+
+            assert!(
+                tool_result_text(&event).is_none(),
+                "a call that printed nothing carries a result: {event}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_tool_printed_lands_under_the_line_it_belongs_to() {
+        let events = log(&[
+            tool_call("call_1", "git commit"),
+            tool_result("call_1", "```console\n1 file changed\n```"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(
+                "<p class=\"dim\"><small>git commit · completed</small></p>\
+                 <pre class=\"dim\">1 file changed</pre>"
+            ),
+            "what the tool printed is not under its own line: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("git commit").count(),
+            1,
+            "the result took a line of its own: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_later_word_on_a_call_does_not_wipe_what_it_printed() {
+        let events = log(&[
+            tool_call("call_1", "git commit"),
+            tool_result("call_1", "```console\n1 file changed\n```"),
+            tool_update("call_1", "failed"),
+        ]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<pre class=\"dim\">1 file changed</pre>"),
+            "a later update carrying no output cleared the output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_tool_call_that_printed_nothing_stays_one_line() {
+        let events = log(&[tool_call("call_1", "git commit")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            !rendered.contains("<pre"),
+            "a call with nothing to show opened a block anyway: {rendered}"
+        );
+    }
+
+    #[test]
     fn bookkeeping_updates_are_left_out_of_the_transcript() {
         let events = log(&[
             usage_update(),
@@ -770,6 +862,7 @@ mod tests {
             outbound_prompt("ship it"),
             chunk("agent_thought_chunk", "the ladder first"),
             tool_call("call_1", "git commit"),
+            tool_result("call_1", "```console\n1 file changed\n```"),
             json!({"sessionUpdate": "plan", "entries": []}),
             json!({"corcode": "reset_notice", "text": "Agent memory was reset."}),
             chunk("agent_message_chunk", "on it"),
@@ -780,7 +873,8 @@ mod tests {
         for dimmed in [
             "<p class=\"dim\"><b>you:</b> ship it</p>",
             "<p class=\"dim\">the ladder first</p>",
-            "<p class=\"dim\"><small>git commit · pending</small></p>",
+            "<p class=\"dim\"><small>git commit · completed</small></p>",
+            "<pre class=\"dim\">1 file changed</pre>",
             "<p class=\"dim\"><small>plan</small></p>",
             "<blockquote class=\"dim\">Agent memory was reset.</blockquote>",
         ] {
@@ -802,6 +896,17 @@ mod tests {
         assert!(
             crate::ui::CSS.contains(".dim{opacity:0.6;}"),
             "nothing in the stylesheet dims a dimmed line: {}",
+            crate::ui::CSS
+        );
+    }
+
+    /// A tool prints lines that can run wide; the one stylesheet is what keeps
+    /// them inside their own box rather than the page's (ADR-0008 §3).
+    #[test]
+    fn what_holds_a_wide_result_in_its_box_stands_in_the_stylesheet() {
+        assert!(
+            crate::ui::CSS.contains("pre{overflow-x:auto;}"),
+            "nothing in the stylesheet holds a wide result: {}",
             crate::ui::CSS
         );
     }
