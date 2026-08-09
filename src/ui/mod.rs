@@ -40,12 +40,17 @@ pub const HTMX: &str = include_str!("../../assets/htmx-2.0.10.min.js");
 /// The whole stylesheet (ADR-0008).
 ///
 /// `color-scheme` so default link and control colours follow the system, 16px
-/// controls so iOS Safari does not zoom on focus, padding, and a wrap guard
-/// for long branch names.
+/// controls so iOS Safari does not zoom on focus, padding, a wrap guard for
+/// long branch names, and `.dim` for the transcript lines that are around the
+/// agent's message rather than in it (ADR-0008 §3).
+///
+/// The setting back is opacity rather than a colour so it holds under either
+/// scheme.
 pub const CSS: &str = "\
 :root{color-scheme:light dark;}\
 body{padding:1rem;overflow-wrap:break-word;}\
-input,select,button{font-size:16px;}";
+input,select,button{font-size:16px;}\
+.dim{opacity:0.6;}";
 
 /// A chat paired with the runtime status it has right now (ADR-0002).
 pub type Chat = (Manifest, RuntimeStatus);

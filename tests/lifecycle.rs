@@ -202,7 +202,7 @@ async fn a_chat_whose_push_fails_keeps_its_container_and_says_so() {
     );
     let log = app.body(&format!("/chats/{chat}/events")).await;
     assert!(
-        log.contains("<blockquote>"),
+        log.contains("<blockquote"),
         "the operator is told nothing when they next look: {log}"
     );
 }

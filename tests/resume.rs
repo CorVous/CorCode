@@ -138,7 +138,7 @@ async fn an_adapter_that_remembers_nothing_opens_a_new_session_and_the_chat_is_t
         "the new session's turn is not the whole of what followed the notice"
     );
     assert!(
-        dataset.rendered_log(&chat).contains("<blockquote>"),
+        dataset.rendered_log(&chat).contains("<blockquote"),
         "the notice does not read as one: {}",
         dataset.rendered_log(&chat)
     );
@@ -176,7 +176,7 @@ async fn a_prompt_into_an_archived_chat_clones_it_back_and_says_what_the_clone_c
         "the notice does not say where the workspace came back or what it lost: {notice}"
     );
     assert_eq!(events[1..], [prompt_of(SESSION, SAID), recorded("on it")]);
-    assert!(dataset.rendered_log(&chat).contains("<blockquote>"));
+    assert!(dataset.rendered_log(&chat).contains("<blockquote"));
 }
 
 #[tokio::test]
