@@ -580,6 +580,23 @@ mod tests {
             .collect()
     }
 
+    /// Whether the page opens a block element while a paragraph is still open,
+    /// which no browser will read as the nesting it looks like.
+    fn nests_a_block_in_a_paragraph(rendered: &str) -> bool {
+        let mut open = false;
+        for tag in rendered.match_indices('<').map(|(at, _)| &rendered[at..]) {
+            if open && tag.starts_with("<pre") {
+                return true;
+            }
+            if tag.starts_with("<p>") || tag.starts_with("<p ") {
+                open = true;
+            } else if tag.starts_with("</p>") {
+                open = false;
+            }
+        }
+        false
+    }
+
     fn position(rendered: &str, needle: &str) -> usize {
         rendered
             .find(needle)
@@ -845,6 +862,10 @@ mod tests {
             rendered.contains("<p>one<br>two</p>"),
             "prose stopped reading as prose: {rendered}"
         );
+        assert!(
+            !rendered.contains("<p></p>"),
+            "a message with no code in it grew a block of nothing: {rendered}"
+        );
     }
 
     #[test]
@@ -917,6 +938,63 @@ mod tests {
         assert!(
             rendered.contains("&lt;script&gt;"),
             "the code itself did not survive escaping: {rendered}"
+        );
+    }
+
+    /// A paragraph will not hold a block of code: a browser answers one by
+    /// closing the paragraph early, and the rest of the message falls out of
+    /// the shape the log was written in.
+    #[test]
+    fn code_in_a_message_stands_beside_the_prose_rather_than_inside_it() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "look:\n```rust\nlet x = 1;\n```\nand done",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p>look:</p>",
+                "<pre class=\"code\"><code class=\"lang-rust\">let x = 1;</code></pre>",
+                "<p>and done</p>",
+            )),
+            "the code did not stand beside the prose: {rendered}"
+        );
+        assert!(
+            !nests_a_block_in_a_paragraph(&rendered),
+            "a block opened inside a paragraph: {rendered}"
+        );
+    }
+
+    #[test]
+    fn code_in_a_users_turn_stands_back_with_the_rest_of_the_turn() {
+        let events = log(&[outbound_prompt("try:\n```\nmake test\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p class=\"dim\"><b>you:</b> try:</p>",
+                "<pre class=\"code dim\"><code>make test</code></pre>",
+            )),
+            "the user's code did not stand back with the turn: {rendered}"
+        );
+    }
+
+    /// A turn of nothing but code is still the user's turn, and still says so.
+    #[test]
+    fn a_user_who_says_only_code_is_still_named() {
+        let events = log(&[outbound_prompt("```\nmake test\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<p class=\"dim\"><b>you:</b> </p>",
+                "<pre class=\"code dim\"><code>make test</code></pre>",
+            )),
+            "a turn of pure code lost whose turn it was: {rendered}"
         );
     }
 
