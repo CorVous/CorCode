@@ -1453,6 +1453,20 @@ mod tests {
         );
     }
 
+    /// A line break is the end of what was being said on that line, so a
+    /// marking cannot reach across one and leave a tag open over the break.
+    #[test]
+    fn a_backtick_does_not_find_its_partner_on_the_next_line() {
+        let events = log(&[chunk("agent_message_chunk", "a `b\nc` d")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>a `b<br>c` d</p>"),
+            "a marking reached across a line break: {rendered}"
+        );
+    }
+
     #[test]
     fn a_link_in_a_sentence_is_marked_as_one() {
         let events = log(&[chunk("agent_message_chunk", "see https://corvous.dev now")]);
