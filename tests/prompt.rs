@@ -146,9 +146,39 @@ async fn a_poll_from_an_index_reads_the_tail_and_a_poll_from_none_the_whole_log(
     );
     let whole = app.body(&format!("/chats/{chat_id}/events")).await;
     assert!(
-        whole.contains("id=\"log\"") && whole.contains(&format!("<b>you:</b> {SAID}")),
+        whole.contains("id=\"log\"")
+            && whole.contains(&format!("<b>you:</b> {SAID}"))
+            && whole.contains("<p>on it</p>"),
         "a poll that named no index lost the log it used to get: {whole}"
     );
+    app.stop().await;
+}
+
+/// A cursor this build cannot read is no cursor at all: rather than an error
+/// the operator would have to reload past, the poll gets the whole log, which
+/// is the resync a lost page needs anyway.
+#[tokio::test]
+async fn a_poll_whose_cursor_makes_no_sense_falls_back_to_the_whole_log() {
+    let app = TestApp::start(ScriptedAdapter::answering(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ))
+    .await;
+    let chat_id = app.create_chat().await;
+    app.prompt(&chat_id, SAID).await;
+
+    for cursor in ["abc", "", "-1"] {
+        let whole = app
+            .body(&format!("/chats/{chat_id}/events?from={cursor}"))
+            .await;
+
+        assert!(
+            whole.contains("id=\"log\"")
+                && whole.contains(&format!("<b>you:</b> {SAID}"))
+                && whole.contains("<p>on it</p>"),
+            "a poll from `{cursor}` was not answered with the whole log: {whole}"
+        );
+    }
     app.stop().await;
 }
 

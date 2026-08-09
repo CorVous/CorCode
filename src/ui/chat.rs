@@ -947,17 +947,38 @@ mod tests {
         );
     }
 
+    /// Where `from` counts from: the events on disk, not the blocks they read
+    /// as. A run split across two chunks is one block and two events, so a
+    /// cursor of two is the second half of the sentence and nothing else.
+    #[test]
+    fn the_hot_log_counts_from_in_events_rather_than_in_blocks() {
+        let events = log(&[
+            outbound_prompt("ship it"),
+            chunk("agent_message_chunk", "on "),
+            chunk("agent_message_chunk", "it"),
+        ]);
+
+        let fragment = hot_log(CHAT_ID, &events, 2);
+
+        assert!(
+            fragment.contains("<p>it</p>"),
+            "the cursor counted blocks rather than events: {fragment}"
+        );
+    }
+
     /// A page that has already read the whole log asks from past its end, and
-    /// keeps polling from there.
+    /// gets an empty region that keeps polling from there.
     #[test]
     fn a_hot_log_asked_from_past_the_end_is_empty_rather_than_a_panic() {
         let events = log(&[chunk("agent_message_chunk", "on it")]);
 
-        let fragment = hot_log(CHAT_ID, &events, 9);
-
-        assert!(
-            fragment.contains("id=\"log-hot\"") && !fragment.contains("on it"),
-            "asking past the end did not give an empty region: {fragment}"
+        assert_eq!(
+            hot_log(CHAT_ID, &events, 9),
+            format!(
+                "<div id=\"log-hot\" hx-get=\"{}?from=9\" hx-trigger=\"every 2s\" \
+                 hx-swap=\"outerHTML\"></div>",
+                chat_events_path(CHAT_ID)
+            )
         );
     }
 
