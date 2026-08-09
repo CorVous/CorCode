@@ -23,6 +23,10 @@ const CORE_LINE: &str = "corcode";
 /// What a tool call that names neither itself nor an id is called.
 const UNNAMED_TOOL: &str = "tool call";
 
+/// How an adapter wraps a tool's output for a markdown reader. The transcript
+/// is not one, so the wrapper would be read out as itself.
+const FENCE: &str = "```";
+
 /// Updates the agent keeps its client's accounting with. They carry no words
 /// for the operator, so the transcript is quieter without them.
 const BOOKKEEPING: [&str; 3] = [
@@ -195,6 +199,7 @@ struct ToolCall {
     id: Option<String>,
     title: Option<String>,
     status: Option<String>,
+    result: Option<String>,
 }
 
 impl ToolCall {
@@ -209,6 +214,7 @@ impl ToolCall {
     fn amend(&mut self, later: Self) {
         self.title = later.title.or_else(|| self.title.take());
         self.status = later.status.or_else(|| self.status.take());
+        self.result = later.result.or_else(|| self.result.take());
     }
 
     /// What the operator can recognise the call by.
@@ -256,6 +262,7 @@ fn entry(event: &Value) -> Entry<'_> {
             id: owned(event, "toolCallId"),
             title: owned(event, "title"),
             status: owned(event, "status"),
+            result: tool_result_text(event),
         }),
         _ => Entry::Aside(kind),
     }
@@ -282,7 +289,11 @@ fn line(block: &Block) -> String {
         Block::Run(Voice::Thought, said) => dimmed("p", &said_html(said)),
         Block::Notice(said) => dimmed("blockquote", &said_html(said)),
         Block::Aside(said) => dimmed("p", &format!("<small>{}</small>", text(said))),
-        Block::Tool(call) => dimmed("p", &format!("<small>{}</small>", tool_line(call))),
+        Block::Tool(call) => format!(
+            "{}{}",
+            dimmed("p", &format!("<small>{}</small>", tool_line(call))),
+            call.result.as_deref().map(printed_html).unwrap_or_default(),
+        ),
     }
 }
 
@@ -302,6 +313,12 @@ fn tool_line(call: &ToolCall) -> String {
     format!("{}{status}", text(call.name()))
 }
 
+/// What a tool printed, kept as it was printed: the element holds the line
+/// breaks and the columns, and the stylesheet keeps a wide line in its own box.
+fn printed_html(printed: &str) -> String {
+    dimmed("pre", &text(printed).to_string())
+}
+
 /// Said words as HTML: escaped, keeping the line breaks the speaker meant.
 fn said_html(said: &str) -> String {
     text(said).to_string().replace('\n', "<br>")
@@ -315,6 +332,34 @@ fn blocks_text(content: &Value) -> Option<String> {
         None => block_text(content)?.to_owned(),
     };
     (!said.is_empty()).then_some(said)
+}
+
+/// What a tool call printed, out of the wrapper the adapter puts it in: a
+/// result block holds its text one content deeper than a message chunk does,
+/// and blocks of anything else (diffs, terminals) carry nothing to read here.
+fn tool_result_text(event: &Value) -> Option<String> {
+    let printed: String = event
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter_map(|block| block.get("content").and_then(block_text))
+        .collect();
+    let printed = unfenced(&printed);
+    (!printed.is_empty()).then(|| printed.to_owned())
+}
+
+/// Output with the one code fence around it taken off, so the transcript reads
+/// what the tool printed rather than how it was marked up.
+fn unfenced(printed: &str) -> &str {
+    let Some((opening, body)) = printed.split_once('\n') else {
+        return printed;
+    };
+    if !opening.starts_with(FENCE) {
+        return printed;
+    }
+    body.trim_end()
+        .strip_suffix(FENCE)
+        .map_or(printed, |inner| inner.strip_suffix('\n').unwrap_or(inner))
 }
 
 fn block_text(block: &Value) -> Option<&str> {

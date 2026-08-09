@@ -39,7 +39,10 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    commits/pushes as small inline lines, reset notices (ADR-0007) as
    block quotes in sequence. Prompt input sits at the bottom; parked and
    archived chats show a one-line hint of what the first prompt will do
-   (re-spin / revive) per ADR-0007's lazy resume.
+   (re-spin / revive) per ADR-0007's lazy resume. _(Amended 2026-08-08:
+   what a tool printed hangs under its line in full, in a `<pre>` and
+   out of the code fence the adapter wraps it in, so the transcript is
+   the record of the run rather than a summary of one.)_
 3. **Near-zero CSS.** Semantic HTML on browser defaults; the styling
    budget is on the order of a dozen lines (viewport meta,
    `color-scheme: light dark` so default link and form-control colors
@@ -49,7 +52,9 @@ simple, nearly un-styled to keep css simple", structure "one-screen-deep".
    because the DOM stays semantic. _(Amended 2026-08-08: one rule joins
    the budget — a `.dim` class at `opacity:0.6` on every transcript line
    except the agent's own message, so the log is read for what the agent
-   said.)_
+   said.)_ _(Amended 2026-08-08: a second rule joins it —
+   `pre{overflow-x:auto;}`, so a wide line of tool output scrolls inside
+   its own box instead of widening the page on a phone.)_
 4. **Reference artifact:** variant D on the `prototype/web-ui-screens`
    branch is the shape to imitate; variants A–C are rejected directions
    kept only as prototype history.
