@@ -1431,13 +1431,25 @@ mod tests {
 
     #[test]
     fn a_backtick_with_no_partner_is_just_a_backtick() {
-        let events = log(&[chunk("agent_message_chunk", "a `b and `` c")]);
+        let events = log(&[chunk("agent_message_chunk", "a `b and c")]);
 
         let rendered = event_log(CHAT_ID, &events);
 
         assert!(
-            rendered.contains("<p>a `b and `` c</p>"),
+            rendered.contains("<p>a `b and c</p>"),
             "a lone backtick opened code: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_pair_of_backticks_with_nothing_between_them_is_two_backticks() {
+        let events = log(&[chunk("agent_message_chunk", "see `` here")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>see `` here</p>"),
+            "an empty pair of backticks opened code: {rendered}"
         );
     }
 
