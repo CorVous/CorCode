@@ -1750,6 +1750,20 @@ mod tests {
         );
     }
 
+    /// The blank line a fence opens under belongs to the fence, so what
+    /// follows the block opens its paragraph on its own first line.
+    #[test]
+    fn a_blank_line_before_a_fence_is_the_fences_own() {
+        let events = log(&[chunk("agent_message_chunk", "\n```\nx\n```\nafter")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("</pre><p>after</p>"),
+            "a blank line before a fence was kept for the prose after it: {rendered}"
+        );
+    }
+
     /// The line break a message ends on is the last item's punctuation, not
     /// a paragraph of its own, the way the blank line under a fence is.
     #[test]
