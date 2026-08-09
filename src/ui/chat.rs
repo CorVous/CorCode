@@ -833,7 +833,7 @@ mod tests {
     fn nests_a_block_inside_prose(rendered: &str) -> bool {
         let mut open = false;
         for tag in rendered.match_indices('<').map(|(at, _)| &rendered[at..]) {
-            if open && tag.starts_with("<pre") {
+            if open && (tag.starts_with("<pre") || tag.starts_with("<ul")) {
                 return true;
             }
             if tag.starts_with("<p>") || tag.starts_with("<p ") || tag.starts_with("<blockquote") {
@@ -1564,6 +1564,133 @@ mod tests {
         assert!(
             rendered.contains("<p>a `b<br>c` d</p>"),
             "a marking reached across a line break: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_run_of_bulleted_lines_reads_as_one_list() {
+        let events = log(&[chunk("agent_message_chunk", "- one\n- two\n- three")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>one</li><li>two</li><li>three</li></ul>"),
+            "a run of bullets did not read as one list: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_line_bulleted_with_a_star_is_an_item_too() {
+        let events = log(&[chunk("agent_message_chunk", "* one\n* two")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>one</li><li>two</li></ul>"),
+            "a star did not bullet an item: {rendered}"
+        );
+    }
+
+    /// One bulleted line is a list of one item, as a markdown reader has it.
+    #[test]
+    fn a_single_bulleted_line_is_a_list_of_one() {
+        let events = log(&[chunk("agent_message_chunk", "- only this")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>only this</li></ul>"),
+            "a lone bullet did not read as a list: {rendered}"
+        );
+    }
+
+    /// A bullet is the marker and the space after it. A dash that opens a
+    /// word is part of the word, the way a flag is written.
+    #[test]
+    fn a_dash_with_no_space_after_it_bullets_nothing() {
+        let events = log(&[chunk("agent_message_chunk", "-x is a flag\n*y too")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>-x is a flag<br>*y too</p>"),
+            "a dash inside a word opened a list: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_item_is_read_the_way_a_sentence_is() {
+        let events = log(&[chunk(
+            "agent_message_chunk",
+            "- see `src/x.rs` at https://x.dev",
+        )]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains(concat!(
+                "<li>see <code class=\"tok-path\">src/x.rs</code> at ",
+                "<span class=\"tok-url\">https://x.dev</span></li>",
+            )),
+            "an item was not read the way a sentence is: {rendered}"
+        );
+    }
+
+    /// A list is a block, and a paragraph does not hold a block: it stands
+    /// beside the prose it was said among (ADR-0008).
+    #[test]
+    fn a_list_stands_beside_the_prose_rather_than_inside_it() {
+        let events = log(&[chunk("agent_message_chunk", "intro\n- a\n- b\noutro")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p>intro</p><ul><li>a</li><li>b</li></ul><p>outro</p>"),
+            "the blocks are not in the order they were said: {rendered}"
+        );
+        assert!(
+            !nests_a_block_inside_prose(&rendered),
+            "a block opened inside prose: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_not_bulleted_closes_the_list() {
+        let events = log(&[chunk("agent_message_chunk", "- a\n\nafter")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<ul><li>a</li></ul><p><br>after</p>"),
+            "the list did not close where the bullets stopped: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_list_in_a_thought_stands_back_with_the_rest_of_it() {
+        let events = log(&[chunk("agent_thought_chunk", "maybe:\n- a\n- b")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            rendered.contains("<p class=\"dim\">maybe:</p><ul class=\"dim\"><li>a</li>"),
+            "a list in a thought did not stand back with it: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_bulleted_line_inside_a_fence_stays_code() {
+        let events = log(&[chunk("agent_message_chunk", "```diff\n- a\n+ b\n```")]);
+
+        let rendered = event_log(CHAT_ID, &events);
+
+        assert!(
+            code_body(&rendered).contains("hl-deleted"),
+            "a diff was not read as a diff: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<li>"),
+            "code was read as a list: {rendered}"
         );
     }
 
