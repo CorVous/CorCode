@@ -26,7 +26,7 @@ use cor_code::config::{
     DEFAULT_WARM_POOL,
 };
 use cor_code::git::Remotes;
-use cor_code::plane::MemoryPlane;
+use cor_code::plane::{MemoryPlane, StopGrace, Teardown};
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
@@ -120,6 +120,62 @@ async fn a_completed_turn_moves_its_chat_to_the_front_of_the_pool() {
     );
     assert_eq!(group(&console, &second), "Live");
     assert_eq!(group(&console, &fourth), "Live");
+}
+
+/// The evicted container's keep-alive discards the signal, so every second
+/// of grace is a second the request that ordered the eviction waits for a
+/// kill it could have asked for at once (issue #40).
+#[tokio::test]
+async fn parking_a_chat_stops_its_container_without_grace() {
+    let app = TestApp::start().await;
+    let parked = app.create_chat("first").await;
+    app.create_chat("second").await;
+
+    app.create_chat("third").await;
+
+    assert_eq!(
+        app.teardowns(),
+        vec![Teardown {
+            chat_id: parked,
+            grace: StopGrace::None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn archiving_a_parked_chat_stops_its_container_without_grace() {
+    let app = TestApp::start().await;
+    let parked = app.create_chat("first").await;
+    app.create_chat("second").await;
+    app.create_chat("third").await;
+
+    app.archive(&parked).await;
+
+    assert_eq!(
+        app.teardowns().last(),
+        Some(&Teardown {
+            chat_id: parked,
+            grace: StopGrace::None,
+        })
+    );
+}
+
+/// A chat still holding its adapter is torn down with the plane's whole
+/// grace: what is in the container is the agent's, not a keep-alive's.
+#[tokio::test]
+async fn archiving_a_live_chat_leaves_its_container_the_whole_grace() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+
+    app.archive(&chat).await;
+
+    assert_eq!(
+        app.teardowns(),
+        vec![Teardown {
+            chat_id: chat,
+            grace: StopGrace::Full,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -467,6 +523,7 @@ struct TestApp {
     address: SocketAddr,
     cookie: String,
     data_dir: TempDir,
+    plane: MemoryPlane,
     origin: TempDir,
     _server: JoinHandle<anyhow::Result<()>>,
     _shutdown: oneshot::Sender<()>,
@@ -496,10 +553,11 @@ impl TestApp {
             .prepare()
             .expect("the dataset should prepare, as serving does");
         let secrets = Arc::new(Secrets::from_config(&config));
+        let plane = MemoryPlane::default();
         let chats = Chats::new(
             &config,
             Owner::of(&config.data_dir).expect("we own the dataset we just made"),
-            MemoryPlane::default(),
+            plane.clone(),
             adapter,
             remotes,
             Arc::clone(&secrets),
@@ -518,6 +576,7 @@ impl TestApp {
             cookie: sign_in(address).await,
             address,
             data_dir,
+            plane,
             origin,
             _server: server,
             _shutdown: shutdown,
@@ -586,6 +645,11 @@ impl TestApp {
             .expect("request");
         assert_eq!(response.status(), StatusCode::OK, "{path} did not answer");
         response.text().await.expect("body")
+    }
+
+    /// Every teardown the plane behind this app was asked for, in order.
+    fn teardowns(&self) -> Vec<Teardown> {
+        self.plane.teardowns()
     }
 
     fn workspace(&self, chat_id: &str) -> PathBuf {

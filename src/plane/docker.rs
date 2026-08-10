@@ -13,12 +13,14 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptions,
-    ListContainersOptionsBuilder, StopContainerOptionsBuilder,
+    ListContainersOptionsBuilder, StopContainerOptions, StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt as _;
 use tokio::io::AsyncWriteExt as _;
 
-use super::{ContainerPlane, ContainerRef, PlaneError, ScriptRun, WORKSPACE_MOUNT, container_name};
+use super::{
+    ContainerPlane, ContainerRef, PlaneError, ScriptRun, StopGrace, WORKSPACE_MOUNT, container_name,
+};
 use crate::config::RegistryCredentials;
 use crate::store::{ContainerLiveness, Owner};
 
@@ -269,13 +271,10 @@ impl ContainerPlane for DockerPlane {
         })
     }
 
-    async fn teardown(&self, chat_id: &str) -> Result<(), PlaneError> {
+    async fn teardown(&self, chat_id: &str, grace: StopGrace) -> Result<(), PlaneError> {
         let name = container_name(chat_id);
-        let stop = StopContainerOptionsBuilder::new()
-            .t(STOP_GRACE_SECONDS)
-            .build();
         self.docker
-            .stop_container(&name, Some(stop))
+            .stop_container(&name, Some(stop_options(grace)))
             .await
             .map_err(teardown_failure(chat_id))?;
         self.docker
@@ -319,6 +318,14 @@ fn removal_failure(source: DockerError) -> PlaneError {
         },
         source => PlaneError::runtime(format!("replace the {NETWORK} network"))(source),
     }
+}
+
+/// How long the daemon is asked to wait between the signal and the kill.
+fn stop_options(grace: StopGrace) -> StopContainerOptions {
+    let _ = grace;
+    StopContainerOptionsBuilder::new()
+        .t(STOP_GRACE_SECONDS)
+        .build()
 }
 
 fn teardown_failure(chat_id: &str) -> impl FnOnce(DockerError) -> PlaneError + use<> {
@@ -689,6 +696,19 @@ mod tests {
             "corcode.chat-id".to_owned(),
             chat_id.to_owned(),
         )]))
+    }
+
+    /// A parked container holds nothing worth waiting for: its keep-alive
+    /// discards the signal, so every second of grace is a second the request
+    /// that ordered the stop spends waiting for a kill (issue #40).
+    #[test]
+    fn stopping_a_parked_container_asks_for_no_grace() {
+        assert_eq!(stop_options(StopGrace::None).t, Some(0));
+    }
+
+    #[test]
+    fn stopping_a_live_container_asks_for_the_planes_whole_grace() {
+        assert_eq!(stop_options(StopGrace::Full).t, Some(STOP_GRACE_SECONDS));
     }
 
     #[test]

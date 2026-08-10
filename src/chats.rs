@@ -15,7 +15,9 @@ use crate::acp::{AcpError, AcpTransport, Adapter, Connection, Connections, Held,
 use crate::config::Config;
 use crate::failure::with_causes;
 use crate::git::{self, Remotes};
-use crate::plane::{ContainerPlane, PlaneError, ScriptRun, container_name, managed_default_mode};
+use crate::plane::{
+    ContainerPlane, PlaneError, ScriptRun, StopGrace, container_name, managed_default_mode,
+};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
 use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
@@ -669,14 +671,15 @@ where
     /// memory stay where they are, and nothing at all is committed
     /// (ADR-0002 rule 2, ADR-0005).
     async fn park(&self, chat_id: &str) {
-        self.release(chat_id, "parked, workspace kept").await;
+        self.release(chat_id, "parked, workspace kept", StopGrace::Full)
+            .await;
     }
 
     /// Give a chat's container up. What is left on disk is the caller's to
     /// decide: parking keeps the workspace, the archive gate deletes it once
     /// everything in it is on the remote.
-    async fn release(&self, chat_id: &str, why: &str) {
-        match self.plane.teardown(chat_id).await {
+    async fn release(&self, chat_id: &str, why: &str, grace: StopGrace) {
+        match self.plane.teardown(chat_id, grace).await {
             Ok(()) => {
                 self.connections.forget(chat_id);
                 info!("{chat_id} {why}: container torn down");
@@ -726,7 +729,7 @@ where
                 ..manifest
             })
             .map_err(unarchived)?;
-        self.release(&chat_id, "archived").await;
+        self.release(&chat_id, "archived", StopGrace::Full).await;
         self.store.remove_workspace(&chat_id).map_err(unarchived)?;
         self.sweep().await;
         Ok(())
@@ -965,7 +968,8 @@ where
             Ok(climbed) => Ok(climbed),
             Err(failure) => {
                 if housing.spawned {
-                    self.release(chat_id, "woken but out of reach").await;
+                    self.release(chat_id, "woken but out of reach", StopGrace::Full)
+                        .await;
                 }
                 Err(failure.into())
             }
@@ -1181,7 +1185,7 @@ where
                 Ok(chat_id)
             }
             Err(failure) => {
-                if let Err(stubborn) = self.plane.teardown(&chat_id).await {
+                if let Err(stubborn) = self.plane.teardown(&chat_id, StopGrace::Full).await {
                     warn!(
                         "{}",
                         stubborn_teardown(&chat_id, "never opened a session", &stubborn)
