@@ -255,6 +255,28 @@ fn stubborn_workspace(chat_id: &str, what: &str, stubborn: &StoreError) -> Strin
     )
 }
 
+/// The line the operator reads when a turn goes undated: which chat, and
+/// everything the filesystem said under the store's own summary (issue #81).
+/// The warm pool's order is only as good as these writes, so the cause is
+/// what says whether the pool is about to park the wrong chats.
+fn undated_turn(chat_id: &str, failure: &StoreError) -> String {
+    format!(
+        "{chat_id} took a turn that could not be dated: {}",
+        with_causes(failure)
+    )
+}
+
+/// The line the operator reads when the core's own voice does not reach a
+/// chat's log: which kind of line was lost, and everything the filesystem
+/// said under the store's own summary (issue #81). The chat's log is where
+/// this would otherwise have been read, so this line is all there is.
+fn unwritten_line(kind: &str, failure: &StoreError) -> String {
+    format!(
+        "a {kind} line could not be written down: {}",
+        with_causes(failure)
+    )
+}
+
 /// The line the operator reads when a chat's connection is dropped: which
 /// chat, and everything under the ACP summary that says what it was dropped
 /// after. Without it a disconnect leaves no trace on this side at all (issue
@@ -592,7 +614,7 @@ where
             })
         });
         if let Err(failure) = touched {
-            warn!("{chat_id} took a turn that could not be dated: {failure:#}");
+            warn!("{}", undated_turn(chat_id, &failure));
         }
     }
 
@@ -852,7 +874,7 @@ where
     fn note(&self, chat_id: &str, kind: &str, text: &str) {
         let line = json!({"corcode": kind, "text": text});
         if let Err(failure) = self.store.append_event(chat_id, &line) {
-            warn!("a {kind} line could not be written down: {failure:#}");
+            warn!("{}", unwritten_line(kind, &failure));
         }
     }
 
