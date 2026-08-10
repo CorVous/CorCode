@@ -322,10 +322,11 @@ fn removal_failure(source: DockerError) -> PlaneError {
 
 /// How long the daemon is asked to wait between the signal and the kill.
 fn stop_options(grace: StopGrace) -> StopContainerOptions {
-    let _ = grace;
-    StopContainerOptionsBuilder::new()
-        .t(STOP_GRACE_SECONDS)
-        .build()
+    let seconds = match grace {
+        StopGrace::Full => STOP_GRACE_SECONDS,
+        StopGrace::None => 0,
+    };
+    StopContainerOptionsBuilder::new().t(seconds).build()
 }
 
 fn teardown_failure(chat_id: &str) -> impl FnOnce(DockerError) -> PlaneError + use<> {

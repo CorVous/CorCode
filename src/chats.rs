@@ -670,14 +670,18 @@ where
     /// Park one chat: the container goes, the workspace and the agent's
     /// memory stay where they are, and nothing at all is committed
     /// (ADR-0002 rule 2, ADR-0005).
+    ///
+    /// A capping is what a chat waits behind, and an evicted container has
+    /// nothing left to finish: whatever the parked chat was talking to is
+    /// being discarded here, so its stop asks for no grace at all (issue #40).
     async fn park(&self, chat_id: &str) {
-        self.release(chat_id, "parked, workspace kept", StopGrace::Full)
+        self.release(chat_id, "parked, workspace kept", StopGrace::None)
             .await;
     }
 
-    /// Give a chat's container up. What is left on disk is the caller's to
-    /// decide: parking keeps the workspace, the archive gate deletes it once
-    /// everything in it is on the remote.
+    /// Give a chat's container up under `grace`. What is left on disk is the
+    /// caller's to decide: parking keeps the workspace, the archive gate
+    /// deletes it once everything in it is on the remote.
     async fn release(&self, chat_id: &str, why: &str, grace: StopGrace) {
         match self.plane.teardown(chat_id, grace).await {
             Ok(()) => {
@@ -699,6 +703,10 @@ where
     /// The turn lock is held throughout: the gate commits and then deletes the
     /// whole working tree, which is the one thing that must never happen under
     /// an agent that is writing into it.
+    ///
+    /// A chat holding no connection is parked, and a parked container is a
+    /// keep-alive over a bind mount: it is stopped with no grace at all, so
+    /// that archiving it costs the request nothing (issue #40).
     pub async fn archive(&self, chat_id: &Ulid) -> Result<(), ArchiveError> {
         let chat_id = chat_id.to_string();
         let manifest = match self.store.read_manifest(&chat_id) {
@@ -729,10 +737,22 @@ where
                 ..manifest
             })
             .map_err(unarchived)?;
-        self.release(&chat_id, "archived", StopGrace::Full).await;
+        self.release(&chat_id, "archived", self.grace_owed(&chat_id))
+            .await;
         self.store.remove_workspace(&chat_id).map_err(unarchived)?;
         self.sweep().await;
         Ok(())
+    }
+
+    /// What a chat's container is owed when it goes down: one the chat is
+    /// still holding a connection to has an adapter in it, one that is parked
+    /// has nothing but its keep-alive (issue #40).
+    fn grace_owed(&self, chat_id: &str) -> StopGrace {
+        if self.connections.of(chat_id).is_some() {
+            StopGrace::Full
+        } else {
+            StopGrace::None
+        }
     }
 
     /// Take the chat's connection for as long as the caller keeps what comes
