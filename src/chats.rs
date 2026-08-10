@@ -304,6 +304,9 @@ const CONNECTION_LOST: &str = "connection_lost";
 /// is still thinking, for as long as the operator is willing to believe it
 /// (issue #65).
 fn turn_lost(failure: &AcpError) -> String {
+    if let AcpError::Garbled { sample, .. } = failure {
+        return channel_corrupted(sample);
+    }
     let connection = if failure.spent_the_connection() {
         "The connection to the agent was dropped"
     } else {
@@ -313,6 +316,22 @@ fn turn_lost(failure: &AcpError) -> String {
         "The turn ended without an answer: {}. {connection}, so the prompt can be \
          sent again. The agent may have kept working inside its container meanwhile.",
         with_causes(failure)
+    )
+}
+
+/// What the chat is told when its turn ended because the protocol channel
+/// stopped carrying protocol: which is not a pipe that broke but a program the
+/// agent started writing where the messages go, and the operator can act on the
+/// difference. A container that keeps garbling every turn is one to archive and
+/// revive, since the thing writing over the channel is inside it (issue #65).
+fn channel_corrupted(sample: &str) -> String {
+    format!(
+        "Something the agent ran wrote over its own protocol channel, so what \
+         reached the core stopped being messages (last read: {sample}). The turn \
+         was abandoned and the connection dropped, but the agent may still be \
+         running whatever it started inside its container. The prompt can be sent \
+         again; if the chat stays stuck, archiving and reviving it gives the agent \
+         a container of its own again."
     )
 }
 

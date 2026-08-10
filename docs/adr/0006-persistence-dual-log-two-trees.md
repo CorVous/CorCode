@@ -157,7 +157,12 @@ otherwise invisible: an agent clamped into asking has every ask declined and
 reads as a mute one (ADR-0001). `connection_lost` says a turn ended in a
 failure rather than an answer, what became of the connection it went over, and
 that the prompt can be put again: without it the log stops at the prompt and
-the page shows a chat that is still thinking (issue #65). All of them belong in
+the page shows a chat that is still thinking (issue #65). It is the one kind
+whatever ended the turn. A channel some process the agent ran wrote over is
+told apart in the `text` rather than in the kind — it names the corruption and
+says to archive and revive a chat it keeps happening to — because it is the
+same news about the same chat, and the renderer says every kind out loud the
+same way. All of them belong in
 the log because the log
 is the whole of what the chat page renders (ADR-0008); a status code the
 browser swallows tells the operator nothing.
