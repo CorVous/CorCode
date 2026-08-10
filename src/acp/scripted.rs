@@ -98,7 +98,8 @@ pub struct ScriptedAdapter {
     dies: Dies,
     replay_trails: bool,
     dawdle: Duration,
-    garble: usize,
+    interruptions: Arc<Vec<String>>,
+    endless: bool,
 }
 
 /// Everything the fake was told, for the assertions to read back.
@@ -215,9 +216,29 @@ impl ScriptedAdapter {
     /// writing to does (issue #65).
     #[must_use]
     pub fn garbling(session_id: &str, junk: usize, updates: &[Value]) -> Self {
+        let garble: Vec<_> = std::iter::repeat_n(GARBLE, junk).collect();
+        Self::interrupted(session_id, &garble, updates)
+    }
+
+    /// An adapter whose stream carries `lines` verbatim before each turn's
+    /// updates, whatever they are: blank lines, another program's JSON, or
+    /// anything else that reaches the pipe without being a message (issue #65).
+    #[must_use]
+    pub fn interrupted(session_id: &str, lines: &[&str], updates: &[Value]) -> Self {
         Self {
-            garble: junk,
+            interruptions: Arc::new(lines.iter().map(|line| (*line).to_owned()).collect()),
             ..Self::answering(session_id, updates)
+        }
+    }
+
+    /// An adapter whose channel never once pauses, as a container replaying a
+    /// long transcript faster than any gap in it does (issue #65).
+    #[must_use]
+    pub fn never_pausing() -> Self {
+        Self {
+            endless: true,
+            dawdle: Duration::from_millis(1),
+            ..Self::reading(Script::new())
         }
     }
 
@@ -331,7 +352,8 @@ impl ScriptedAdapter {
             dies: Dies::Never,
             replay_trails: false,
             dawdle: Duration::ZERO,
-            garble: 0,
+            interruptions: Arc::new(Vec::new()),
+            endless: false,
         }
     }
 
@@ -407,7 +429,8 @@ impl AcpTransport for ScriptedAdapter {
             death,
             replay_trails: self.replay_trails,
             dawdle: self.dawdle,
-            garble: self.garble,
+            interruptions: Arc::clone(&self.interruptions),
+            endless: self.endless,
         })
     }
 }
@@ -425,7 +448,8 @@ pub struct ScriptedChannel {
     death: Death,
     replay_trails: bool,
     dawdle: Duration,
-    garble: usize,
+    interruptions: Arc<Vec<String>>,
+    endless: bool,
 }
 
 impl ScriptedChannel {
@@ -488,8 +512,8 @@ impl AcpChannel for ScriptedChannel {
         }
         self.unread.push_back(CHATTER.to_owned());
         if method == PROMPT {
-            for _ in 0..self.garble {
-                self.unread.push_back(GARBLE.to_owned());
+            for line in self.interruptions.iter() {
+                self.unread.push_back(line.clone());
             }
             for ask in self.asks.iter() {
                 self.unread.push_back(ask.to_string());
@@ -513,6 +537,7 @@ impl AcpChannel for ScriptedChannel {
         tokio::time::sleep(self.dawdle).await;
         match self.unread.pop_front() {
             Some(line) => Ok(line),
+            None if self.endless => Ok(CHATTER.to_owned()),
             None if self.death != Death::None => Err(AcpError::Closed),
             None => std::future::pending().await,
         }

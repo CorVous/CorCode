@@ -56,6 +56,14 @@ const SESSION_UPDATE: &str = "session/update";
 /// tail of one can outlive the other by as much as a scheduling hiccup.
 const REPLAY_TAIL: Duration = Duration::from_millis(100);
 
+/// How long a replay may go on being read past before the client stops waiting
+/// for a gap in it. A container replaying faster than the quiet it is waited
+/// for never leaves one, and a load that never returns holds the chat's wake
+/// claim for good: every later prompt is turned away until the core restarts.
+/// Generous, because a long transcript read past is exactly the healthy case
+/// (issue #65).
+const REPLAY_LIMIT: Duration = Duration::from_secs(30);
+
 /// The cheapest way back into a session: the adapter's own state restored,
 /// with nothing replayed to us (ADR-0007 rung 1). Not every adapter offers it,
 /// so one that has never heard of it is a case, not a fault.
@@ -206,7 +214,9 @@ impl<C: AcpChannel> Greeting<C> {
     /// pipe for the next turn to mistake for its own.
     pub async fn load(&mut self, session_id: &str) -> Result<(), AcpError> {
         self.rung(LOAD_SESSION, session_id).await?;
-        self.calls.drain(REPLAY_TAIL, LOAD_SESSION).await
+        self.calls
+            .drain(REPLAY_TAIL, REPLAY_LIMIT, LOAD_SESSION)
+            .await
     }
 
     /// One rung asked for over the chat's workspace. Whatever the adapter
@@ -467,7 +477,12 @@ impl<C: AcpChannel> Calls<C> {
     /// Read the channel until it has said nothing for `quiet`, answering what
     /// it asks of us and keeping none of it. A pipe that breaks while it is
     /// being emptied has nothing left to say and says so.
-    async fn drain(&mut self, quiet: Duration, method: &str) -> Result<(), AcpError> {
+    async fn drain(
+        &mut self,
+        quiet: Duration,
+        _limit: Duration,
+        method: &str,
+    ) -> Result<(), AcpError> {
         while let Ok(line) = timeout(quiet, self.channel.receive()).await {
             let Ok(message) = serde_json::from_str::<Value>(&line?) else {
                 continue;
@@ -1192,6 +1207,76 @@ mod tests {
             error.spent_the_connection() && !error.answered(),
             "a stream nobody can read a message out of is not one the next turn \
              can go over: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lines_that_parse_as_json_without_being_messages_are_garble_too() {
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::interrupted(SESSION, &["42", "null", r#""done""#], &[]),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        let error = connection
+            .take_turn("ship the ladder", &mut |_| Ok(()))
+            .await
+            .expect_err("json that is nobody's message should end the turn");
+
+        assert!(
+            matches!(error, AcpError::Garbled { .. }),
+            "another program's json read as protocol traffic, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_lines_are_nothing_said_rather_than_garble() {
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::interrupted(SESSION, &["", "  ", "\r"], &[update(SESSION, "on it")]),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("blank lines are the likeliest stray output and cost nothing");
+
+        assert_eq!(record.last(), Some(&recorded("on it")));
+    }
+
+    #[tokio::test]
+    async fn a_replay_that_never_pauses_is_given_up_on_rather_than_read_forever() {
+        let transport = ScriptedAdapter::never_pausing();
+        let mut calls = Calls {
+            channel: transport
+                .open(CONTAINER)
+                .await
+                .expect("the scripted adapter should attach"),
+            patience: IMPATIENT,
+            next_id: 1,
+        };
+
+        let drained = timeout(
+            IMPATIENT * 4,
+            calls.drain(REPLAY_TAIL, IMPATIENT, LOAD_SESSION),
+        )
+        .await;
+
+        assert!(
+            drained.is_ok_and(|outcome| outcome.is_ok()),
+            "a chat whose replay never pauses holds its wake claim for good, and \
+             every later prompt is turned away until the core restarts (issue #65)"
         );
     }
 
