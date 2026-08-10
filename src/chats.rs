@@ -1365,6 +1365,35 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_that_could_not_be_dated_is_logged_with_what_the_filesystem_said() {
+        let logged = undated_turn(
+            "01K1TESTCHATID0000000000",
+            &a_removal_the_filesystem_refused(),
+        );
+
+        assert_eq!(
+            logged,
+            "01K1TESTCHATID0000000000 took a turn that could not be dated: \
+             /srv/corcode/workspaces/01K1TESTCHATID0000000000 could not be written: \
+             permission denied",
+            "a warm pool that stops being ordered is read from this line alone"
+        );
+    }
+
+    #[test]
+    fn a_line_that_could_not_be_written_down_is_logged_with_what_the_filesystem_said() {
+        let logged = unwritten_line(REFUSAL, &a_removal_the_filesystem_refused());
+
+        assert_eq!(
+            logged,
+            "a refusal line could not be written down: \
+             /srv/corcode/workspaces/01K1TESTCHATID0000000000 could not be written: \
+             permission denied",
+            "the chat's own log just failed, so this line is all the operator gets"
+        );
+    }
+
+    #[test]
     fn displaying_the_stubborn_workspace_would_lose_the_filesystems_complaint() {
         let stubborn = a_removal_the_filesystem_refused();
 
