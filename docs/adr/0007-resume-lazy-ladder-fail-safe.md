@@ -41,6 +41,19 @@ manifest.
    A "missing" workspace can mean an unmounted dataset — auto-healing would
    compound the damage.
 
+## Amendment (2026-08-09): drift is also the tip moving on
+
+Rule 4 read only the case where `last_pushed_commit` is gone. The commoner
+drift leaves it right where it was and moves the branch past it — an external
+push, or another chat's archive — and the revival is silently correct: the
+workspace comes back exactly where the chat left it. What is no longer true is
+that this chat can push there, so the archive that follows is refused and
+rescued onto a branch of its own (issue #50, ruled 2026-08-07).
+
+A revival that lands behind the tip therefore says so, in ADR-0006's
+`drift_notice`, beside the reset notice. Still no repair and still no force:
+the remote is the truth, and the chat is only told what it is working under.
+
 ## Consequences
 
 - First prompt into a parked/archived chat pays spawn/clone latency;

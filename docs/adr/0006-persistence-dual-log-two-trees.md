@@ -182,7 +182,8 @@ of `chats/`, that failure takes the console with it rather than one chat
 (ADR-0007 rule 5: no skipping). Rolling a deployment back past this change
 means rolling the dataset back with it.
 
-The stamp is `yyyymmddTHHMMSS` in UTC. Seconds and not minutes: a push the
+The stamp is `yyyymmddTHHMMSSsss` in UTC — milliseconds, so that branches
+minted back to back cannot collide. Seconds and not minutes: a push the
 remote refuses is retried straight away, and two archives in one minute must
 not name the same branch — the second push would be refused as a
 non-fast-forward and the retry would fail for a reason that has nothing to do
@@ -213,6 +214,34 @@ Slow region, correct; fast region, current.
 A poll that names no cursor, or one this build cannot read — garbled, empty,
 or given twice — is answered with the whole render rather than an error. A
 section whose cursor has gone wrong therefore heals into a resync.
+
+## Amendment (2026-08-09): `rescue_branch` and `drift_notice`
+
+```json
+{"corcode": "rescue_branch", "text": "..."}
+{"corcode": "drift_notice", "text": "..."}
+```
+
+`rescue_branch` says the remote would not take the chat's own branch —
+protected, or moved on under the chat — so the archive pushed the same work
+once more under a `chat/<name>-rescue-<timestamp>` name and finished (issue
+#50, ruled 2026-08-07). It is not a `push_failure`: the archive is done and
+the chat is closed. The line exists because the log is the only place the
+operator can read where their work went. Nothing was forced, so what the
+remote holds on the chat's branch still stands.
+
+The rescue fires on any push git refuses, not only on a refusal that means
+"this branch is not yours": a push that never reached the remote at all —
+credentials, DNS, a host that is down — is refused the same way, so it too
+gets one attempt under the rescue name before the gate gives up. That costs a
+second doomed push and reads no worse in the log, and telling the two apart
+means parsing git's prose, which is a worse thing to depend on.
+
+`drift_notice` says a revival came back on a commit the remote has since built
+on (ADR-0007 rule 4): the chat lost nothing, but its next archive is the push a
+remote can refuse, and the rescue should not be the first anyone hears of it.
+It sits beside the `reset_notice` rather than inside it — that one says what
+the revival cost, this one says what the remote has done since.
 
 ## Consequences
 

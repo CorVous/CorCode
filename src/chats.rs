@@ -123,19 +123,29 @@ fn unarchived(failure: impl Into<anyhow::Error>) -> ArchiveError {
     ArchiveError::Broke(failure.into())
 }
 
-/// What the chat's log is told about an archive that stopped part way. A
-/// checkpoint that landed is named: it is where the operator's work is, and
+/// What the chat's log is told about an archive that stopped part way. Every
+/// branch that landed is named: that is where the operator's work is, and
 /// nothing else will tell them (ADR-0006).
 fn half_pushed(failure: &git::PushFailure) -> String {
     let retry = "The chat is still open and can be archived again.";
-    failure.landed.as_ref().map_or_else(
-        || format!("Nothing was archived: {failure}. {retry}"),
-        |landed| {
-            format!(
-                "The archive stopped part way: {failure}. \
-                 The work in flight is on the remote, on {landed}. {retry}"
-            )
-        },
+    let landed = failure.landed.branches();
+    if landed.is_empty() {
+        return format!("Nothing was archived: {failure}. {retry}");
+    }
+    format!(
+        "The archive stopped part way: {failure}. \
+         The work that got there is on the remote, on {}. {retry}",
+        landed.join(" and ")
+    )
+}
+
+/// What the chat's log is told when the remote would not take its branch and
+/// the work went onto a rescue branch instead (issue #50). The archive is
+/// done; this is the only place the operator can read where their work is.
+fn rescued(branch: &str, rescue: &str) -> String {
+    format!(
+        "The remote would not take {branch}, so this chat's work was pushed to {rescue} instead. \
+         Nothing on {branch} was overwritten: what the remote has there still stands."
     )
 }
 
@@ -145,9 +155,17 @@ const REFUSAL: &str = "refusal";
 /// What an archive that got nothing onto the remote calls itself there.
 const PUSH_FAILURE: &str = "push_failure";
 
+/// What an archive that had to put the chat's work somewhere else calls itself
+/// there (issue #50).
+const RESCUE_BRANCH: &str = "rescue_branch";
+
 /// What waking a chat costs it calls itself in its log: memory the agent could
 /// not get back, or a workspace that came back as a fresh clone (ADR-0006).
 const RESET_NOTICE: &str = "reset_notice";
+
+/// What a chat revived behind the branch it works on calls itself there
+/// (issue #50).
+const DRIFT_NOTICE: &str = "drift_notice";
 
 /// What a prompt that never got as far as an agent calls itself there.
 const WAKE_FAILURE: &str = "wake_failure";
@@ -615,6 +633,9 @@ where
                 return Err(ArchiveError::NotPushed(failure.into()));
             }
         };
+        if let Some(rescue) = &pushed.rescue_branch {
+            self.note(&chat_id, RESCUE_BRANCH, &rescued(&manifest.branch, rescue));
+        }
         self.store
             .write_manifest(&Manifest {
                 state: ChatState::Archived,
@@ -915,8 +936,8 @@ where
             "this chat is archived but something is already in its workspace at {}",
             workspace.display()
         );
-        let standing_at = match self.clone_back(&manifest, &last_pushed).await {
-            Ok(standing_at) => standing_at,
+        let standing = match self.clone_back(&manifest, &last_pushed).await {
+            Ok(standing) => standing,
             Err(failure) => {
                 self.wipe_the_half_clone(&manifest.chat_id);
                 return Err(failure);
@@ -930,8 +951,15 @@ where
         self.note(
             &revived.chat_id,
             RESET_NOTICE,
-            &resume::workspace_reset(&revived.branch, &standing_at, &last_pushed),
+            &resume::workspace_reset(&revived.branch, &standing.standing_at, &last_pushed),
         );
+        if standing.behind_the_tip() {
+            self.note(
+                &revived.chat_id,
+                DRIFT_NOTICE,
+                &resume::remote_drift(&revived.branch, &standing.standing_at, &standing.tip),
+            );
+        }
         Ok(revived)
     }
 
@@ -948,16 +976,16 @@ where
     /// Clone the chat's branch back into its workspace at `commit` and hand
     /// the clone to the agent that will work in it: a revived workspace is as
     /// new as a created one. Git blocks, so it runs off the runtime.
-    async fn clone_back(&self, manifest: &Manifest, commit: &str) -> Result<String> {
+    async fn clone_back(&self, manifest: &Manifest, commit: &str) -> Result<git::Revived> {
         let origin = self.origin(&manifest.repo)?;
         let workspace = self.store.workspace_dir(&manifest.chat_id);
         let branch = manifest.branch.clone();
         let commit = commit.to_owned();
         let agent = self.store.agent();
-        tokio::task::spawn_blocking(move || -> Result<String> {
-            let standing_at = git::revive_at(&origin, &branch, &commit, &workspace)?;
+        tokio::task::spawn_blocking(move || -> Result<git::Revived> {
+            let standing = git::revive_at(&origin, &branch, &commit, &workspace)?;
             store::hand_tree_to(&workspace, agent)?;
-            Ok(standing_at)
+            Ok(standing)
         })
         .await
         .expect("the git task should not panic")
@@ -1247,6 +1275,45 @@ mod tests {
             "plain Display is what these warn sites used to get"
         );
         assert_ne!(with_causes(&stubborn), stubborn.to_string());
+    }
+
+    const CHECKPOINT: &str = "chat/2026-08-09-archived-chkpt-20260809T214033172";
+    const RESCUE: &str = "chat/2026-08-09-archived-rescue-20260809T214033173";
+
+    fn a_gate_that_stopped(landed: git::Landed) -> git::PushFailure {
+        git::PushFailure {
+            landed,
+            source: git::GitError::Refused {
+                doing: "stand the workspace back on its branch".to_owned(),
+                complaint: "fatal: unable to check out".to_owned(),
+            },
+        }
+    }
+
+    /// A rescue branch that reached the remote before the gate stopped holds
+    /// the chat's whole work, and the log is the only place it is named
+    /// (issue #50).
+    #[test]
+    fn an_archive_that_stopped_names_every_branch_that_got_there() {
+        let told = half_pushed(&a_gate_that_stopped(git::Landed {
+            checkpoint: Some(CHECKPOINT.to_owned()),
+            rescue: Some(RESCUE.to_owned()),
+        }));
+
+        assert!(
+            told.contains(CHECKPOINT) && told.contains(RESCUE),
+            "the operator is sent looking for work that is on the remote: {told}"
+        );
+    }
+
+    #[test]
+    fn an_archive_that_got_nowhere_names_no_branch_at_all() {
+        let told = half_pushed(&a_gate_that_stopped(git::Landed::default()));
+
+        assert!(
+            told.contains("Nothing was archived"),
+            "a gate that got nowhere reads as a half-finished one: {told}"
+        );
     }
 
     #[test]
