@@ -822,23 +822,40 @@ fn checkpoint_holding(
 /// remembers no more than a core that never stopped.
 ///
 /// The invariant: an archive that cuts no checkpoint closes on a checkpoint of
-/// this chat if and only if the commit under it names the very commit being
-/// archived as its one parent. That is the shape the gate leaves behind and
-/// nothing else has it — a checkpoint of an earlier archive was cut off
-/// wherever the branch stood then — so a chat worked in again never
-/// resurrects one.
+/// this chat cut off the very commit being archived — the latest of them, by
+/// the stamp every checkpoint is named with, since two attempts that both
+/// landed leave the later one holding the work as the agent left it. Which
+/// archive left a checkpoint there is not asked and does not matter: a
+/// checkpoint cut off this commit holds work this commit does not carry,
+/// whoever cut it, and that is what the manifest is for. A chat archived
+/// before and revived onto an untouched workspace closes on that earlier
+/// checkpoint again, which is where its uncarried work still is.
+///
+/// The known hole is the other side of that rule: a commit made between the
+/// attempts moves the tip past the checkpoint that landed, and this archive
+/// closes on nothing while that checkpoint still holds work. Adopting it would
+/// mean naming a checkpoint of a tree the chat has moved on from, and a
+/// manifest that points at the wrong moment is worse than one that points
+/// nowhere — the operator has the branch itself and the log either way.
+///
+/// The lookup runs after the gate, so a remote that has gone quiet in between
+/// fails an archive whose work is already safe. It is retried from a workspace
+/// the gate left standing on `branch`, and guessing here would write the very
+/// silence issue #105 is about.
 fn checkpoint_cut_off(
     origin: &Origin,
     workspace: &Path,
     branch: &str,
     tip: &str,
 ) -> Result<Option<String>, GitError> {
-    Ok(minted_on_remote(origin, workspace, branch, CHECKPOINT)?
+    let mut candidates: Vec<String> = minted_on_remote(origin, workspace, branch, CHECKPOINT)?
         .into_iter()
         .map(|(_, candidate)| candidate)
-        .find(|candidate| {
-            work_on_remote(origin, workspace, candidate).is_some_and(|held| cut_from(&held, tip))
-        }))
+        .collect();
+    candidates.sort_unstable();
+    Ok(candidates.into_iter().rev().find(|candidate| {
+        work_on_remote(origin, workspace, candidate).is_some_and(|held| cut_from(&held, tip))
+    }))
 }
 
 /// Whether work read off the remote was cut from `commit`: the commit holding
@@ -1733,7 +1750,11 @@ mod tests {
         let (_origin_dir, remotes) = seeded_repository();
         let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
         run(&workspace, &["checkout", "--detach"]);
-        commit_in(&workspace, "fourth.txt", "a commit the chat branch never saw");
+        commit_in(
+            &workspace,
+            "fourth.txt",
+            "a commit the chat branch never saw",
+        );
         let landed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
             .expect("a workspace off its branch should push")
             .checkpoint_branch

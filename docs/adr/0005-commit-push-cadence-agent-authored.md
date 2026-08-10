@@ -125,3 +125,33 @@ checkpoints from the same millisecond: a stamp no later than the last one is
 taken to be the millisecond after it, so names rise even when the clock does
 not. A collision is impossible within a process; across processes the
 millisecond makes it improbable.
+
+## Amendment (2026-08-10): the checkpoint branch need not be a fresh one
+
+An archive can fail after its gate has got everything onto the remote — on the
+manifest write, on the dataset — and the retry meets a workspace the gate has
+already tidied. "A **fresh** checkpoint branch" and "a clean tree makes no
+branch" together made that retry mint a second branch for work already
+checkpointed ([#99](https://github.com/CorVous/CorCode/issues/99)), or record
+no checkpoint at all while a remote one held the only copy of the work
+([#105](https://github.com/CorVous/CorCode/issues/105)). The gate now closes on
+what the remote already carries:
+
+- **A checkpoint the gate cuts is pushed under an existing name where the
+  remote already holds that same work** — the same tree cut off the same
+  commit, or the same commit for a checkpoint of the agent's own (#99). One
+  checkpoint branch per archive, however often it is retried.
+- **An archive that cuts no checkpoint may still close on one.** Where the
+  remote carries a checkpoint of this chat cut off the very commit being
+  archived, the manifest names it (the latest such, by the stamp). That
+  checkpoint holds work the archived commit does not carry, whichever archive
+  left it there, and the manifest is the only record of where it went.
+- **Accepted trade:** a commit made between the attempts moves the branch past
+  such a checkpoint, and the archive then records none. A manifest pointing at
+  a moment the chat has moved on from would be worse than one pointing nowhere.
+
+The remote is the record throughout: nothing about an earlier attempt has to
+survive on this side, so a core restarted between the attempts behaves as one
+that never stopped. The lookup runs after the push, so a remote that goes quiet
+in between fails an archive whose work is already safe; it is retried from the
+workspace the gate left standing on the chat branch.

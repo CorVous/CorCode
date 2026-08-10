@@ -178,8 +178,9 @@ ADR-0008 renders every core line as a block quote.
 
 ## Amendment (2026-08-05): `checkpoint_branch`, and why the schema stays 1
 
-The archive gate puts a dirty working tree on a branch of its own (ADR-0005),
-and the manifest is the only record of which one:
+The archive gate puts whatever the chat branch does not carry on a branch of
+its own, or closes on a branch of the remote's that already holds it
+(ADR-0005), and the manifest is the only record of which one:
 
 ```json
 {"checkpoint_branch": "chat/2026-08-05-persistence-chkpt-20260805T142033"}
