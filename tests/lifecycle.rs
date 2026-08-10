@@ -536,6 +536,114 @@ async fn an_archive_over_a_running_turn_is_refused_and_tears_nothing_down() {
     );
 }
 
+/// A parked chat holds no connection, so an archive that only looks for one
+/// finds a chat it believes is doing nothing while a prompt is mid-wake — and
+/// tears down the container that wake just started, workspace and all
+/// (issue #93).
+#[tokio::test]
+async fn an_archive_over_a_chat_being_woken_is_refused_and_tears_nothing_down() {
+    let app = TestApp::dawdling().await;
+    let parked = app.create_chat("first").await;
+    app.create_chat("second").await;
+    app.create_chat("third").await;
+
+    let waking = app.spawn_prompt(&parked, "still there?");
+    tokio::time::sleep(DAWDLE).await;
+    let refused = app.archive(&parked).await;
+
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let told = refused.text().await.expect("a refusal says why");
+    assert!(
+        told.contains("being woken"),
+        "the archive was refused over a turn nobody is taking: {told}"
+    );
+    assert_eq!(app.manifest(&parked)["state"], "open");
+    assert!(
+        app.workspace(&parked).join("README.md").is_file(),
+        "the workspace went out from under a waking chat (ADR-0002 rule 3)"
+    );
+    assert_eq!(
+        waking.await.expect("the turn should not panic").status(),
+        StatusCode::OK,
+        "the refused archive interrupted the wake"
+    );
+    assert_eq!(group(&app.body("/").await, &parked), "Live");
+}
+
+/// The other order: the archive is already committing and deleting a working
+/// tree when the prompt arrives. Waking the chat now would put a container over
+/// a workspace that is about to go, so the prompt is turned away and told what
+/// the chat is doing (issue #93).
+#[tokio::test]
+async fn a_prompt_arriving_mid_archive_is_turned_away_rather_than_waking_the_chat() {
+    let app = TestApp::start().await;
+    let closing = app.create_chat("first").await;
+    app.create_chat("second").await;
+    app.create_chat("third").await;
+    app.commit_in_workspace(&closing, "the agent's own commit");
+    app.slow_the_remote();
+
+    let archiving = app.spawn_archive(&closing);
+    tokio::time::sleep(DAWDLE).await;
+    let refused = app.prompt(&closing, "still there?").await;
+
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        archiving
+            .await
+            .expect("the archive should not panic")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(app.manifest(&closing)["state"], "archived");
+    assert!(!app.workspace(&closing).exists());
+    assert!(
+        app.plane.mounts_of(&closing).is_none(),
+        "the prompt left a container running over a deleted workspace"
+    );
+    let told = app.told(&closing);
+    let refusal = told
+        .iter()
+        .filter(|line| line["corcode"] == "refusal")
+        .filter_map(|line| line["text"].as_str())
+        .next_back()
+        .unwrap_or_else(|| panic!("the turned-away prompt was never told so: {told:?}"));
+    assert!(
+        refusal.contains("archiv"),
+        "the refusal does not say what the chat is doing: {refusal}"
+    );
+}
+
+/// Two archives over one chat: the second is turned away by the same claim,
+/// and is told the archive it lost to rather than a turn nobody is taking
+/// (issue #93).
+#[tokio::test]
+async fn a_second_archive_arriving_mid_archive_is_told_the_first_one_is_running() {
+    let app = TestApp::start().await;
+    let closing = app.create_chat("first").await;
+    app.commit_in_workspace(&closing, "the agent's own commit");
+    app.slow_the_remote();
+
+    let archiving = app.spawn_archive(&closing);
+    tokio::time::sleep(DAWDLE).await;
+    let refused = app.archive(&closing).await;
+
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let told = refused.text().await.expect("a refusal says why");
+    assert!(
+        told.contains("already being archived"),
+        "the second archive was refused over a turn nobody is taking: {told}"
+    );
+    assert_eq!(
+        archiving
+            .await
+            .expect("the archive should not panic")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(app.manifest(&closing)["state"], "archived");
+}
+
 /// `last_active_at` is only written when a turn ends, so the chat that has
 /// been answering longest looks like the stalest chat there is.
 #[tokio::test]
@@ -715,6 +823,15 @@ impl TestApp {
         tokio::spawn(async move { request.send().await.expect("request") })
     }
 
+    /// An archive put in flight, to be awaited once the test has looked at
+    /// what happens while it runs.
+    fn spawn_archive(&self, chat_id: &str) -> JoinHandle<reqwest::Response> {
+        let request = client()
+            .post(self.url(&format!("/chats/{chat_id}/archive")))
+            .header("cookie", &self.cookie);
+        tokio::spawn(async move { request.send().await.expect("request") })
+    }
+
     async fn archive(&self, chat_id: &str) -> reqwest::Response {
         client()
             .post(self.url(&format!("/chats/{chat_id}/archive")))
@@ -872,19 +989,30 @@ impl TestApp {
     /// Make the remote refuse every branch but a checkpoint, as a protected
     /// branch does, so that half of a gate's pushes land.
     fn refuse_the_chat_branch(&self) {
-        let hook = self.origin.path().join(BARE).join("hooks").join("update");
-        fs::write(
-            &hook,
-            "#!/bin/sh\ncase \"$1\" in *chkpt*) exit 0;; esac\nexit 1\n",
-        )
-        .expect("the hook should be writable");
+        self.hook_the_remote("#!/bin/sh\ncase \"$1\" in *chkpt*) exit 0;; esac\nexit 1\n");
+    }
+
+    /// Put `shell` in the remote's update hook, so that every branch pushed to
+    /// it goes through whatever the test wants to happen first.
+    fn hook_the_remote(&self, shell: &str) {
+        let hook = self.remote_hook();
+        fs::write(&hook, shell).expect("the hook should be writable");
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
             .expect("the hook should be runnable");
     }
 
+    fn remote_hook(&self) -> PathBuf {
+        self.origin.path().join(BARE).join("hooks").join("update")
+    }
+
+    /// Make the remote take its time over every branch, so that an archive can
+    /// be caught with its gate still open.
+    fn slow_the_remote(&self) {
+        self.hook_the_remote("#!/bin/sh\nsleep 1\nexit 0\n");
+    }
+
     fn allow_the_chat_branch(&self) {
-        fs::remove_file(self.origin.path().join(BARE).join("hooks").join("update"))
-            .expect("the hook should be removable");
+        fs::remove_file(self.remote_hook()).expect("the hook should be removable");
     }
 
     /// Make the chat's own directory unwritable, so that the archive's next

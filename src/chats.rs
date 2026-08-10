@@ -1,7 +1,8 @@
 //! The chats the console reads and the vertical that cuts a new one
 //! (ADR-0005, ADR-0006).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -89,6 +90,8 @@ pub enum PromptError {
     Busy,
     #[error("this chat is being woken for another prompt")]
     Waking,
+    #[error("this chat is being archived")]
+    Archiving,
     #[error("the turn could not be written down")]
     Unrecorded(#[source] anyhow::Error),
     #[error("the turn broke")]
@@ -101,7 +104,7 @@ impl PromptError {
     /// server log. A chat that could not be woken is told in its own log by
     /// whoever tried, which is the only place the reason is known.
     const fn is_refusal(&self) -> bool {
-        matches!(self, Self::Busy | Self::Waking)
+        matches!(self, Self::Busy | Self::Waking | Self::Archiving)
     }
 }
 
@@ -116,6 +119,10 @@ pub enum ArchiveError {
     AlreadyArchived,
     #[error("this chat is in the middle of a turn")]
     Busy,
+    #[error("this chat is being woken for a prompt")]
+    Waking,
+    #[error("this chat is already being archived")]
+    Archiving,
     #[error("nothing reached the remote, so nothing was torn down")]
     NotPushed(#[source] anyhow::Error),
     #[error("the chat could not be archived")]
@@ -127,7 +134,10 @@ impl ArchiveError {
     /// than the archive failing. A refusal touched nothing.
     #[must_use]
     pub const fn is_refusal(&self) -> bool {
-        matches!(self, Self::AlreadyArchived | Self::Busy)
+        matches!(
+            self,
+            Self::AlreadyArchived | Self::Busy | Self::Waking | Self::Archiving
+        )
     }
 }
 
@@ -452,25 +462,35 @@ pub fn parse_env(raw: &str) -> Result<BTreeMap<String, String>, EnvError> {
 /// time.
 type ParkingLock = tokio::sync::Mutex<()>;
 
-/// The chats being woken right now. Waking clones a workspace, starts a
-/// container and climbs a ladder, none of which two prompts may do at once for
-/// one chat, and none of which a sweep or a capping may cut across.
-type Waking = std::sync::Mutex<HashSet<String>>;
+/// What each claimed chat is in the middle of, which is the whole of what the
+/// request turned away can be told (ADR-0006).
+#[derive(Clone, Copy)]
+enum Doing {
+    Waking,
+    Archiving,
+}
+
+/// The chats whose container is being decided right now, and by what. Waking
+/// clones a workspace, starts a container and climbs a ladder; archiving
+/// commits that workspace, stops the container and deletes the tree. Neither
+/// may run twice at once over one chat, neither may run while the other does,
+/// and no sweep or capping may cut across either (issue #93).
+type Claims = std::sync::Mutex<HashMap<String, Doing>>;
 
 /// What the last orphan sweep came to, kept for the status line to read
 /// (ADR-0008). Nothing until one has run.
 type LastSweep = std::sync::Mutex<Option<Swept>>;
 
-/// One chat's wake, given to whoever asked for it first and given back when
-/// the wake is over however it ends.
+/// One chat, given to whoever asked for it first and given back when whatever
+/// took it is over however it ends.
 struct Claim<'a> {
-    waking: &'a Waking,
+    claims: &'a Claims,
     chat_id: String,
 }
 
 impl Drop for Claim<'_> {
     fn drop(&mut self) {
-        self.waking
+        self.claims
             .lock()
             .expect("no holder of the lock panics")
             .remove(&self.chat_id);
@@ -504,7 +524,7 @@ pub struct Chats<P, T: AcpTransport> {
     workspace_image: String,
     warm_pool: usize,
     parking: ParkingLock,
-    waking: Waking,
+    claims: Claims,
     last_sweep: LastSweep,
 }
 
@@ -533,7 +553,7 @@ impl<P, T: AcpTransport + Sync> Chats<P, T> {
             workspace_image: config.workspace_image.clone(),
             warm_pool: config.warm_pool,
             parking: ParkingLock::default(),
-            waking: Waking::default(),
+            claims: Claims::default(),
             last_sweep: LastSweep::default(),
         }
     }
@@ -714,19 +734,45 @@ where
     }
 
     /// The chats no capping may take a container from: the ones taking a turn,
-    /// and the ones a wake is starting a container for.
+    /// and the ones a wake or an archive is deciding a container for.
     fn occupied(&self) -> HashSet<String> {
         let mut occupied = self.connections.busy_chat_ids();
         occupied.extend(self.claimed());
         occupied
     }
 
-    /// The chats being woken right now.
+    /// The chats a wake or an archive holds right now.
     fn claimed(&self) -> HashSet<String> {
-        self.waking
+        self.claims
             .lock()
             .expect("no holder of the lock panics")
-            .clone()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// Take `chat_id` for `doing`, for as long as the caller keeps what comes
+    /// back. A chat somebody else already holds has nothing left to give, and
+    /// what they are doing with it is what comes back instead.
+    ///
+    /// Nothing waits here: a claim is taken or refused, so no path that holds
+    /// one can be behind a path that wants one.
+    fn claim(&self, chat_id: &str, doing: Doing) -> Result<Claim<'_>, Doing> {
+        match self
+            .claims
+            .lock()
+            .expect("no holder of the lock panics")
+            .entry(chat_id.to_owned())
+        {
+            Entry::Occupied(held) => Err(*held.get()),
+            Entry::Vacant(slot) => {
+                slot.insert(doing);
+                Ok(Claim {
+                    claims: &self.claims,
+                    chat_id: chat_id.to_owned(),
+                })
+            }
+        }
     }
 
     /// Park one chat: the container goes, the workspace and the agent's
@@ -762,15 +808,24 @@ where
     /// (ADR-0005); if any of it fails to land, the chat is left exactly as it
     /// was, told about in its own log, and the operator can try again.
     ///
-    /// The turn lock is held throughout: the gate commits and then deletes the
-    /// whole working tree, which is the one thing that must never happen under
-    /// an agent that is writing into it.
+    /// The chat's claim and its turn lock are both held throughout: the gate
+    /// commits and then deletes the whole working tree, which is the one thing
+    /// that must never happen under an agent that is writing into it — and a
+    /// chat holding no connection is one a prompt can wake into a container of
+    /// its own in the time the gate takes, which the claim is what stops
+    /// (issue #93).
     ///
     /// A chat holding no connection has nothing in its container but the
     /// keep-alive, so the stop asks for no grace and the archive costs the
     /// request nothing (issue #40).
     pub async fn archive(&self, chat_id: &Ulid) -> Result<(), ArchiveError> {
         let chat_id = chat_id.to_string();
+        let _claim = self
+            .claim(&chat_id, Doing::Archiving)
+            .map_err(|held| match held {
+                Doing::Waking => ArchiveError::Waking,
+                Doing::Archiving => ArchiveError::Archiving,
+            })?;
         let manifest = match self.store.read_manifest(&chat_id) {
             Ok(manifest) => manifest,
             Err(failure) if failure.is_missing() => return Err(ArchiveError::NoSuchChat),
@@ -973,7 +1028,12 @@ where
     /// One wake at a time: a second prompt arriving mid-wake is turned away
     /// rather than left to clone over the first one's workspace.
     async fn wake(&self, chat_id: &str) -> Result<Held<T::Channel>, PromptError> {
-        let _claim = self.claim_the_wake(chat_id)?;
+        let _claim = self
+            .claim(chat_id, Doing::Waking)
+            .map_err(|held| match held {
+                Doing::Waking => PromptError::Waking,
+                Doing::Archiving => PromptError::Archiving,
+            })?;
         match self.woken(chat_id).await {
             Ok(held) => Ok(held),
             Err(failure) => {
@@ -984,24 +1044,6 @@ where
                 );
                 Err(PromptError::Unwoken(failure))
             }
-        }
-    }
-
-    /// The wake of `chat_id`, for as long as the caller keeps it. A chat
-    /// already being woken has nothing left to give.
-    fn claim_the_wake(&self, chat_id: &str) -> Result<Claim<'_>, PromptError> {
-        if self
-            .waking
-            .lock()
-            .expect("no holder of the lock panics")
-            .insert(chat_id.to_owned())
-        {
-            Ok(Claim {
-                waking: &self.waking,
-                chat_id: chat_id.to_owned(),
-            })
-        } else {
-            Err(PromptError::Waking)
         }
     }
 
