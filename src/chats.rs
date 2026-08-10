@@ -1314,6 +1314,29 @@ mod tests {
         assert_ne!(with_causes(&stubborn), stubborn.to_string());
     }
 
+    #[test]
+    fn a_connection_the_adapter_spent_is_logged_with_what_broke_it() {
+        let logged = connection_lost(
+            "01K1TESTCHATID0000000000",
+            &AcpError::Unreachable {
+                container: "corcode-chat-01K1TESTCHATID0000000000".to_owned(),
+                source: bollard::errors::Error::DockerResponseServerError {
+                    status_code: 409,
+                    message: "container is not running".to_owned(),
+                },
+            },
+        );
+
+        assert_eq!(
+            logged,
+            "01K1TESTCHATID0000000000 lost its adapter connection: \
+             no adapter could be started in container \
+             corcode-chat-01K1TESTCHATID0000000000: \
+             Docker responded with status code 409: container is not running",
+            "a disconnect nobody logs is the incident of issue #66"
+        );
+    }
+
     const CHECKPOINT: &str = "chat/2026-08-09-archived-chkpt-20260809T214033172";
     const RESCUE: &str = "chat/2026-08-09-archived-rescue-20260809T214033173";
 
