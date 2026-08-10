@@ -4,7 +4,6 @@
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
-use std::iter;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -276,8 +275,28 @@ pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), G
     .map(drop)
 }
 
+/// Where a revived workspace came back, and where the branch it came off
+/// stands on the remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revived {
+    /// The commit the workspace is standing on.
+    pub standing_at: String,
+    /// The commit the remote has the branch on.
+    pub tip: String,
+}
+
+impl Revived {
+    /// Whether the chat came back on a commit the branch has since built on:
+    /// its work is still there, and the remote has moved past it (issue #50).
+    #[must_use]
+    pub fn behind_the_tip(&self) -> bool {
+        self.standing_at != self.tip
+    }
+}
+
 /// Clone `origin`'s `branch` into `dest` and stand it where the chat left
-/// off, answering with the commit it ended up on (ADR-0002 rule 5).
+/// off, answering with the commit it ended up on and the branch tip it came
+/// off (ADR-0002 rule 5).
 ///
 /// A branch the remote no longer carries `commit` on is left standing at its
 /// tip: the remote is the truth, and the caller is the one who tells the chat
@@ -288,12 +307,16 @@ pub fn revive_at(
     branch: &str,
     commit: &str,
     dest: &Path,
-) -> Result<String, GitError> {
+) -> Result<Revived, GitError> {
     clone_at(origin, branch, dest)?;
+    let tip = head(dest)?;
     if carries(dest, commit)? {
         stand_at(dest, commit)?;
     }
-    head(dest)
+    Ok(Revived {
+        standing_at: head(dest)?,
+        tip,
+    })
 }
 
 /// Whether the branch `workspace` stands on still reaches `commit`. A commit
@@ -346,15 +369,25 @@ pub fn create_branch(workspace: &Path, branch: &str) -> Result<(), GitError> {
 }
 
 /// The branch a chat's unpushed work is checkpointed onto (ADR-0005).
-///
-/// The chat's own branch, stamped to the millisecond and never twice with the
-/// same millisecond, so that no two checkpoints this core mints — however
-/// close together the archives fall — can name the same branch and collide on
-/// the remote.
 #[must_use]
 pub fn checkpoint_branch(branch: &str) -> String {
+    minted_off(branch, "chkpt")
+}
+
+/// The branch a chat's own work goes onto when the remote will not take the
+/// chat's branch (issue #50).
+#[must_use]
+pub fn rescue_branch(branch: &str) -> String {
+    minted_off(branch, "rescue")
+}
+
+/// A branch this core mints for a chat: the chat's own name, what the branch
+/// is for, and the moment — stamped to the millisecond and never twice with
+/// the same millisecond, so that no two branches this core mints, however
+/// close together the archives fall, can collide on the remote.
+fn minted_off(branch: &str, mark: &str) -> String {
     format!(
-        "{branch}-chkpt-{}",
+        "{branch}-{mark}-{}",
         unstamped_millisecond().format("%Y%m%dT%H%M%S%3f")
     )
 }
@@ -386,26 +419,55 @@ pub struct Pushed {
     pub tip: String,
     /// The branch the unpushed work went onto, if there was any.
     pub checkpoint_branch: Option<String>,
+    /// The branch the chat's own work landed on instead, when the remote
+    /// would not take the chat's branch (issue #50).
+    pub rescue_branch: Option<String>,
 }
 
-/// A gate that stopped, and what of the workspace was already on the remote
-/// when it did.
+/// What of a chat's work was already on the remote when a gate stopped.
 ///
-/// The checkpoint goes first, so the chat branch can be the push that fails
-/// with the operator's work already safe. Saying nothing about that would
-/// send them looking for work that is right there.
+/// The checkpoint goes first and a rescue can follow it, so a gate can stop
+/// with either or both of them safe. Saying nothing about that would send the
+/// operator looking for work that is right there.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Landed {
+    /// The checkpoint branch that reached the remote.
+    pub checkpoint: Option<String>,
+    /// The rescue branch that reached the remote (issue #50).
+    pub rescue: Option<String>,
+}
+
+impl Landed {
+    /// Every branch that reached the remote, in the order they were pushed.
+    #[must_use]
+    pub fn branches(&self) -> Vec<&str> {
+        [self.checkpoint.as_deref(), self.rescue.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+}
+
+/// A gate that stopped, and what it had already got onto the remote.
 #[derive(Debug, Error)]
 #[error("{source}")]
 pub struct PushFailure {
-    /// The checkpoint branch that reached the remote before this happened.
-    pub landed: Option<String>,
+    pub landed: Landed,
     pub source: GitError,
 }
 
 /// A failure that happened before anything could reach the remote.
-const fn unpushed(source: GitError) -> PushFailure {
+fn unpushed(source: GitError) -> PushFailure {
     PushFailure {
-        landed: None,
+        landed: Landed::default(),
+        source,
+    }
+}
+
+/// A failure with whatever had already got there named on it.
+fn stopped(landed: &Landed, source: GitError) -> PushFailure {
+    PushFailure {
+        landed: landed.clone(),
         source,
     }
 }
@@ -435,14 +497,12 @@ pub fn push_for_archive(
     let standing = standing(workspace).map_err(unpushed)?;
     let checkpoint = checkpoint_unpushed_work(workspace, branch, &standing).map_err(unpushed)?;
     match push_branches(origin, workspace, branch, checkpoint.as_deref()) {
-        Ok(tip) => {
-            stand_on(workspace, branch).map_err(|source| PushFailure {
-                landed: checkpoint.clone(),
-                source,
-            })?;
+        Ok(reached) => {
+            stand_on(workspace, branch).map_err(|source| stopped(&reached.landed, source))?;
             Ok(Pushed {
-                tip,
-                checkpoint_branch: checkpoint,
+                tip: reached.tip,
+                checkpoint_branch: reached.landed.checkpoint,
+                rescue_branch: reached.landed.rescue,
             })
         }
         Err(failure) => {
@@ -558,42 +618,64 @@ fn commit_everything(workspace: &Path, checkpoint: &str) -> Result<(), GitError>
     .map(drop)
 }
 
+/// What the gate got onto the remote, and the commit the chat's branch stands
+/// on now.
+struct Reached {
+    tip: String,
+    landed: Landed,
+}
+
 /// Push the checkpoint branch, then the chat's own, answering with where the
-/// chat's branch stands. Whatever fails, the failure carries the checkpoint
-/// that got there first.
+/// chat's branch stands. Whatever fails, the failure carries whatever got
+/// there first.
+///
+/// A remote that refuses the chat's branch — protected, or moved on under the
+/// chat — is not argued with and never overruled: the same commit is offered
+/// once more under a rescue name of its own, so the archive can finish and no
+/// chat is left unclosable (issue #50).
 fn push_branches(
     origin: &Origin,
     workspace: &Path,
     branch: &str,
     checkpoint: Option<&str>,
-) -> Result<String, PushFailure> {
-    let mut landed = None;
-    for pushing in checkpoint.into_iter().chain(iter::once(branch)) {
-        push_one(origin, workspace, pushing).map_err(|source| PushFailure {
-            landed: landed.clone(),
-            source,
-        })?;
-        landed = checkpoint.map(ToOwned::to_owned);
+) -> Result<Reached, PushFailure> {
+    let mut landed = Landed::default();
+    if let Some(checkpoint) = checkpoint {
+        push_one(origin, workspace, checkpoint, checkpoint).map_err(unpushed)?;
+        landed.checkpoint = Some(checkpoint.to_owned());
     }
-    run_in(
+    match push_one(origin, workspace, branch, branch) {
+        Ok(()) => {}
+        Err(refused @ GitError::Refused { .. }) => {
+            let rescue = rescue_branch(branch);
+            warn!("{branch} was refused, so its work goes onto {rescue}: {refused}");
+            push_one(origin, workspace, branch, &rescue)
+                .map_err(|source| stopped(&landed, source))?;
+            landed.rescue = Some(rescue);
+        }
+        Err(unusable) => return Err(stopped(&landed, unusable)),
+    }
+    let tip = run_in(
         workspace,
         &format!("read where {branch} stands"),
         &["rev-parse", branch],
         ToOwned::to_owned,
     )
-    .map_err(|source| PushFailure { landed, source })
+    .map_err(|source| stopped(&landed, source))?;
+    Ok(Reached { tip, landed })
 }
 
-/// Put one branch on the remote under its own name.
-fn push_one(origin: &Origin, workspace: &Path, pushing: &str) -> Result<(), GitError> {
+/// Put the commits `pushing` names on the remote as the branch `onto`, adding
+/// to whatever is there and overruling none of it.
+fn push_one(origin: &Origin, workspace: &Path, pushing: &str, onto: &str) -> Result<(), GitError> {
     run_in(
         workspace,
-        &format!("push {pushing} to {origin}"),
+        &format!("push {pushing} to {origin} as {onto}"),
         &[
             "push",
             "--",
             origin.url(),
-            &format!("{pushing}:refs/heads/{pushing}"),
+            &format!("{pushing}:refs/heads/{onto}"),
         ],
         |said| origin.scrub(said),
     )
@@ -1083,19 +1165,12 @@ mod tests {
     const STAMP_SPELLING: &str = "%Y%m%dT%H%M%S%3f";
     const STAMP_WIDTH: usize = "20260805T214033172".len();
 
-    fn stamp_of(checkpoint: &str) -> &str {
-        checkpoint
-            .strip_prefix(&format!("{CHAT_BRANCH}-chkpt-"))
-            .unwrap_or_else(|| panic!("the checkpoint is not named after the chat: {checkpoint}"))
-    }
-
-    /// Two archives of one chat a few seconds apart must not name the same
-    /// branch: the second push would be refused as a non-fast-forward.
-    #[test]
-    fn a_checkpoint_branch_is_named_after_the_chat_and_the_moment() {
-        let checkpoint = checkpoint_branch(CHAT_BRANCH);
-
-        let stamp = stamp_of(&checkpoint);
+    /// What a branch this core minted for the chat says about when: the stamp,
+    /// read back off a name that has to be the chat's own.
+    fn stamp_of<'a>(minted: &'a str, mark: &str) -> &'a str {
+        let stamp = minted
+            .strip_prefix(&format!("{CHAT_BRANCH}-{mark}-"))
+            .unwrap_or_else(|| panic!("the branch is not named after the chat: {minted}"));
         assert_eq!(
             stamp.len(),
             STAMP_WIDTH,
@@ -1106,8 +1181,24 @@ mod tests {
         });
         assert!(
             (Utc::now().naive_utc() - moment).num_seconds().abs() < 60,
-            "the checkpoint is stamped nowhere near now: {stamp}"
+            "the branch is stamped nowhere near now: {stamp}"
         );
+        stamp
+    }
+
+    /// Two archives of one chat a few seconds apart must not name the same
+    /// branch: the second push would be refused as a non-fast-forward.
+    #[test]
+    fn a_checkpoint_branch_is_named_after_the_chat_and_the_moment() {
+        stamp_of(&checkpoint_branch(CHAT_BRANCH), "chkpt");
+    }
+
+    /// The branch a refused archive falls back to is the chat's own with the
+    /// moment on it, so the operator reads which chat's work it holds and two
+    /// rescues never collide (issue #50).
+    #[test]
+    fn a_rescue_branch_is_named_after_the_chat_and_the_moment() {
+        stamp_of(&rescue_branch(CHAT_BRANCH), "rescue");
     }
 
     /// A refused push is retried at once: two checkpoints of one chat within
@@ -1276,7 +1367,11 @@ mod tests {
         )
         .expect("an archived chat's branch should come back");
 
-        assert_eq!(standing, archived_at);
+        assert_eq!(standing.standing_at, archived_at);
+        assert!(
+            standing.behind_the_tip(),
+            "a chat coming back under commits the branch has since taken is behind it"
+        );
         assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), archived_at);
         assert_eq!(
             git_says(&revived, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -1310,8 +1405,12 @@ mod tests {
         .expect("a branch that drifted should still come back");
 
         assert_eq!(
-            standing, tip,
+            standing.standing_at, tip,
             "a commit the branch has lost should leave the workspace at the tip"
+        );
+        assert!(
+            !standing.behind_the_tip(),
+            "a workspace standing at the tip is not behind it"
         );
         assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), tip);
     }

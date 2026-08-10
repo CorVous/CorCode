@@ -255,6 +255,87 @@ async fn a_checkpoint_that_landed_is_named_when_the_chat_branch_will_not_go() {
     );
 }
 
+/// A remote that has moved past the chat refuses the chat's branch, and a
+/// chat nobody can close is worse than a branch nobody expected: the work goes
+/// onto a rescue branch of its own and the archive finishes (issue #50).
+#[tokio::test]
+async fn a_chat_branch_the_remote_refuses_is_archived_onto_a_rescue_branch() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    let semantic = app.commit_in_workspace(&chat, "the agent's own commit");
+    let outsider = app.push_over_the_chat_branch(&app.branch(&chat));
+
+    let response = app.archive(&chat).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let rescue = app
+        .origin_branches()
+        .into_iter()
+        .find(|branch| branch.contains("-rescue-"))
+        .expect("the refused work should reach the remote on a rescue branch");
+    assert_eq!(
+        app.origin_says(&["rev-parse", &rescue]),
+        semantic,
+        "the rescue branch does not carry the work the chat could not push"
+    );
+    assert_eq!(app.manifest(&chat)["state"], "archived");
+    assert!(
+        !app.workspace(&chat).exists(),
+        "a rescued archive left the chat holding its workspace"
+    );
+    let told = app.told(&chat);
+    let note = told
+        .iter()
+        .find(|line| line["corcode"] == "rescue_branch")
+        .and_then(|line| line["text"].as_str())
+        .unwrap_or_else(|| panic!("nothing tells the operator where their work went: {told:?}"));
+    assert!(
+        note.contains(&rescue),
+        "the notice does not name the branch that holds the work: {note}"
+    );
+    assert_eq!(
+        app.origin_says(&["rev-parse", &app.branch(&chat)]),
+        outsider,
+        "the chat's branch was forced over what the remote already had"
+    );
+}
+
+/// A dirty tree and a refused branch at once: the checkpoint goes under its
+/// own name, the chat's commits go onto a rescue branch, and the manifest
+/// records both of them (issue #50).
+#[tokio::test]
+async fn a_dirty_chat_the_remote_refuses_is_checkpointed_and_rescued_at_once() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    let semantic = app.commit_in_workspace(&chat, "the agent's own commit");
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+    app.push_over_the_chat_branch(&app.branch(&chat));
+
+    let response = app.archive(&chat).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let manifest = app.manifest(&chat);
+    let checkpoint = manifest["checkpoint_branch"]
+        .as_str()
+        .expect("a dirty tree should be archived onto a checkpoint branch");
+    assert_eq!(
+        app.origin_says(&["show", &format!("{checkpoint}:scratch.txt")]),
+        "work in flight",
+        "the work in flight never reached the remote"
+    );
+    assert_eq!(
+        manifest["last_pushed_commit"], semantic,
+        "the manifest does not name the commit the rescue branch carries"
+    );
+    let rescue = app
+        .origin_branches()
+        .into_iter()
+        .find(|branch| branch.contains("-rescue-"))
+        .expect("the refused work should reach the remote on a rescue branch");
+    assert_eq!(app.origin_says(&["rev-parse", &rescue]), semantic);
+}
+
 /// The gate is not the last thing that can fail: the manifest is written
 /// after it. Whatever the operator retries from has to be a workspace on the
 /// chat's own branch.
@@ -522,6 +603,18 @@ impl TestApp {
             .expect("the event log should be readable")
     }
 
+    /// The payloads the chat's log holds, out of the stamps they are written
+    /// under.
+    fn told(&self, chat_id: &str) -> Vec<Value> {
+        self.events(chat_id)
+            .lines()
+            .map(|line| {
+                let written: Value = serde_json::from_str(line).expect("a line should be json");
+                written["event"].clone()
+            })
+            .collect()
+    }
+
     fn chat_dir(&self, chat_id: &str) -> PathBuf {
         self.data_dir.path().join("chats").join(chat_id)
     }
@@ -552,6 +645,30 @@ impl TestApp {
     /// What the remote says, once whatever was pushed has reached it.
     fn origin_says(&self, args: &[&str]) -> String {
         says(&self.origin.path().join(BARE), args)
+    }
+
+    /// Every branch the remote carries.
+    fn origin_branches(&self) -> Vec<String> {
+        self.origin_says(&["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    /// Somebody else's commit on the chat's own branch, as a push from outside
+    /// this core leaves it: the chat's own push is now a non-fast-forward the
+    /// remote will refuse.
+    fn push_over_the_chat_branch(&self, branch: &str) -> String {
+        let work = self.origin.path().join("seed");
+        fs::write(work.join("elsewhere.txt"), "somebody else's work")
+            .expect("a file should be writable");
+        run(&work, &["add", "."]);
+        run(&work, &["commit", "-m", "somebody else's work"]);
+        run(
+            &work,
+            &["push", "origin", &format!("HEAD:refs/heads/{branch}")],
+        );
+        says(&work, &["rev-parse", "HEAD"])
     }
 
     /// A working tree left behind by a chat this dataset has never heard of,
