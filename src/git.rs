@@ -1442,7 +1442,8 @@ mod tests {
     /// take afterwards, which is a checkpoint git will not roll back.
     fn jam_the_index_on_push(workspace: &Path) {
         let hook = workspace.join(".git").join("hooks").join("pre-push");
-        std::fs::write(&hook, ": > \"${GIT_DIR:-.git}/index.lock\"\nexit 1\n")
+        let lock = workspace.join(".git").join("index.lock");
+        std::fs::write(&hook, format!(": > {}\nexit 1\n", lock.display()))
             .expect("a hook should be writable");
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
             .expect("a hook should be runnable");

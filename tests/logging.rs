@@ -150,7 +150,7 @@ async fn a_turn_the_store_could_not_date_is_logged_with_what_the_filesystem_said
 
     assert!(
         said_by_a_line(
-            &logged,
+            logged,
             &format!("{chat} took a turn that could not be dated"),
             EISDIR
         ),
@@ -174,7 +174,7 @@ async fn a_container_that_would_not_stop_is_logged_with_what_the_daemon_said() {
 
     assert!(
         said_by_a_line(
-            &logged,
+            logged,
             &format!("{chat} (archived) would not stop"),
             REFUSED_CONNECTION
         ),
