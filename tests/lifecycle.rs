@@ -415,31 +415,68 @@ async fn an_archive_retried_after_its_rescue_landed_mints_no_second_rescue() {
         "an unrecorded archive answered {}",
         stopped.status()
     );
+    let landed = app.rescue_branches();
+    assert_eq!(
+        landed.len(),
+        1,
+        "the archive that failed did not leave a rescue behind: {landed:?}"
+    );
 
     let retried = app.archive(&chat).await;
 
     assert_eq!(retried.status(), StatusCode::OK);
-    let rescues: Vec<String> = app
-        .origin_branches()
-        .into_iter()
-        .filter(|branch| branch.contains("-rescue-"))
-        .collect();
+    assert_eq!(
+        app.rescue_branches(),
+        landed,
+        "the retry did not close the chat on the rescue its work was already on"
+    );
+    assert_eq!(app.origin_says(&["rev-parse", &landed[0]]), semantic);
+    assert!(
+        app.last_rescue_note(&chat).contains(&landed[0]),
+        "the notice does not name the branch that holds the work: {}",
+        app.last_rescue_note(&chat)
+    );
+}
+
+/// The rescue a retry finds is the one holding the work it is pushing, not
+/// whatever rescue the chat has been through before: an agent that committed
+/// again between the attempts is rescued again, onto a branch of its own
+/// (issue #82).
+#[tokio::test]
+async fn work_committed_after_a_rescue_landed_is_rescued_onto_a_branch_of_its_own() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    app.commit_in_workspace(&chat, "the agent's own commit");
+    app.push_over_the_chat_branch(&app.branch(&chat));
+    app.seal_the_chat_dir(&chat);
+    let stopped = app.archive(&chat).await;
+    app.unseal_the_chat_dir(&chat);
+    assert!(stopped.status().is_server_error());
+    let stale = app.rescue_branches();
+    let later = app.commit_in_workspace(&chat, "what the agent did next");
+
+    let retried = app.archive(&chat).await;
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    let rescues = app.rescue_branches();
     assert_eq!(
         rescues.len(),
-        1,
-        "the retry minted a rescue branch of its own: {rescues:?}"
+        2,
+        "the later commit was not rescued onto a branch of its own: {rescues:?}"
     );
-    assert_eq!(app.origin_says(&["rev-parse", &rescues[0]]), semantic);
-    let told = app.told(&chat);
-    let note = told
+    let fresh = rescues
         .iter()
-        .filter(|line| line["corcode"] == "rescue_branch")
-        .filter_map(|line| line["text"].as_str())
-        .next_back()
-        .unwrap_or_else(|| panic!("nothing tells the operator where their work went: {told:?}"));
+        .find(|rescue| !stale.contains(rescue))
+        .expect("the retry should mint a rescue for the work it is pushing");
+    assert_eq!(
+        app.origin_says(&["rev-parse", fresh]),
+        later,
+        "the fresh rescue does not carry the commit the retry pushed"
+    );
     assert!(
-        note.contains(&rescues[0]),
-        "the notice does not name the branch that holds the work: {note}"
+        app.last_rescue_note(&chat).contains(fresh),
+        "the notice sends the operator to a rescue without their latest work: {}",
+        app.last_rescue_note(&chat)
     );
 }
 
@@ -782,6 +819,25 @@ impl TestApp {
             .lines()
             .map(ToOwned::to_owned)
             .collect()
+    }
+
+    /// Every rescue branch the remote carries, in the order it lists them.
+    fn rescue_branches(&self) -> Vec<String> {
+        self.origin_branches()
+            .into_iter()
+            .filter(|branch| branch.contains("-rescue-"))
+            .collect()
+    }
+
+    /// The last thing the chat's log told the operator about a rescue.
+    fn last_rescue_note(&self, chat_id: &str) -> String {
+        let told = self.told(chat_id);
+        told.iter()
+            .filter(|line| line["corcode"] == "rescue_branch")
+            .filter_map(|line| line["text"].as_str())
+            .next_back()
+            .unwrap_or_else(|| panic!("nothing tells the operator where their work went: {told:?}"))
+            .to_owned()
     }
 
     /// Somebody else's commit on the chat's own branch, as a push from outside

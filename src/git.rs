@@ -687,7 +687,10 @@ fn tip_of(workspace: &Path, branch: &str) -> Result<String, GitError> {
 /// An archive can fail after its rescue lands — on the manifest, on deleting
 /// the workspace — and the retry offers the very same commit again. Minting a
 /// name per attempt would leave the remote one rescue branch per retry, with
-/// nothing saying which of them the chat is closed on (issue #82).
+/// nothing saying which of them the chat is closed on (issue #82). The lookup
+/// is one more round trip to a remote that has just answered, on a path only
+/// a refused branch reaches, and a remote that cannot answer it stops the
+/// archive rather than guessing.
 fn rescue(
     origin: &Origin,
     workspace: &Path,
