@@ -656,25 +656,83 @@ fn push_branches(
         push_one(origin, workspace, checkpoint, checkpoint).map_err(unpushed)?;
         landed.checkpoint = Some(checkpoint.to_owned());
     }
+    let tip = tip_of(workspace, branch).map_err(|source| stopped(&landed, source))?;
     match push_one(origin, workspace, branch, branch) {
         Ok(()) => {}
         Err(refused @ GitError::Refused { .. }) => {
-            let rescue = rescue_branch(branch);
-            warn!("{branch} was refused, so its work goes onto {rescue}: {refused}");
-            push_one(origin, workspace, branch, &rescue)
-                .map_err(|source| stopped(&landed, source))?;
-            landed.rescue = Some(rescue);
+            landed.rescue = Some(
+                rescue(origin, workspace, branch, &tip, &refused)
+                    .map_err(|source| stopped(&landed, source))?,
+            );
         }
         Err(unusable) => return Err(stopped(&landed, unusable)),
     }
-    let tip = run_in(
+    Ok(Reached { tip, landed })
+}
+
+/// The commit `branch` stands on.
+fn tip_of(workspace: &Path, branch: &str) -> Result<String, GitError> {
+    run_in(
         workspace,
         &format!("read where {branch} stands"),
         &["rev-parse", branch],
         ToOwned::to_owned,
     )
-    .map_err(|source| stopped(&landed, source))?;
-    Ok(Reached { tip, landed })
+}
+
+/// The rescue branch holding `tip`, once the remote has refused `branch`: the
+/// one an earlier archive already put it on, or a freshly minted one it goes
+/// onto now.
+///
+/// An archive can fail after its rescue lands — on the manifest, on deleting
+/// the workspace — and the retry offers the very same commit again. Minting a
+/// name per attempt would leave the remote one rescue branch per retry, with
+/// nothing saying which of them the chat is closed on (issue #82). The lookup
+/// is one more round trip to a remote that has just answered, on a path only
+/// a refused branch reaches, and a remote that cannot answer it stops the
+/// archive rather than guessing.
+fn rescue(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    tip: &str,
+    refused: &GitError,
+) -> Result<String, GitError> {
+    if let Some(already) = rescue_holding(origin, workspace, branch, tip)? {
+        warn!("{branch} was refused again, and its work is already on {already}: {refused}");
+        return Ok(already);
+    }
+    let rescue = rescue_branch(branch);
+    warn!("{branch} was refused, so its work goes onto {rescue}: {refused}");
+    push_one(origin, workspace, branch, &rescue)?;
+    Ok(rescue)
+}
+
+/// The rescue branch of `branch` the remote already carries standing at
+/// `tip`, if it carries one. The remote is the record: nothing about an
+/// earlier attempt has to survive on this side for its rescue to be found.
+fn rescue_holding(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    tip: &str,
+) -> Result<Option<String>, GitError> {
+    let listed = run_in(
+        workspace,
+        &format!("look up the rescue branches of {branch} on {origin}"),
+        &[
+            "ls-remote",
+            "--",
+            origin.url(),
+            &format!("refs/heads/{branch}-rescue-*"),
+        ],
+        |said| origin.scrub(said),
+    )?;
+    Ok(listed.lines().find_map(|line| {
+        let (at, refname) = line.split_once('\t')?;
+        let rescue = refname.strip_prefix("refs/heads/")?;
+        (at == tip).then(|| rescue.to_owned())
+    }))
 }
 
 /// Put the commits `pushing` names on the remote as the branch `onto`, adding
