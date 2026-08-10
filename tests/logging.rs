@@ -20,7 +20,7 @@ use cor_code::config::{
     Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_SCRATCH_MB,
 };
 use cor_code::git::Remotes;
-use cor_code::logs::{LoggedLines, capturing_lines};
+use cor_code::logs::capturing_lines;
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::store::{ChatStore, Owner};
@@ -148,14 +148,11 @@ async fn a_turn_the_store_could_not_date_is_logged_with_what_the_filesystem_said
         .await
         .expect("a turn goes through whatever the manifest is doing");
 
+    let warned = logged.lines_saying(&format!("{chat} took a turn that could not be dated"));
     assert!(
-        said_by_a_line(
-            logged,
-            &format!("{chat} took a turn that could not be dated"),
-            EISDIR
-        ),
+        warned.iter().any(|(_, line)| line.contains(EISDIR)),
         "src/chats.rs: the store family's warning reached the operator without the cause \
-         under it, which is the only part that says what to do about it"
+         under it, which is the only part that says what to do about it: {warned:?}"
     );
 }
 
@@ -172,23 +169,14 @@ async fn a_container_that_would_not_stop_is_logged_with_what_the_daemon_said() {
 
     dataset.archive(&chat).await;
 
+    let warned = logged.lines_saying(&format!("{chat} (archived) would not stop"));
     assert!(
-        said_by_a_line(
-            logged,
-            &format!("{chat} (archived) would not stop"),
-            REFUSED_CONNECTION
-        ),
+        warned
+            .iter()
+            .any(|(_, line)| line.contains(REFUSED_CONNECTION)),
         "src/chats.rs: the plane family's warning reached the operator without the daemon's \
-         own complaint under it"
+         own complaint under it: {warned:?}"
     );
-}
-
-/// Whether any captured line saying `saying` carries `cause` too.
-fn said_by_a_line(logged: &LoggedLines, saying: &str, cause: &str) -> bool {
-    logged
-        .lines_saying(saying)
-        .iter()
-        .any(|(_, line)| line.contains(cause))
 }
 
 /// An adapter that answers every call, having said something that is not

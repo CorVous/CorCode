@@ -1406,11 +1406,14 @@ mod tests {
         );
     }
 
-    /// A checkpoint that stays behind is only ever mentioned here, and the
-    /// rollback's own summary names the branch and stops there: what git
-    /// refused is under it (issue #81). The wording is pinned where the line
-    /// is built; this drives the call site, where the causes could be dropped
-    /// without a test noticing.
+    /// A checkpoint that stays behind is only ever mentioned here, and a
+    /// rollback the operator cannot read is a branch nobody knows to go and
+    /// look for (issue #81). Which branch, and what git said of it, are both
+    /// the call site's to carry: the line is built for it and nothing else.
+    ///
+    /// A git that refused says why in its own summary, so this shape of
+    /// failure has no cause under it to lose. The cause chain itself is
+    /// pinned where the line is built, over the git that never ran at all.
     #[test]
     fn a_checkpoint_that_would_not_roll_back_reaches_the_operator_with_gits_complaint() {
         let logged = capturing_lines();
@@ -1423,20 +1426,30 @@ mod tests {
         push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
             .expect_err("a push the hook refuses should fail");
 
+        let stranded = only_checkpoint_in(&workspace);
+        let warned = logged.lines_saying(&format!("{stranded} could not be rolled back"));
         assert!(
-            logged
-                .lines_saying("could not be rolled back")
-                .iter()
-                .any(|(_, line)| line.contains(JAMMED_INDEX)),
-            "src/git.rs: the rollback's warning reached the operator without git's own \
-             complaint under it, which is the whole of what says why the checkpoint stayed: \
-             {:?}",
-            logged.lines_saying("could not be rolled back")
+            warned.iter().any(|(_, line)| line.contains(JAMMED_INDEX)),
+            "src/git.rs: the rollback's warning reached the operator without the branch it \
+             stranded or without git's own words for why: {warned:?}"
         );
     }
 
     /// What git says of a tree whose index it cannot take.
     const JAMMED_INDEX: &str = "index.lock";
+
+    /// The checkpoint branch a failed rollback left in `workspace`.
+    fn only_checkpoint_in(workspace: &Path) -> String {
+        let stranded = git_says(
+            workspace,
+            &["branch", "--list", "*chkpt*", "--format=%(refname:short)"],
+        );
+        assert!(
+            !stranded.is_empty(),
+            "a rollback that failed leaves its checkpoint branch behind"
+        );
+        stranded
+    }
 
     /// Leave `workspace` with a push that fails and an index no command can
     /// take afterwards, which is a checkpoint git will not roll back.

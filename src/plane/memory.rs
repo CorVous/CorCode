@@ -122,8 +122,10 @@ impl ContainerPlane for MemoryPlane {
 
     async fn teardown(&self, chat_id: &str, grace: StopGrace) -> Result<(), PlaneError> {
         if self.stubborn.load(Ordering::Relaxed) {
-            return Err(PlaneError::runtime(format!("stop chat {chat_id}"))(
-                io::Error::from(io::ErrorKind::ConnectionRefused).into(),
+            return Err(PlaneError::runtime(format!(
+                "tear down the container of chat {chat_id}"
+            ))(
+                io::Error::from(io::ErrorKind::ConnectionRefused).into()
             ));
         }
         let stopped = self.live().remove(chat_id);
