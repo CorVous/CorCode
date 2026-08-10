@@ -493,10 +493,14 @@ where
                 chats: self.scanned(&live)?,
                 containers: Containers::Known,
             }),
-            Err(quiet) => Ok(Survey {
-                chats: self.scanned(&HashSet::new())?,
-                containers: Containers::Unknown(with_causes(quiet.as_ref())),
-            }),
+            Err(quiet) => {
+                let quiet = with_causes(quiet.as_ref());
+                warn!("the container plane would not say what is live: {quiet}");
+                Ok(Survey {
+                    chats: self.scanned(&HashSet::new())?,
+                    containers: Containers::Unknown(quiet),
+                })
+            }
         }
     }
 

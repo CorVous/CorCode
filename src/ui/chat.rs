@@ -2685,12 +2685,26 @@ mod tests {
     /// whether its container happens to be up (issue #25).
     #[test]
     fn a_chat_page_says_nothing_only_the_plane_could_know() {
-        let rendered = chat_page(&open_chat(), &[]);
+        for manifest in [open_chat(), archived_chat()] {
+            let rendered = chat_page(&manifest, &[]);
+            let heading = heading_line(&rendered);
 
-        assert!(
-            !rendered.contains("Live") && !rendered.contains("Parked"),
-            "the page reads a container status off a file: {rendered}"
-        );
+            assert!(
+                !heading.contains("Live") && !heading.contains("Parked"),
+                "the page reads a container status off a file: {heading}"
+            );
+        }
+    }
+
+    /// The line under the title, where the chat says what it is.
+    fn heading_line(rendered: &str) -> &str {
+        rendered
+            .split_once("<small>")
+            .expect("the page heads with a line about the chat")
+            .1
+            .split_once("</small>")
+            .expect("the heading line is closed")
+            .0
     }
 
     #[test]
@@ -2699,7 +2713,10 @@ mod tests {
 
         assert!(rendered.contains("chat/2026-08-05-resume-ladder"));
         assert!(rendered.contains("push abc1234"));
-        assert!(rendered.contains("Open"));
+        assert!(
+            heading_line(&rendered).ends_with("Open"),
+            "the heading does not end on the chat's state: {rendered}"
+        );
         assert!(
             rendered.contains("href=\"/\""),
             "there is no way back to the console: {rendered}"

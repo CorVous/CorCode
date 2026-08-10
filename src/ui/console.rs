@@ -57,25 +57,25 @@ pub fn console_page(
              <script src=\"{HTMX_PATH}\" defer></script>",
             status_line(status),
             new_chat_form(repos),
-            listing(chats, &status.containers),
+            chat_list(chats, &status.containers),
             settings_panel(secrets),
         ),
     )
 }
 
-/// The chat list as the console shows it: grouped by runtime status where the
-/// plane answered for it, and ungrouped under a banner where it did not
-/// (issue #25).
-fn listing(chats: &[Chat], containers: &Containers) -> String {
+/// The chat list, both in the console and as the fragment htmx swaps in on
+/// its own: grouped by runtime status where the plane answered for it, and
+/// ungrouped under a banner where it did not (issue #25).
+#[must_use]
+pub fn chat_list(chats: &[Chat], containers: &Containers) -> String {
     match containers {
-        Containers::Known => chat_list(chats),
+        Containers::Known => grouped_list(chats),
         Containers::Unknown(_) => ungrouped_list(chats),
     }
 }
 
-/// The chat list on its own, so htmx can swap it in without the page.
-#[must_use]
-pub fn chat_list(chats: &[Chat]) -> String {
+/// Every chat under the heading of the runtime status it has (ADR-0002).
+fn grouped_list(chats: &[Chat]) -> String {
     let mut list = opened_list();
     for status in GROUPS {
         write!(
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn each_chat_sits_under_the_heading_of_its_runtime_state() {
-        let rendered = chat_list(&every_state());
+        let rendered = chat_list(&every_state(), &Containers::Known);
 
         for (title, status) in [
             ("running", RuntimeStatus::Live),
@@ -504,7 +504,7 @@ mod tests {
     fn a_row_links_to_the_chat_and_shows_its_branch_and_last_push() {
         let chats = vec![chat("running", RuntimeStatus::Live)];
 
-        let rendered = chat_list(&chats);
+        let rendered = chat_list(&chats, &Containers::Known);
 
         assert!(
             rendered.contains("href=\"/chats/01K1RUNNING\""),
@@ -525,7 +525,7 @@ mod tests {
         let mut chats = vec![chat("running", RuntimeStatus::Live)];
         chats[0].0.last_pushed_commit = None;
 
-        assert!(chat_list(&chats).contains("push never"));
+        assert!(chat_list(&chats, &Containers::Known).contains("push never"));
     }
 
     #[test]
@@ -781,9 +781,9 @@ mod tests {
             "htmx is not loaded: {rendered}"
         );
         assert!(
-            chat_list(&[]).contains("hx-get=\"/chats\""),
+            chat_list(&[], &Containers::Known).contains("hx-get=\"/chats\""),
             "the chat list cannot refresh itself: {}",
-            chat_list(&[])
+            chat_list(&[], &Containers::Known)
         );
     }
 
@@ -791,7 +791,7 @@ mod tests {
     fn a_chat_title_cannot_smuggle_markup_into_a_row() {
         let chats = vec![chat("<img src=x onerror=alert(1)>", RuntimeStatus::Live)];
 
-        let rendered = chat_list(&chats);
+        let rendered = chat_list(&chats, &Containers::Known);
 
         assert!(
             !rendered.contains("<img"),
