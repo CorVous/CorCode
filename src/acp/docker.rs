@@ -10,7 +10,7 @@ use bollard::errors::Error as DockerError;
 use bollard::exec::StartExecResults;
 use bollard::models::ExecConfig;
 use futures_util::{Stream, StreamExt as _};
-use log::warn;
+use log::{info, warn};
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
 use super::{AcpChannel, AcpError, AcpTransport};
@@ -103,7 +103,7 @@ impl AcpChannel for ExecChannel {
             }
             match self.output.next().await {
                 Some(Ok(LogOutput::StdErr { message })) => {
-                    warn!(
+                    info!(
                         "adapter stderr: {}",
                         String::from_utf8_lossy(&message).trim()
                     );
@@ -122,10 +122,13 @@ impl AcpChannel for ExecChannel {
 }
 
 /// The line the operator reads when the adapter's stream carries bytes that
-/// are not text: the reason names where in the line they went wrong, which is
-/// all there is to go on once the message is gone (issue #66).
+/// are not text: where in the line they went wrong, and the line itself with
+/// those bytes stood in for (issue #66).
 fn undecodable(nonsense: &FromUtf8Error) -> String {
-    format!("the adapter's stream carried bytes that are not utf-8: {nonsense}")
+    format!(
+        "the adapter's stream carried a line that is not utf-8 ({nonsense}): {}",
+        String::from_utf8_lossy(nonsense.as_bytes())
+    )
 }
 
 /// The first whole line waiting in `unread`, taken out of it.
@@ -149,9 +152,9 @@ mod tests {
 
         assert_eq!(
             logged,
-            "the adapter's stream carried bytes that are not utf-8: \
-             invalid utf-8 sequence of 1 bytes from index 6",
-            "a parse failure nobody can place is a parse failure nobody can diagnose"
+            "the adapter's stream carried a line that is not utf-8 \
+             (invalid utf-8 sequence of 1 bytes from index 6): {\"id\":\u{fffd}}",
+            "a parse failure without the line is a parse failure nobody can diagnose"
         );
     }
 
