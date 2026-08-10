@@ -22,7 +22,7 @@ use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
 use crate::status::{Containers, Slot, Status};
 use crate::store::{
     self, ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, Owner, RuntimeStatus,
-    runtime_status,
+    StoreError, runtime_status,
 };
 use crate::sweep::{self, Sweep, Swept};
 use crate::ui;
@@ -240,6 +240,17 @@ fn startup_summary(run: &ScriptRun) -> String {
 fn stubborn_teardown(chat_id: &str, why: &str, stubborn: &PlaneError) -> String {
     format!(
         "{chat_id} ({why}) would not stop: {}",
+        with_causes(stubborn)
+    )
+}
+
+/// The line the operator reads when a working tree stays on disk: which
+/// chat, what was left of it, and everything the filesystem said under the
+/// store's own summary (issue #81). Only the cause says whether the operator
+/// has a permission to fix or a mount to unbusy.
+fn stubborn_workspace(chat_id: &str, what: &str, stubborn: &StoreError) -> String {
+    format!(
+        "{chat_id} left {what} that will not go: {}",
         with_causes(stubborn)
     )
 }
@@ -734,7 +745,7 @@ where
                     outcome.removed.push(chat_id);
                 }
                 Err(stubborn) => {
-                    warn!("{chat_id} left a workspace that will not go: {stubborn:#}");
+                    warn!("{}", stubborn_workspace(&chat_id, "a workspace", &stubborn));
                     outcome.stubborn.push(chat_id);
                 }
             }
@@ -1019,7 +1030,7 @@ where
     /// hear about: the chat is already as safe as it can be made.
     fn wipe_the_half_clone(&self, chat_id: &str) {
         if let Err(stubborn) = self.store.remove_workspace(chat_id) {
-            warn!("{chat_id} left half a clone that will not go: {stubborn:#}");
+            warn!("{}", stubborn_workspace(chat_id, "half a clone", &stubborn));
         }
     }
 
