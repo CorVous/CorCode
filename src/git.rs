@@ -275,8 +275,28 @@ pub fn clone_at(origin: &Origin, base_branch: &str, dest: &Path) -> Result<(), G
     .map(drop)
 }
 
+/// Where a revived workspace came back, and where the branch it came off
+/// stands on the remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revived {
+    /// The commit the workspace is standing on.
+    pub standing_at: String,
+    /// The commit the remote has the branch on.
+    pub tip: String,
+}
+
+impl Revived {
+    /// Whether the chat came back on a commit the branch has since built on:
+    /// its work is still there, and the remote has moved past it (issue #50).
+    #[must_use]
+    pub fn behind_the_tip(&self) -> bool {
+        self.standing_at != self.tip
+    }
+}
+
 /// Clone `origin`'s `branch` into `dest` and stand it where the chat left
-/// off, answering with the commit it ended up on (ADR-0002 rule 5).
+/// off, answering with the commit it ended up on and the branch tip it came
+/// off (ADR-0002 rule 5).
 ///
 /// A branch the remote no longer carries `commit` on is left standing at its
 /// tip: the remote is the truth, and the caller is the one who tells the chat
@@ -287,12 +307,16 @@ pub fn revive_at(
     branch: &str,
     commit: &str,
     dest: &Path,
-) -> Result<String, GitError> {
+) -> Result<Revived, GitError> {
     clone_at(origin, branch, dest)?;
+    let tip = head(dest)?;
     if carries(dest, commit)? {
         stand_at(dest, commit)?;
     }
-    head(dest)
+    Ok(Revived {
+        standing_at: head(dest)?,
+        tip,
+    })
 }
 
 /// Whether the branch `workspace` stands on still reaches `commit`. A commit
@@ -1322,7 +1346,11 @@ mod tests {
         )
         .expect("an archived chat's branch should come back");
 
-        assert_eq!(standing, archived_at);
+        assert_eq!(standing.standing_at, archived_at);
+        assert!(
+            standing.behind_the_tip(),
+            "a chat coming back under commits the branch has since taken is behind it"
+        );
         assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), archived_at);
         assert_eq!(
             git_says(&revived, &["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -1356,8 +1384,12 @@ mod tests {
         .expect("a branch that drifted should still come back");
 
         assert_eq!(
-            standing, tip,
+            standing.standing_at, tip,
             "a commit the branch has lost should leave the workspace at the tip"
+        );
+        assert!(
+            !standing.behind_the_tip(),
+            "a workspace standing at the tip is not behind it"
         );
         assert_eq!(git_says(&revived, &["rev-parse", "HEAD"]), tip);
     }
