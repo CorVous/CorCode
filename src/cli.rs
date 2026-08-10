@@ -212,7 +212,11 @@ mod tests {
 
     #[test]
     fn log_level_mapping() {
-        assert_eq!(log_level(0), LevelFilter::Warn);
+        assert_eq!(
+            log_level(0),
+            LevelFilter::Warn,
+            "a deployment that sets no RUST_LOG hears nothing of the lifecycle (issue #66)"
+        );
         assert_eq!(log_level(1), LevelFilter::Info);
         assert_eq!(log_level(2), LevelFilter::Debug);
         assert_eq!(log_level(3), LevelFilter::Trace);

@@ -244,6 +244,18 @@ fn stubborn_teardown(chat_id: &str, why: &str, stubborn: &PlaneError) -> String 
     )
 }
 
+/// The line the operator reads when a chat's connection is dropped: which
+/// chat, and everything under the ACP summary that says what it was dropped
+/// after. Without it a disconnect leaves no trace on this side at all (issue
+/// #66). A refusal drops the connection too, and the adapter that gave one is
+/// alive — so the line says what followed, not that anything broke.
+fn connection_lost(chat_id: &str, failure: &AcpError) -> String {
+    format!(
+        "{chat_id} dropped its adapter connection after: {}",
+        with_causes(failure)
+    )
+}
+
 /// `output` cut to the transcript's limit on a character boundary, marked when
 /// anything was dropped.
 fn truncated(output: &str) -> String {
@@ -796,6 +808,7 @@ where
     /// ADR-0007's ladder rather than going over a pipe nobody is holding.
     fn ended(&self, chat_id: &str, failure: AcpError) -> PromptError {
         if failure.spent_the_connection() {
+            warn!("{}", connection_lost(chat_id, &failure));
             self.connections.forget(chat_id);
             PromptError::Broke(failure.into())
         } else {
@@ -1312,6 +1325,43 @@ mod tests {
             "plain Display is what these warn sites used to get"
         );
         assert_ne!(with_causes(&stubborn), stubborn.to_string());
+    }
+
+    #[test]
+    fn a_connection_the_adapter_spent_is_logged_with_what_broke_it() {
+        let logged = connection_lost(
+            "01K1TESTCHATID0000000000",
+            &AcpError::Broken {
+                doing: "reading the adapter's answer".to_owned(),
+                source: std::io::ErrorKind::BrokenPipe.into(),
+            },
+        );
+
+        assert_eq!(
+            logged,
+            "01K1TESTCHATID0000000000 dropped its adapter connection after: \
+             the adapter's channel broke while reading the adapter's answer: \
+             broken pipe",
+            "a disconnect nobody logs is the incident of issue #66"
+        );
+    }
+
+    #[test]
+    fn a_connection_dropped_after_a_refusal_is_not_called_a_broken_one() {
+        let logged = connection_lost(
+            "01K1TESTCHATID0000000000",
+            &AcpError::Refused {
+                method: "session/prompt".to_owned(),
+                complaint: "unknown session".to_owned(),
+            },
+        );
+
+        assert_eq!(
+            logged,
+            "01K1TESTCHATID0000000000 dropped its adapter connection after: \
+             the adapter refused session/prompt: unknown session",
+            "an adapter that answered is alive, whatever became of the connection"
+        );
     }
 
     const CHECKPOINT: &str = "chat/2026-08-09-archived-chkpt-20260809T214033172";
