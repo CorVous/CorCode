@@ -10,7 +10,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
 use std::time::Duration;
 
-use log::debug;
+use log::{debug, info};
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
@@ -68,6 +68,13 @@ const PERMISSION_DECLINED: &str = "permission_declined";
 
 /// JSON-RPC's code for a method the receiver does not implement.
 const NO_SUCH_METHOD: i64 = -32601;
+
+/// How the log says which permission mode a session is in.
+///
+/// The mode a real adapter answered is reachable nowhere else — nothing
+/// writes it down — so the docker-gated vertical reads this line back for it,
+/// and the words are pinned here rather than spelled out twice.
+pub const OPENED_IN: &str = "is in permission mode";
 
 /// Where a turn's payloads go as they happen: the prompt on its way out, then
 /// each update on its way in. Recording is what makes them real (ADR-0006),
@@ -159,6 +166,7 @@ impl<T: AcpTransport + Sync> Adapter<T> {
         Ok(Greeting {
             calls,
             turn_patience: self.turn_patience,
+            current_mode: None,
         })
     }
 }
@@ -167,6 +175,7 @@ impl<T: AcpTransport + Sync> Adapter<T> {
 pub struct Greeting<C> {
     calls: Calls<C>,
     turn_patience: Duration,
+    current_mode: Option<String>,
 }
 
 impl<C: AcpChannel> Greeting<C> {
@@ -191,7 +200,8 @@ impl<C: AcpChannel> Greeting<C> {
     /// One rung asked for over the chat's workspace. Whatever the adapter
     /// says on the way to its answer is read past and kept nowhere.
     async fn rung(&mut self, method: &str, session_id: &str) -> Result<(), AcpError> {
-        self.calls
+        let session = self
+            .calls
             .call(
                 method,
                 json!({
@@ -200,8 +210,9 @@ impl<C: AcpChannel> Greeting<C> {
                     "mcpServers": [],
                 }),
             )
-            .await
-            .map(|_| ())
+            .await?;
+        self.opened(session_id, &session);
+        Ok(())
     }
 
     /// Rung 3: a session that remembers nothing, answering with its new id.
@@ -213,13 +224,27 @@ impl<C: AcpChannel> Greeting<C> {
                 json!({"cwd": WORKSPACE_MOUNT, "mcpServers": []}),
             )
             .await?;
-        session["sessionId"]
+        let session_id = session["sessionId"]
             .as_str()
             .map(ToOwned::to_owned)
             .ok_or_else(|| AcpError::Unreadable {
                 method: NEW_SESSION.to_owned(),
                 answer: session.to_string(),
-            })
+            })?;
+        self.opened(&session_id, &session);
+        Ok(session_id)
+    }
+
+    /// Take down what `session` says about the mode it is in, and say it out
+    /// loud: the adapter clamps a mode its model cannot honour and tells
+    /// nobody but its own stderr, so this line is where a clamped session
+    /// stops being invisible (ADR-0001).
+    fn opened(&mut self, session_id: &str, session: &Value) {
+        self.current_mode = current_mode(session);
+        match &self.current_mode {
+            Some(mode) => info!("session {session_id} {OPENED_IN} {mode}"),
+            None => debug!("session {session_id} came back naming no permission mode"),
+        }
     }
 
     /// The connection turns are taken over, once a rung has put `session_id`
@@ -229,15 +254,25 @@ impl<C: AcpChannel> Greeting<C> {
         Connection {
             calls: self.calls,
             session_id,
+            current_mode: self.current_mode,
             turn_patience: self.turn_patience,
         }
     }
+}
+
+/// The permission mode an answer about a session says it is in. An adapter
+/// older than the field names none, which is a case rather than a fault.
+fn current_mode(session: &Value) -> Option<String> {
+    session["modes"]["currentModeId"]
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 /// One chat's open conversation with its adapter, held across turns.
 pub struct Connection<C> {
     calls: Calls<C>,
     session_id: String,
+    current_mode: Option<String>,
     turn_patience: Duration,
 }
 
@@ -256,6 +291,13 @@ impl<C: AcpChannel> Connection<C> {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// The permission mode the adapter says this session is in, where it named
+    /// one (ADR-0001).
+    #[must_use]
+    pub fn current_mode(&self) -> Option<&str> {
+        self.current_mode.as_deref()
     }
 
     /// Take one turn: `said` goes into `record` before it goes on the wire,
@@ -528,6 +570,57 @@ mod tests {
 
         assert_eq!(connection.session_id(), SESSION);
         assert_eq!(adapter.transport().containers(), [CONTAINER]);
+    }
+
+    #[tokio::test]
+    async fn a_new_session_is_kept_with_the_permission_mode_it_actually_opened_in() {
+        let adapter = Adapter::new(ScriptedAdapter::opening_in_mode(SESSION, "default"));
+
+        let connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        assert_eq!(
+            connection.current_mode(),
+            Some("default"),
+            "the mode the session opened in was thrown away with the rest of the answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loaded_session_is_kept_with_the_permission_mode_the_load_answered() {
+        let adapter = Adapter::new(ScriptedAdapter::loading_in_mode(SESSION, "default"));
+        let mut greeting = adapter
+            .greet(CONTAINER)
+            .await
+            .expect("the scripted adapter should say hello");
+
+        greeting
+            .load(SESSION)
+            .await
+            .expect("the scripted adapter should load the session it was given");
+
+        let connection = greeting.over(SESSION.to_owned());
+        assert_eq!(
+            connection.current_mode(),
+            Some("default"),
+            "the mode the load came back in was thrown away with the rest of the answer"
+        );
+    }
+
+    /// An adapter older than the modes field names no mode, which is a case
+    /// rather than a fault: nothing is known, so nothing is claimed.
+    #[tokio::test]
+    async fn a_session_the_adapter_names_no_mode_for_is_kept_without_one() {
+        let adapter = Adapter::new(ScriptedAdapter::opening(SESSION));
+
+        let connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        assert_eq!(connection.current_mode(), None);
     }
 
     #[tokio::test]

@@ -8,6 +8,9 @@ mod memory;
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::path::Path;
+use std::sync::LazyLock;
+
+use serde_json::Value;
 
 pub use docker::{DockerPlane, PlaneSettings};
 pub use error::PlaneError;
@@ -18,6 +21,24 @@ const NAME_PREFIX: &str = "corcode-chat-";
 /// Where a chat's workspace is mounted, the same for every chat forever: the
 /// adapter's transcript path encodes it (ADR-0006).
 pub const WORKSPACE_MOUNT: &str = "/workspace";
+
+/// The settings the workspace image bakes into `/etc/claude-code`, read here
+/// so the file the image ships is the only place they are written down.
+const MANAGED_SETTINGS: &str = include_str!("../../docker/workspace/managed-settings.json");
+
+/// The permission mode every session in a workspace container is meant to open
+/// in (ADR-0001). A session in any other mode was clamped by the adapter.
+#[must_use]
+pub fn managed_default_mode() -> &'static str {
+    static MODE: LazyLock<String> = LazyLock::new(|| {
+        serde_json::from_str::<Value>(MANAGED_SETTINGS)
+            .expect("the baked managed settings are json")["permissions"]["defaultMode"]
+            .as_str()
+            .expect("the baked managed settings name a default permission mode")
+            .to_owned()
+    });
+    &MODE
+}
 
 /// The one container a chat may own, named after it so that liveness needs no
 /// bookkeeping of its own.

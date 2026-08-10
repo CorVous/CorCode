@@ -16,6 +16,7 @@ use super::{AcpChannel, AcpError, AcpTransport, NO_SUCH_METHOD};
 /// client asked for and could never catch it asking for the wrong thing.
 const RESUME_SESSION: &str = "session/resume";
 const LOAD_SESSION: &str = "session/load";
+const NEW_SESSION: &str = "session/new";
 const PROMPT: &str = "session/prompt";
 
 /// A notification the fake volunteers before every answer, as a real adapter
@@ -120,6 +121,33 @@ impl ScriptedAdapter {
             updates: Arc::new(updates.to_vec()),
             ..Self::reading(prompting_script(session_id))
         }
+    }
+
+    /// An adapter whose new session opens in `mode` rather than in whatever
+    /// the managed settings asked for, as one that clamped the default does.
+    #[must_use]
+    pub fn opening_in_mode(session_id: &str, mode: &str) -> Self {
+        let mut script = working_script(session_id);
+        script.insert(
+            NEW_SESSION.to_owned(),
+            Answer::Result(json!({
+                "sessionId": session_id,
+                "modes": {"currentModeId": mode},
+            })),
+        );
+        Self::reading(script)
+    }
+
+    /// An adapter that answers a load with the mode the session came back in,
+    /// which a clamped session is in just as a new one can be.
+    #[must_use]
+    pub fn loading_in_mode(session_id: &str, mode: &str) -> Self {
+        let mut script = prompting_script(session_id);
+        script.insert(
+            LOAD_SESSION.to_owned(),
+            Answer::Result(json!({"modes": {"currentModeId": mode}})),
+        );
+        Self::reading(script)
     }
 
     /// An adapter that hands a session back where it left off, replaying
@@ -296,7 +324,7 @@ fn working_script(session_id: &str) -> Script {
             })),
         ),
         (
-            "session/new".to_owned(),
+            NEW_SESSION.to_owned(),
             Answer::Result(json!({"sessionId": session_id})),
         ),
         (RESUME_SESSION.to_owned(), Answer::Unheard),
