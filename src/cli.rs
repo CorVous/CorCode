@@ -45,15 +45,24 @@ pub const fn log_level(verbose: u8) -> LevelFilter {
     }
 }
 
+/// Build the logger for a filter spec in `RUST_LOG` syntax.
+fn build_logger(spec: &str) -> env_logger::Logger {
+    env_logger::Builder::new()
+        .parse_filters(spec)
+        .format(|buf, record| writeln!(buf, "{}: {}", record.level(), record.args()))
+        .build()
+}
+
 /// Configure logging based on verbosity level.
 ///
 /// The `RUST_LOG` environment variable, when set, overrides the count-based
 /// verbosity entirely (e.g. `RUST_LOG=debug`).
 pub fn setup_logging(verbose: u8) {
     let level = log_level(verbose);
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(level.as_str()))
-        .format(|buf, record| writeln!(buf, "{}: {}", record.level(), record.args()))
-        .init();
+    let spec = std::env::var("RUST_LOG").unwrap_or_else(|_| level.as_str().to_owned());
+    let logger = build_logger(&spec);
+    log::set_max_level(logger.filter());
+    log::set_boxed_logger(Box::new(logger)).expect("logging configured once per process");
     log::debug!("Logging configured: level={level}");
 }
 
@@ -81,6 +90,7 @@ pub fn run() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory as _;
+    use log::{Level, Log as _, Metadata};
 
     use super::*;
 
@@ -107,6 +117,44 @@ mod tests {
         // Global args work after the subcommand too
         let cli = Cli::parse_from(["rust-template", "version", "-v"]);
         assert_eq!(cli.verbose, 1);
+    }
+
+    fn enabled(spec: &str, target: &str, level: Level) -> bool {
+        let logger = build_logger(spec);
+        logger.enabled(&Metadata::builder().target(target).level(level).build())
+    }
+
+    #[test]
+    fn the_docker_client_stays_at_info_however_loud_the_rest_is_turned_up() {
+        for spec in ["debug", "trace"] {
+            assert!(
+                !enabled(spec, "bollard::docker", Level::Debug),
+                "{spec} let bollard::docker debug through"
+            );
+            assert!(
+                !enabled(spec, "bollard", Level::Trace),
+                "{spec} let bollard trace through"
+            );
+            assert!(
+                enabled(spec, "bollard::docker", Level::Info),
+                "{spec} silenced bollard info"
+            );
+            assert!(
+                enabled(spec, "cor_code::plane", Level::Debug),
+                "{spec} silenced our own debug"
+            );
+        }
+    }
+
+    #[test]
+    fn asking_for_docker_client_traces_by_name_does_not_get_them_either() {
+        assert!(!enabled("warn,bollard=trace", "bollard::docker", Level::Trace));
+        assert!(!enabled("bollard::docker=debug", "bollard::docker", Level::Debug));
+    }
+
+    #[test]
+    fn a_module_merely_starting_with_the_capped_name_is_untouched() {
+        assert!(enabled("debug", "bollardish::inner", Level::Debug));
     }
 
     #[test]
