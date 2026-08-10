@@ -162,7 +162,7 @@ fn last_push(manifest: &Manifest) -> &str {
 #[cfg(test)]
 mod tests {
     use crate::secrets::{Secret, Source};
-    use crate::status::Status;
+    use crate::status::{Containers, Status};
 
     use super::*;
 
@@ -258,6 +258,7 @@ mod tests {
         assert_styling_is_only_the_stylesheet(&console_page(
             &[],
             &Status {
+                containers: Containers::Known,
                 pool: Vec::new(),
                 warm_pool: 2,
                 parked: 0,

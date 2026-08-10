@@ -166,10 +166,16 @@ where
         Ok(statuses) => statuses,
         Err(failure) => return broken_invariant(&anyhow::Error::new(failure)),
     };
-    match chats.survey().await {
+    match chats.survey_or_unknown().await {
         Ok(survey) => {
             let status = chats.status_of(&survey, Utc::now());
-            Html(ui::console_page(&survey, &status, chats.repos(), &statuses)).into_response()
+            Html(ui::console_page(
+                &survey.chats,
+                &status,
+                chats.repos(),
+                &statuses,
+            ))
+            .into_response()
         }
         Err(failure) => broken_invariant(&failure),
     }
