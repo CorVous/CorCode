@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use ulid::Ulid;
 
-use cor_code::acp::{AcpChannel, AcpError, AcpTransport, Adapter, ScriptedAdapter};
+use cor_code::acp::{AcpChannel, AcpError, AcpTransport, Adapter, OPENED_IN, ScriptedAdapter};
 use cor_code::chats::{Chats, WantedChat};
 use cor_code::config::{
     Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_SCRATCH_MB,
@@ -28,6 +28,15 @@ use cor_code::store::{ChatStore, Owner};
 const REPO: &str = "CorVous/fixture";
 const BARE: &str = "CorVous/fixture.git";
 const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
+
+/// A session of its own for the pin on the open line, so that the one line
+/// this suite reads back is the one that test drove.
+const OPENED_SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000002";
+
+/// A mode the managed settings never ask for, which is what the adapter
+/// clamps a session down to (ADR-0001).
+const ASKING_MODE: &str = "default";
+
 const SAID: &str = "ship the ladder";
 const CONTAINER: &str = "corcode-chat-01K1TESTCHATID0000000000";
 
@@ -71,6 +80,43 @@ async fn a_dropped_adapter_connection_reaches_the_operator_as_a_warning() {
         logged.quietest_level_of("dropped its adapter connection"),
         Some(Level::Warn),
         "src/chats.rs: a connection lost below WARN is the silent core of issue #66"
+    );
+}
+
+/// The mode a session opened in is written down nowhere else, so this line is
+/// the only place an operator can read which one they are watching (issue
+/// #58, ADR-0001).
+#[tokio::test]
+async fn the_mode_a_session_opened_in_reaches_the_operator_as_chatter() {
+    let logged = capturing_lines();
+    let adapter = Adapter::new(ScriptedAdapter::opening_in_mode(OPENED_SESSION, ASKING_MODE));
+
+    adapter
+        .open_session(CONTAINER)
+        .await
+        .expect("the scripted adapter opens a session");
+
+    assert_eq!(
+        logged.quietest_level_of(&format!("{OPENED_SESSION} {OPENED_IN}")),
+        Some(Level::Info),
+        "src/acp/mod.rs: a mode nobody can read under RUST_LOG=info is a mode nobody reads"
+    );
+}
+
+/// A session the adapter clamped is one the operator has to know about: the
+/// chat's own log says so too, but only this line reaches a deployment that
+/// is watching the core rather than the chat (issue #58).
+#[tokio::test]
+async fn a_session_clamped_into_another_mode_reaches_the_operator_as_a_warning() {
+    let logged = capturing_lines();
+    let dataset = Dataset::of(ScriptedAdapter::opening_in_mode(SESSION, ASKING_MODE));
+
+    let chat = dataset.create("clamped").await;
+
+    assert_eq!(
+        logged.quietest_level_of(&format!("{chat} opened a session in permission mode")),
+        Some(Level::Warn),
+        "src/chats.rs: a clamped session below WARN is a mute agent nobody was warned about"
     );
 }
 
