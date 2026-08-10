@@ -119,6 +119,8 @@ pub enum ArchiveError {
     AlreadyArchived,
     #[error("this chat is in the middle of a turn")]
     Busy,
+    #[error("this chat is being woken for a prompt")]
+    Waking,
     #[error("nothing reached the remote, so nothing was torn down")]
     NotPushed(#[source] anyhow::Error),
     #[error("the chat could not be archived")]
@@ -130,7 +132,7 @@ impl ArchiveError {
     /// than the archive failing. A refusal touched nothing.
     #[must_use]
     pub const fn is_refusal(&self) -> bool {
-        matches!(self, Self::AlreadyArchived | Self::Busy)
+        matches!(self, Self::AlreadyArchived | Self::Busy | Self::Waking)
     }
 }
 
@@ -815,7 +817,10 @@ where
         let chat_id = chat_id.to_string();
         let _claim = self
             .claim(&chat_id, Doing::Archiving)
-            .map_err(|_| ArchiveError::Busy)?;
+            .map_err(|held| match held {
+                Doing::Waking => ArchiveError::Waking,
+                Doing::Archiving => ArchiveError::Busy,
+            })?;
         let manifest = match self.store.read_manifest(&chat_id) {
             Ok(manifest) => manifest,
             Err(failure) if failure.is_missing() => return Err(ArchiveError::NoSuchChat),
