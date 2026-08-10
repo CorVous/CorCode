@@ -13,6 +13,7 @@ use ulid::Ulid;
 
 use crate::acp::{AcpError, AcpTransport, Adapter, Connection, Connections, Held, Turn};
 use crate::config::Config;
+use crate::failure::with_causes;
 use crate::git::{self, Remotes};
 use crate::plane::{ContainerPlane, ScriptRun, container_name};
 use crate::pool;
@@ -540,7 +541,10 @@ where
                 self.connections.forget(chat_id);
                 info!("{chat_id} {why}: container torn down");
             }
-            Err(stubborn) => warn!("{chat_id} ({why}) would not stop: {stubborn}"),
+            Err(stubborn) => warn!(
+                "{chat_id} ({why}) would not stop: {}",
+                with_causes(&stubborn)
+            ),
         }
     }
 
@@ -1016,7 +1020,10 @@ where
             }
             Err(failure) => {
                 if let Err(stubborn) = self.plane.teardown(&chat_id).await {
-                    warn!("{chat_id} never opened a session and would not stop: {stubborn}");
+                    warn!(
+                        "{chat_id} never opened a session and would not stop: {}",
+                        with_causes(&stubborn)
+                    );
                 }
                 Err(failure)
             }

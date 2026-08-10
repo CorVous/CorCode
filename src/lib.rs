@@ -6,6 +6,7 @@ pub mod chats;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod failure;
 pub mod git;
 pub mod plane;
 pub mod pool;
