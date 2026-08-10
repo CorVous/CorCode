@@ -486,6 +486,101 @@ async fn work_changed_after_a_checkpoint_landed_is_checkpointed_onto_a_branch_of
     );
 }
 
+/// A checkpoint cut over commits the agent made and no dirty tree is one of
+/// the agent's own commits, and those are the agent's to rewrite: a commit
+/// amended between the attempts is a checkpoint of its own, however alike the
+/// work under the two looks (issue #99).
+#[tokio::test]
+async fn a_checkpoint_over_a_commit_the_agent_amended_stands_on_its_own_branch() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    run(&app.workspace(&chat), &["checkout", "-b", "off-the-branch"]);
+    app.commit_in_workspace(&chat, "the agent's own commit");
+    app.refuse_the_chat_branch();
+    let stopped = app.archive(&chat).await;
+    assert!(stopped.status().is_server_error());
+    let stale = app.checkpoint_branches();
+    assert_eq!(
+        stale.len(),
+        1,
+        "the archive that failed did not leave a checkpoint behind: {stale:?}"
+    );
+    let amended = app.commit_as_the_agent(&chat, &["--amend"], "what the agent meant to say");
+
+    app.allow_the_chat_branch();
+    let retried = app.archive(&chat).await;
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    let checkpoints = app.checkpoint_branches();
+    assert_eq!(
+        checkpoints.len(),
+        2,
+        "the amended commit was not checkpointed onto a branch of its own: {checkpoints:?}"
+    );
+    let fresh = checkpoints
+        .iter()
+        .find(|checkpoint| !stale.contains(checkpoint))
+        .expect("the retry should mint a checkpoint for the commit it is pushing");
+    assert_eq!(
+        app.origin_says(&["rev-parse", fresh]),
+        amended,
+        "the checkpoint the chat was closed on is not the commit the agent left behind"
+    );
+    assert_eq!(
+        app.manifest(&chat)["checkpoint_branch"],
+        fresh.as_str(),
+        "the manifest sends the operator to a checkpoint of a commit that no longer exists"
+    );
+}
+
+/// What a checkpoint holds is the tree it captured and the commit it was cut
+/// off, and a retry has to weigh both. An agent that commits on the chat's
+/// branch between the attempts leaves the very same tree standing over a
+/// commit the landed checkpoint never saw, and that is a checkpoint of its own
+/// (issue #99).
+#[tokio::test]
+async fn a_checkpoint_cut_off_a_commit_the_landed_one_never_saw_stands_on_its_own_branch() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+    app.refuse_the_chat_branch();
+    let stopped = app.archive(&chat).await;
+    assert!(stopped.status().is_server_error());
+    let stale = app.checkpoint_branches();
+    assert_eq!(
+        stale.len(),
+        1,
+        "the archive that failed did not leave a checkpoint behind: {stale:?}"
+    );
+    let later = app.commit_nothing_in_workspace(&chat, "the agent marks where it got to");
+
+    app.allow_the_chat_branch();
+    let retried = app.archive(&chat).await;
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    let checkpoints = app.checkpoint_branches();
+    assert_eq!(
+        checkpoints.len(),
+        2,
+        "the work over a later commit was not checkpointed onto a branch of its own: {checkpoints:?}"
+    );
+    let fresh = checkpoints
+        .iter()
+        .find(|checkpoint| !stale.contains(checkpoint))
+        .expect("the retry should mint a checkpoint for the work it is pushing");
+    assert_eq!(
+        app.origin_says(&["rev-parse", &format!("{fresh}^")]),
+        later,
+        "the fresh checkpoint was not cut off the commit the agent left behind"
+    );
+    assert_eq!(
+        app.manifest(&chat)["checkpoint_branch"],
+        fresh.as_str(),
+        "the manifest sends the operator to a checkpoint cut off a commit that has moved"
+    );
+}
+
 /// The rescue can land and the archive fail after it, on the manifest write.
 /// The retry finds the chat's work already rescued and says so: one rescue
 /// branch on the remote however often the operator tries (issue #82).
@@ -1039,14 +1134,31 @@ impl TestApp {
     fn commit_in_workspace(&self, chat_id: &str, message: &str) -> String {
         let workspace = self.workspace(chat_id);
         fs::write(workspace.join("third.txt"), message).expect("a file should be writable");
-        for args in [
-            vec!["config", "user.email", "agent@example.invalid"],
-            vec!["config", "user.name", "Agent"],
-            vec!["add", "."],
-            vec!["commit", "-m", message],
-        ] {
-            run(&workspace, &args);
-        }
+        run(&workspace, &["add", "."]);
+        self.commit_as_the_agent(chat_id, &[], message)
+    }
+
+    /// A commit that changes nothing in the tree, as an agent marking where it
+    /// got to makes one: the branch moves on and whatever was dirty is dirty
+    /// still.
+    fn commit_nothing_in_workspace(&self, chat_id: &str, message: &str) -> String {
+        self.commit_as_the_agent(chat_id, &["--allow-empty"], message)
+    }
+
+    /// Commit whatever is staged in the chat's workspace under the agent's own
+    /// name, answering with the sha it landed on.
+    fn commit_as_the_agent(&self, chat_id: &str, how: &[&str], message: &str) -> String {
+        let workspace = self.workspace(chat_id);
+        run(
+            &workspace,
+            &["config", "user.email", "agent@example.invalid"],
+        );
+        run(&workspace, &["config", "user.name", "Agent"]);
+        let committing: Vec<&str> = std::iter::once("commit")
+            .chain(how.iter().copied())
+            .chain(["-m", message])
+            .collect();
+        run(&workspace, &committing);
         says(&workspace, &["rev-parse", "HEAD"])
     }
 

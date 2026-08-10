@@ -504,7 +504,7 @@ pub fn push_for_archive(
 ) -> Result<Pushed, PushFailure> {
     let standing = standing(workspace).map_err(unpushed)?;
     let checkpoint = checkpoint_unpushed_work(workspace, branch, &standing).map_err(unpushed)?;
-    match push_branches(origin, workspace, branch, checkpoint.as_deref()) {
+    match push_branches(origin, workspace, branch, checkpoint.as_ref()) {
         Ok(reached) => {
             stand_on(workspace, branch).map_err(|source| stopped(&reached.landed, source))?;
             Ok(Pushed {
@@ -515,9 +515,9 @@ pub fn push_for_archive(
         }
         Err(failure) => {
             if let Some(checkpoint) = &checkpoint
-                && let Err(stubborn) = undo_checkpoint(workspace, &standing, checkpoint)
+                && let Err(stubborn) = undo_checkpoint(workspace, &standing, &checkpoint.branch)
             {
-                warn!("{}", unrolled_checkpoint(checkpoint, &stubborn));
+                warn!("{}", unrolled_checkpoint(&checkpoint.branch, &stubborn));
             }
             Err(failure)
         }
@@ -565,6 +565,18 @@ fn standing(workspace: &Path) -> Result<Standing, GitError> {
     })
 }
 
+/// A chat's unpushed work, cut onto a branch of its own and ready to push.
+struct Checkpoint {
+    /// The branch the work was cut onto.
+    branch: String,
+    /// Whether the commit under that branch is one the core made out of the
+    /// working tree. A commit the agent made stands where it stood however
+    /// often the archive is retried; one the core makes carries the moment it
+    /// was made, so no two attempts cut the same commit out of the same work
+    /// (issue #99).
+    committed: bool,
+}
+
 /// Commit whatever `branch` would not carry onto a checkpoint branch, and say
 /// which branch that was.
 ///
@@ -575,7 +587,7 @@ fn checkpoint_unpushed_work(
     workspace: &Path,
     branch: &str,
     standing: &Standing,
-) -> Result<Option<String>, GitError> {
+) -> Result<Option<Checkpoint>, GitError> {
     let dirty = dirty(workspace)?;
     if !dirty && standing.at == branch {
         return Ok(None);
@@ -585,7 +597,10 @@ fn checkpoint_unpushed_work(
     if dirty {
         commit_everything(workspace, &checkpoint)?;
     }
-    Ok(Some(checkpoint))
+    Ok(Some(Checkpoint {
+        branch: checkpoint,
+        committed: dirty,
+    }))
 }
 
 /// Whether `workspace` holds anything git has not been told about.
@@ -656,7 +671,7 @@ fn push_branches(
     origin: &Origin,
     workspace: &Path,
     branch: &str,
-    checkpoint: Option<&str>,
+    checkpoint: Option<&Checkpoint>,
 ) -> Result<Reached, PushFailure> {
     let mut landed = Landed::default();
     if let Some(checkpoint) = checkpoint {
@@ -724,9 +739,17 @@ fn rescue_holding(
     branch: &str,
     tip: &str,
 ) -> Result<Option<String>, GitError> {
-    Ok(minted_on_remote(origin, workspace, branch, RESCUE)?
-        .into_iter()
-        .find_map(|(at, rescue)| (at == tip).then_some(rescue)))
+    Ok(standing_at(
+        &minted_on_remote(origin, workspace, branch, RESCUE)?,
+        tip,
+    ))
+}
+
+/// The branch among `listed` that stands on `commit`.
+fn standing_at(listed: &[(String, String)], commit: &str) -> Option<String> {
+    listed
+        .iter()
+        .find_map(|(at, branch)| (at == commit).then(|| branch.clone()))
 }
 
 /// The checkpoint branch the chat's unpushed work reaches the remote on: the
@@ -738,42 +761,47 @@ fn rescue_holding(
 /// Minting a name per attempt would leave the remote one checkpoint per retry,
 /// with nothing saying which of them the chat is closed on (issue #99).
 ///
-/// A retried checkpoint is not the commit the first attempt pushed, the way a
-/// retried rescue is: it is committed afresh out of the working tree, so it
-/// carries the moment it was cut and a sha of its own every attempt. What
-/// repeats across the attempts is the work — the same tree, cut off the same
-/// commit — and that is what a candidate is read for.
+/// What makes two attempts the same checkpoint depends on who made the commit
+/// under it. A checkpoint cut over commits the agent made and no dirty tree is
+/// that commit, which stands still across retries and is recognised by its
+/// sha. A checkpoint of a dirty tree is committed afresh each attempt, so it
+/// has a sha of its own every time and is recognised by the work it holds
+/// instead — the same tree, cut off the same commit. Reading the sha in both
+/// cases would adopt a checkpoint of work since amended; reading the work in
+/// both would adopt the commit before the amendment.
 fn checkpointed(
     origin: &Origin,
     workspace: &Path,
     branch: &str,
-    checkpoint: &str,
+    checkpoint: &Checkpoint,
 ) -> Result<String, GitError> {
     if let Some(already) = checkpoint_holding(origin, workspace, branch, checkpoint)? {
         return Ok(already);
     }
-    push_one(origin, workspace, checkpoint, checkpoint)?;
-    Ok(checkpoint.to_owned())
+    push_one(origin, workspace, &checkpoint.branch, &checkpoint.branch)?;
+    Ok(checkpoint.branch.clone())
 }
 
-/// The checkpoint branch of `branch` the remote already carries holding the
-/// work `checkpoint` captured, if it carries one. Reading a candidate's work
-/// means holding its commit, so each is fetched in turn — one commit object
-/// apiece, over a tree and a history this workspace already has.
+/// The checkpoint branch of `branch` the remote already carries holding what
+/// `checkpoint` holds, if it carries one.
 fn checkpoint_holding(
     origin: &Origin,
     workspace: &Path,
     branch: &str,
-    checkpoint: &str,
+    checkpoint: &Checkpoint,
 ) -> Result<Option<String>, GitError> {
-    let holding = work_of(workspace, checkpoint)?;
-    for (_, candidate) in minted_on_remote(origin, workspace, branch, CHECKPOINT)? {
-        fetch_one(origin, workspace, &candidate)?;
-        if work_of(workspace, FETCHED)? == holding {
-            return Ok(Some(candidate));
-        }
+    let listed = minted_on_remote(origin, workspace, branch, CHECKPOINT)?;
+    if !checkpoint.committed {
+        return Ok(standing_at(
+            &listed,
+            &tip_of(workspace, &checkpoint.branch)?,
+        ));
     }
-    Ok(None)
+    let holding = work_of(workspace, &checkpoint.branch)?;
+    Ok(listed
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .find(|candidate| work_on_remote(origin, workspace, candidate).as_ref() == Some(&holding)))
 }
 
 /// The work a commit holds: the tree it captured and the commit it was cut
@@ -824,14 +852,50 @@ fn minted_on_remote(
 /// Where git leaves the commits of a fetch nothing named a ref for.
 const FETCHED: &str = "FETCH_HEAD";
 
+/// Fetch a commit for what it points at rather than what it contains, leaving
+/// the file contents on the remote.
+const WITHOUT_CONTENTS: &str = "--filter=blob:none";
+
+/// The work a checkpoint branch on the remote holds, which means having its
+/// commit: it is fetched to be read at [`FETCHED`].
+///
+/// A branch the remote cannot hand over holds nothing this can go on — one
+/// deleted since it was listed, one a remote that has since gone quiet will
+/// not serve — and is passed over rather than stopping the archive: what
+/// follows is a push of the work under a name of its own, which costs a branch
+/// at worst and loses nothing.
+///
+/// The commit is wanted for the tree and the parent it names, not for the
+/// files under it, so the contents are left where they are. A remote that will
+/// not filter is asked again for the whole of it, which costs a download
+/// rather than an adoption.
+fn work_on_remote(origin: &Origin, workspace: &Path, branch: &str) -> Option<String> {
+    for narrowing in [&[WITHOUT_CONTENTS][..], &[]] {
+        if fetch_one(origin, workspace, branch, narrowing).is_ok() {
+            return work_of(workspace, FETCHED).ok();
+        }
+    }
+    None
+}
+
 /// Bring one branch of the remote's into this workspace, to be read at
 /// [`FETCHED`]. No ref of the workspace's own is written: the branch is being
 /// looked at, not worked from.
-fn fetch_one(origin: &Origin, workspace: &Path, branch: &str) -> Result<(), GitError> {
+fn fetch_one(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    narrowing: &[&str],
+) -> Result<(), GitError> {
+    let refspec = format!("refs/heads/{branch}");
+    let args: Vec<&str> = std::iter::once("fetch")
+        .chain(narrowing.iter().copied())
+        .chain(["--", origin.url(), &refspec])
+        .collect();
     run_in(
         workspace,
         &format!("fetch {branch} from {origin}"),
-        &["fetch", "--", origin.url(), &format!("refs/heads/{branch}")],
+        &args,
         |said| origin.scrub(said),
     )
     .map(drop)
@@ -1564,6 +1628,28 @@ mod tests {
             .expect("a hook should be runnable");
     }
 
+    /// A checkpoint branch can go between the remote listing it and the fetch
+    /// that would read it — deleted by whoever cleans up after archives — and
+    /// a branch nobody can be handed is one this archive is not closing on,
+    /// not one it stops over (issue #99).
+    #[test]
+    fn a_checkpoint_branch_the_remote_cannot_hand_over_holds_nothing_to_adopt() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let origin = remotes.origin(REPO, None);
+        let (_into, workspace) = chat_workspace(&origin);
+
+        let held = work_on_remote(
+            &origin,
+            &workspace,
+            &format!("{CHAT_BRANCH}-chkpt-19700101T000000000"),
+        );
+
+        assert_eq!(
+            held, None,
+            "a checkpoint the remote no longer carries was read as work to close a chat on"
+        );
+    }
+
     #[test]
     fn a_push_that_fails_leaves_the_workspace_as_it_was() {
         let (_origin_dir, remotes) = seeded_repository();
@@ -1576,8 +1662,13 @@ mod tests {
         let error = push_for_archive(&unreachable.origin(REPO, None), &workspace, CHAT_BRANCH)
             .expect_err("a push to nowhere should fail");
 
+        let said = format!("{error}");
         assert!(
-            format!("{error}").contains("file:///nowhere/at/all"),
+            said.contains("look up") && said.contains("chkpt branches"),
+            "error should say what it was doing, got: {error}"
+        );
+        assert!(
+            said.contains("file:///nowhere/at/all"),
             "error should say which remote it was working against, got: {error}"
         );
         assert_eq!(
