@@ -497,6 +497,15 @@ impl Drop for Claim<'_> {
     }
 }
 
+/// A chat ready to be prompted: the connection the turn goes over and, where
+/// this prompt woke the chat, the claim it was woken under. The claim outlives
+/// the wake and ends where the turn lock begins, so a woken chat is never for
+/// an instant one an archive can read as idle (issue #101).
+struct Woken<'a, C> {
+    connection: Held<C>,
+    claim: Option<Claim<'a>>,
+}
+
 /// Where a wake found its agent: a container that was already up, or one this
 /// wake started and is therefore this wake's to give back.
 struct Housing {
@@ -959,13 +968,21 @@ where
             .expect("the git task should not panic")
     }
 
+    /// Take one turn over the chat's connection, waking it first if it holds
+    /// none. A wake hands its claim over with the connection, and the turn lets
+    /// go of it only once it holds the connection itself: between the two there
+    /// is no instant in which the chat reads as idle to an archive (issue #101).
     async fn turn(&self, chat_id: &str, said: &str) -> Result<(), PromptError> {
-        let connection = match self.connections.of(chat_id) {
-            Some(held) => held,
+        let woken = match self.connections.of(chat_id) {
+            Some(connection) => Woken {
+                connection,
+                claim: None,
+            },
             None => self.wake(chat_id).await?,
         };
         let turn = {
-            let mut agent = connection.try_lock().map_err(|_| PromptError::Busy)?;
+            let mut agent = woken.connection.try_lock().map_err(|_| PromptError::Busy)?;
+            drop(woken.claim);
             agent
                 .take_turn(said, &mut |payload| {
                     self.store.append_event(chat_id, payload)?;
@@ -1027,15 +1044,22 @@ where
     ///
     /// One wake at a time: a second prompt arriving mid-wake is turned away
     /// rather than left to clone over the first one's workspace.
-    async fn wake(&self, chat_id: &str) -> Result<Held<T::Channel>, PromptError> {
-        let _claim = self
+    ///
+    /// The claim goes back with the connection rather than ending here: a chat
+    /// woken but not yet taking a turn is one an archive would read as idle and
+    /// tear the fresh container from (issue #101).
+    async fn wake(&self, chat_id: &str) -> Result<Woken<'_, T::Channel>, PromptError> {
+        let claim = self
             .claim(chat_id, Doing::Waking)
             .map_err(|held| match held {
                 Doing::Waking => PromptError::Waking,
                 Doing::Archiving => PromptError::Archiving,
             })?;
         match self.woken(chat_id).await {
-            Ok(held) => Ok(held),
+            Ok(connection) => Ok(Woken {
+                connection,
+                claim: Some(claim),
+            }),
             Err(failure) => {
                 self.note(
                     chat_id,
@@ -1443,7 +1467,107 @@ where
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::acp::ScriptedAdapter;
+    use crate::plane::MemoryPlane;
+
+    /// The session a woken chat comes back to.
+    const REMEMBERED: &str = "session-remembered";
+
+    /// A dataset the tests own outright, over an adapter that resumes at
+    /// ADR-0007's first rung and a plane whose containers cost nothing.
+    fn a_parked_chat() -> (TempDir, Chats<MemoryPlane, ScriptedAdapter>, String) {
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let config = a_config(dir.path());
+        let store = ChatStore::new(dir.path());
+        store.prepare().expect("the dataset should prepare");
+        let manifest = store
+            .create_chat(NewChat {
+                title: "parked".to_owned(),
+                repo: "CorVous/CorCode".to_owned(),
+                branch: "chat/parked".to_owned(),
+                base_branch: "main".to_owned(),
+                env: BTreeMap::new(),
+                startup_script: None,
+            })
+            .expect("a chat should be created");
+        let chat_id = manifest.chat_id.clone();
+        store
+            .write_manifest(&Manifest {
+                acp_session_id: Some(REMEMBERED.to_owned()),
+                ..manifest
+            })
+            .expect("the session should be recorded");
+        let secrets = Arc::new(Secrets::from_config(&config));
+        let chats = Chats::new(
+            &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
+            MemoryPlane::default(),
+            ScriptedAdapter::resuming(REMEMBERED, &[]),
+            Remotes::new("file:///nowhere"),
+            secrets,
+        );
+        (dir, chats, chat_id)
+    }
+
+    fn a_config(data_dir: &std::path::Path) -> Config {
+        let vars = [
+            ("CORCODE_DATA_DIR", data_dir.to_str().expect("spellable")),
+            ("CORCODE_USERNAME", "cassidy"),
+            (
+                "CORCODE_PASSWORD_HASH",
+                "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA",
+            ),
+            (
+                "CORCODE_WORKSPACE_IMAGE",
+                "ghcr.io/corvous/corcode-workspace:2026-08-05",
+            ),
+            ("CORCODE_REPOS", "CorVous/CorCode"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()));
+        Config::from_vars(vars).expect("a test environment should load")
+    }
+
+    /// A wake pays for a container and hands the connection to the turn that
+    /// asked for it. The claim is the whole of what stops an archive taking
+    /// that container away, so it has to outlive the wake: a chat that is
+    /// woken but not yet turning is in neither `busy_chat_ids` nor `claimed`,
+    /// and an archive landing there finds an idle chat and tears down what the
+    /// wake just paid for (issue #101).
+    #[tokio::test]
+    async fn a_woken_chat_stays_claimed_until_its_turn_holds_the_connection() {
+        let (_dataset, chats, chat_id) = a_parked_chat();
+
+        let woken = chats
+            .wake(&chat_id)
+            .await
+            .expect("a parked chat with a session to come back to wakes");
+
+        assert!(
+            chats.claimed().contains(&chat_id),
+            "the woken chat is unclaimed before its turn begins: an archive \
+             landing here reads it as idle and tears its container down"
+        );
+        let connection = chats
+            .connections
+            .of(&chat_id)
+            .expect("a woken chat holds the connection its turn goes over");
+        let _turn = connection
+            .try_lock_owned()
+            .expect("nothing else is taking a turn");
+        drop(woken);
+        assert!(
+            chats.connections.busy_chat_ids().contains(&chat_id),
+            "the turn that took over the claim is not visible as a busy chat"
+        );
+        assert!(
+            !chats.claimed().contains(&chat_id),
+            "the claim outlived the turn it handed the chat over to"
+        );
+    }
 
     /// The shape the operator actually met: a teardown the daemon refused,
     /// with its refusal one level under the summary.
