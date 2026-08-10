@@ -1,11 +1,10 @@
 //! HTTP server: routes, the session gate, serving, and graceful shutdown.
 
-use std::error::Error;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::{Chain, Context as _, Result};
+use anyhow::{Context as _, Result};
 use axum::Router;
 use axum::extract::{Form, FromRef, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
@@ -26,6 +25,7 @@ use crate::auth::gate::{Gate, SignIn};
 use crate::auth::session;
 use crate::chats::{ArchiveError, Chats, EnvError, PromptError, WantedChat, parse_env};
 use crate::config::Config;
+use crate::failure::with_causes;
 use crate::plane::ContainerPlane;
 use crate::secrets::{Secret, SecretsError};
 use crate::settings::{Outcome, Settings};
@@ -531,16 +531,6 @@ async fn htmx() -> Response {
         ui::HTMX,
     )
         .into_response()
-}
-
-/// A failure and every cause beneath it, as one log line. A typed error
-/// displays its own summary and no more, so without this the log would keep
-/// the one thing the summary was standing in for: what actually went wrong.
-fn with_causes(failure: &(dyn Error + 'static)) -> String {
-    Chain::new(failure)
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(": ")
 }
 
 /// Show the operator what broke instead of repairing or hiding it

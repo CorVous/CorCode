@@ -13,8 +13,9 @@ use ulid::Ulid;
 
 use crate::acp::{AcpError, AcpTransport, Adapter, Connection, Connections, Held, Turn};
 use crate::config::Config;
+use crate::failure::with_causes;
 use crate::git::{self, Remotes};
-use crate::plane::{ContainerPlane, ScriptRun, container_name};
+use crate::plane::{ContainerPlane, PlaneError, ScriptRun, container_name};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
 use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
@@ -173,6 +174,16 @@ fn startup_summary(run: &ScriptRun) -> String {
         told.push_str(&truncated(output));
     }
     told
+}
+
+/// The line the operator reads when a container refuses to go: which chat,
+/// what it was being let go for, and everything the daemon said under the
+/// runtime's own summary (issue #41).
+fn stubborn_teardown(chat_id: &str, why: &str, stubborn: &PlaneError) -> String {
+    format!(
+        "{chat_id} ({why}) would not stop: {}",
+        with_causes(stubborn)
+    )
 }
 
 /// `output` cut to the transcript's limit on a character boundary, marked when
@@ -540,7 +551,7 @@ where
                 self.connections.forget(chat_id);
                 info!("{chat_id} {why}: container torn down");
             }
-            Err(stubborn) => warn!("{chat_id} ({why}) would not stop: {stubborn}"),
+            Err(stubborn) => warn!("{}", stubborn_teardown(chat_id, why, &stubborn)),
         }
     }
 
@@ -1016,7 +1027,10 @@ where
             }
             Err(failure) => {
                 if let Err(stubborn) = self.plane.teardown(&chat_id).await {
-                    warn!("{chat_id} never opened a session and would not stop: {stubborn}");
+                    warn!(
+                        "{}",
+                        stubborn_teardown(&chat_id, "never opened a session", &stubborn)
+                    );
                 }
                 Err(failure)
             }
@@ -1089,7 +1103,10 @@ where
         match self.plane.run_startup_script(chat_id, script, env).await {
             Ok(run) => self.note(chat_id, STARTUP_SCRIPT, &startup_summary(&run)),
             Err(failure) => {
-                warn!("{chat_id} could not run its startup script: {failure:#}");
+                warn!(
+                    "{chat_id} could not run its startup script: {}",
+                    with_causes(&failure)
+                );
                 self.note(
                     chat_id,
                     STARTUP_SCRIPT,
@@ -1142,6 +1159,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shape the operator actually met: a teardown the daemon refused,
+    /// with its refusal one level under the summary.
+    fn a_teardown_the_daemon_refused() -> PlaneError {
+        PlaneError::Runtime {
+            action: "tear down the container of chat 01K1TESTCHATID0000000000".to_owned(),
+            source: bollard::errors::Error::DockerResponseServerError {
+                status_code: 409,
+                message: "removal of container is already in progress".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_container_that_would_not_stop_is_logged_with_what_the_daemon_said() {
+        let logged = stubborn_teardown(
+            "01K1TESTCHATID0000000000",
+            "parked, workspace kept",
+            &a_teardown_the_daemon_refused(),
+        );
+
+        assert_eq!(
+            logged,
+            "01K1TESTCHATID0000000000 (parked, workspace kept) would not stop: \
+             the container runtime failed to tear down the container of chat \
+             01K1TESTCHATID0000000000: \
+             Docker responded with status code 409: \
+             removal of container is already in progress",
+            "the summary alone names nothing the operator can act on"
+        );
+    }
+
+    #[test]
+    fn displaying_the_stubborn_container_would_lose_the_daemons_complaint() {
+        let stubborn = a_teardown_the_daemon_refused();
+
+        assert_eq!(
+            stubborn.to_string(),
+            "the container runtime failed to tear down the container of chat \
+             01K1TESTCHATID0000000000",
+            "plain Display is what these warn sites used to get"
+        );
+        assert_ne!(with_causes(&stubborn), stubborn.to_string());
+    }
 
     #[test]
     fn a_key_value_line_becomes_one_variable() {
