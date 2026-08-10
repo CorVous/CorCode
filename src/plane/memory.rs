@@ -4,7 +4,9 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::{ContainerPlane, ContainerRef, PlaneError, ScriptRun};
@@ -25,6 +27,7 @@ pub struct MemoryPlane {
     live: Arc<Mutex<HashMap<String, Spawned>>>,
     scripts: Arc<Mutex<Vec<StartupRun>>>,
     outcome: Arc<Mutex<ScriptRun>>,
+    daemon_down: Arc<AtomicBool>,
 }
 
 /// One startup script this plane was asked to run, kept so a test can read what
@@ -116,6 +119,11 @@ impl ContainerPlane for MemoryPlane {
     }
 
     async fn list_live(&self) -> Result<HashSet<String>, PlaneError> {
+        if self.daemon_down.load(Ordering::Relaxed) {
+            return Err(PlaneError::runtime("list the workspace containers")(
+                io::Error::from(io::ErrorKind::ConnectionRefused).into(),
+            ));
+        }
         Ok(self.live().keys().cloned().collect())
     }
 }
@@ -144,6 +152,12 @@ impl MemoryPlane {
             output: output.to_owned(),
             exit_code,
         };
+    }
+
+    /// Ask this plane about liveness as one whose daemon has stopped: the
+    /// socket is still there and nothing is behind it (issue #25).
+    pub fn take_the_daemon_down(&self) {
+        self.daemon_down.store(true, Ordering::Relaxed);
     }
 
     /// Every startup script this plane was asked to run, in order.

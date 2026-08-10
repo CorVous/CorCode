@@ -66,6 +66,24 @@ async fn the_chat_view_renders_the_event_log_from_disk() {
     app.stop().await;
 }
 
+/// Reading a chat is a file read (ADR-0006), so it stands whatever the
+/// container daemon is doing (issue #25).
+#[tokio::test]
+async fn a_chat_renders_while_the_container_daemon_is_down() {
+    let (data_dir, chat_id) = fixture_chat();
+    let plane = MemoryPlane::default();
+    plane.take_the_daemon_down();
+    let app = TestApp::start_over(data_dir, plane).await;
+
+    let body = app.body(&format!("/chats/{chat_id}")).await;
+
+    assert!(
+        body.contains("ship the ladder") && body.contains("on it"),
+        "the log did not render with the daemon down: {body}"
+    );
+    app.stop().await;
+}
+
 #[tokio::test]
 async fn a_corrupt_event_log_surfaces_as_an_error_rather_than_a_gap() {
     let (data_dir, chat_id) = fixture_chat();
@@ -296,6 +314,10 @@ struct TestApp {
 
 impl TestApp {
     async fn start(data_dir: TempDir) -> Self {
+        Self::start_over(data_dir, MemoryPlane::default()).await
+    }
+
+    async fn start_over(data_dir: TempDir, plane: MemoryPlane) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("ephemeral port should bind");
@@ -310,7 +332,7 @@ impl TestApp {
             Chats::new(
                 &config,
                 Owner::of(&config.data_dir).expect("we own the dataset we just made"),
-                MemoryPlane::default(),
+                plane,
                 ScriptedAdapter::silent(),
                 Remotes::new(GITHUB),
                 Arc::clone(&secrets),
