@@ -369,17 +369,24 @@ pub fn create_branch(workspace: &Path, branch: &str) -> Result<(), GitError> {
     .map(drop)
 }
 
+/// What a branch carrying a chat's unpushed work is marked as.
+const CHECKPOINT: &str = "chkpt";
+
+/// What a branch carrying work the remote would not take under the chat's own
+/// name is marked as.
+const RESCUE: &str = "rescue";
+
 /// The branch a chat's unpushed work is checkpointed onto (ADR-0005).
 #[must_use]
 pub fn checkpoint_branch(branch: &str) -> String {
-    minted_off(branch, "chkpt")
+    minted_off(branch, CHECKPOINT)
 }
 
 /// The branch a chat's own work goes onto when the remote will not take the
 /// chat's branch (issue #50).
 #[must_use]
 pub fn rescue_branch(branch: &str) -> String {
-    minted_off(branch, "rescue")
+    minted_off(branch, RESCUE)
 }
 
 /// A branch this core mints for a chat: the chat's own name, what the branch
@@ -653,8 +660,8 @@ fn push_branches(
 ) -> Result<Reached, PushFailure> {
     let mut landed = Landed::default();
     if let Some(checkpoint) = checkpoint {
-        push_one(origin, workspace, checkpoint, checkpoint).map_err(unpushed)?;
-        landed.checkpoint = Some(checkpoint.to_owned());
+        landed.checkpoint =
+            Some(checkpointed(origin, workspace, branch, checkpoint).map_err(unpushed)?);
     }
     let tip = tip_of(workspace, branch).map_err(|source| stopped(&landed, source))?;
     match push_one(origin, workspace, branch, branch) {
@@ -717,22 +724,117 @@ fn rescue_holding(
     branch: &str,
     tip: &str,
 ) -> Result<Option<String>, GitError> {
+    Ok(minted_on_remote(origin, workspace, branch, RESCUE)?
+        .into_iter()
+        .find_map(|(at, rescue)| (at == tip).then_some(rescue)))
+}
+
+/// The checkpoint branch the chat's unpushed work reaches the remote on: the
+/// one an earlier archive already put this same work on, or `checkpoint`
+/// itself, pushed now.
+///
+/// The gate can stop after the checkpoint lands — on the chat's own branch, on
+/// the rescue that follows it — and the retry offers the same work again.
+/// Minting a name per attempt would leave the remote one checkpoint per retry,
+/// with nothing saying which of them the chat is closed on (issue #99).
+///
+/// A retried checkpoint is not the commit the first attempt pushed, the way a
+/// retried rescue is: it is committed afresh out of the working tree, so it
+/// carries the moment it was cut and a sha of its own every attempt. What
+/// repeats across the attempts is the work — the same tree, cut off the same
+/// commit — and that is what a candidate is read for.
+fn checkpointed(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    checkpoint: &str,
+) -> Result<String, GitError> {
+    if let Some(already) = checkpoint_holding(origin, workspace, branch, checkpoint)? {
+        return Ok(already);
+    }
+    push_one(origin, workspace, checkpoint, checkpoint)?;
+    Ok(checkpoint.to_owned())
+}
+
+/// The checkpoint branch of `branch` the remote already carries holding the
+/// work `checkpoint` captured, if it carries one. Reading a candidate's work
+/// means holding its commit, so each is fetched in turn — one commit object
+/// apiece, over a tree and a history this workspace already has.
+fn checkpoint_holding(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    checkpoint: &str,
+) -> Result<Option<String>, GitError> {
+    let holding = work_of(workspace, checkpoint)?;
+    for (_, candidate) in minted_on_remote(origin, workspace, branch, CHECKPOINT)? {
+        fetch_one(origin, workspace, &candidate)?;
+        if work_of(workspace, FETCHED)? == holding {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+/// The work a commit holds: the tree it captured and the commit it was cut
+/// from. Two checkpoints of one archive and its retries agree on both of those
+/// and on nothing else, their stamps least of all.
+fn work_of(workspace: &Path, commit: &str) -> Result<String, GitError> {
+    run_in(
+        workspace,
+        &format!("read the work {commit} holds"),
+        &["show", "--no-patch", "--format=%T %P", commit],
+        ToOwned::to_owned,
+    )
+}
+
+/// Every branch of `branch` this core has minted for `mark` that the remote
+/// carries, as the commit it stands on and its name. The remote is the record:
+/// nothing about an earlier attempt has to survive on this side to be found
+/// again. A remote that cannot answer stops the archive rather than guessing.
+fn minted_on_remote(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    mark: &str,
+) -> Result<Vec<(String, String)>, GitError> {
     let listed = run_in(
         workspace,
-        &format!("look up the rescue branches of {branch} on {origin}"),
+        &format!("look up the {mark} branches of {branch} on {origin}"),
         &[
             "ls-remote",
             "--",
             origin.url(),
-            &format!("refs/heads/{branch}-rescue-*"),
+            &format!("refs/heads/{branch}-{mark}-*"),
         ],
         |said| origin.scrub(said),
     )?;
-    Ok(listed.lines().find_map(|line| {
-        let (at, refname) = line.split_once('\t')?;
-        let rescue = refname.strip_prefix("refs/heads/")?;
-        (at == tip).then(|| rescue.to_owned())
-    }))
+    Ok(listed
+        .lines()
+        .filter_map(|line| {
+            let (at, refname) = line.split_once('\t')?;
+            Some((
+                at.to_owned(),
+                refname.strip_prefix("refs/heads/")?.to_owned(),
+            ))
+        })
+        .collect())
+}
+
+/// Where git leaves the commits of a fetch nothing named a ref for.
+const FETCHED: &str = "FETCH_HEAD";
+
+/// Bring one branch of the remote's into this workspace, to be read at
+/// [`FETCHED`]. No ref of the workspace's own is written: the branch is being
+/// looked at, not worked from.
+fn fetch_one(origin: &Origin, workspace: &Path, branch: &str) -> Result<(), GitError> {
+    run_in(
+        workspace,
+        &format!("fetch {branch} from {origin}"),
+        &["fetch", "--", origin.url(), &format!("refs/heads/{branch}")],
+        |said| origin.scrub(said),
+    )
+    .map(drop)
 }
 
 /// Put the commits `pushing` names on the remote as the branch `onto`, adding
@@ -1475,8 +1577,8 @@ mod tests {
             .expect_err("a push to nowhere should fail");
 
         assert!(
-            format!("{error}").contains("push"),
-            "error should say what it was doing, got: {error}"
+            format!("{error}").contains("file:///nowhere/at/all"),
+            "error should say which remote it was working against, got: {error}"
         );
         assert_eq!(
             git_says(&workspace, &["rev-parse", "--abbrev-ref", "HEAD"]),

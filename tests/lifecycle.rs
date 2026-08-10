@@ -444,6 +444,48 @@ async fn an_archive_retried_after_its_checkpoint_landed_mints_no_second_checkpoi
     );
 }
 
+/// The checkpoint a retry closes on is the one holding the work it is
+/// pushing, not whatever checkpoint the chat has been through before: a tree
+/// the agent changed between the attempts is checkpointed onto a branch of its
+/// own (issue #99).
+#[tokio::test]
+async fn work_changed_after_a_checkpoint_landed_is_checkpointed_onto_a_branch_of_its_own() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    let scratch = app.workspace(&chat).join("scratch.txt");
+    fs::write(&scratch, "work in flight").expect("a dirty file should be writable");
+    app.refuse_the_chat_branch();
+    let stopped = app.archive(&chat).await;
+    assert!(stopped.status().is_server_error());
+    let stale = app.checkpoint_branches();
+    fs::write(&scratch, "what the agent did next").expect("a dirty file should be writable");
+
+    app.allow_the_chat_branch();
+    let retried = app.archive(&chat).await;
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    let checkpoints = app.checkpoint_branches();
+    assert_eq!(
+        checkpoints.len(),
+        2,
+        "the changed tree was not checkpointed onto a branch of its own: {checkpoints:?}"
+    );
+    let fresh = checkpoints
+        .iter()
+        .find(|checkpoint| !stale.contains(checkpoint))
+        .expect("the retry should mint a checkpoint for the work it is pushing");
+    assert_eq!(
+        app.origin_says(&["show", &format!("{fresh}:scratch.txt")]),
+        "what the agent did next",
+        "the fresh checkpoint does not carry the work the retry pushed"
+    );
+    assert_eq!(
+        app.manifest(&chat)["checkpoint_branch"],
+        fresh.as_str(),
+        "the manifest sends the operator to a checkpoint without their latest work"
+    );
+}
+
 /// The rescue can land and the archive fail after it, on the manifest write.
 /// The retry finds the chat's work already rescued and says so: one rescue
 /// branch on the remote however often the operator tries (issue #82).
