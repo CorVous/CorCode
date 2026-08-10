@@ -31,8 +31,9 @@ pub struct MemoryPlane {
     daemon_down: Arc<AtomicBool>,
 }
 
-/// One teardown this plane was asked for, kept so a test can read the grace
-/// the daemon would have been asked to wait (issue #40).
+/// One container this plane stopped, kept so a test can read the grace the
+/// daemon would have been asked to wait (issue #40). A teardown that found
+/// no container stopped nothing and is not one of these.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Teardown {
     pub chat_id: String,
@@ -119,6 +120,12 @@ impl ContainerPlane for MemoryPlane {
     }
 
     async fn teardown(&self, chat_id: &str, grace: StopGrace) -> Result<(), PlaneError> {
+        let stopped = self.live().remove(chat_id);
+        if stopped.is_none() {
+            return Err(PlaneError::NotLive {
+                chat_id: chat_id.to_owned(),
+            });
+        }
         self.torn_down
             .lock()
             .expect("no holder of the lock panics")
@@ -126,12 +133,7 @@ impl ContainerPlane for MemoryPlane {
                 chat_id: chat_id.to_owned(),
                 grace,
             });
-        self.live()
-            .remove(chat_id)
-            .map(|_| ())
-            .ok_or_else(|| PlaneError::NotLive {
-                chat_id: chat_id.to_owned(),
-            })
+        Ok(())
     }
 
     async fn list_live(&self) -> Result<HashSet<String>, PlaneError> {
@@ -187,7 +189,7 @@ impl MemoryPlane {
             .clone()
     }
 
-    /// Every teardown this plane was asked for, in order.
+    /// Every container this plane stopped, in the order it stopped them.
     #[must_use]
     pub fn teardowns(&self) -> Vec<Teardown> {
         self.torn_down

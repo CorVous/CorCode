@@ -65,7 +65,7 @@ pub enum StopGrace {
     Full,
     /// A parked container: PID 1 is a keep-alive over a bind-mounted
     /// workspace, so there is nothing in it to wait for.
-    None,
+    Zero,
 }
 
 /// A chat's live workspace container.

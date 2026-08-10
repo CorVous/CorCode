@@ -430,7 +430,7 @@ fn socket_is_there() -> bool {
 async fn teardown(deployment: &Deployment, chat_id: &str) {
     let plane =
         DockerPlane::connect(settings(deployment)).expect("the daemon should still be reachable");
-    match plane.teardown(chat_id, StopGrace::None).await {
+    match plane.teardown(chat_id, StopGrace::Zero).await {
         Ok(()) | Err(PlaneError::NotLive { .. }) => {}
         Err(error) => panic!("the chat's container should be removable: {error}"),
     }

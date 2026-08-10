@@ -324,7 +324,7 @@ fn removal_failure(source: DockerError) -> PlaneError {
 fn stop_options(grace: StopGrace) -> StopContainerOptions {
     let seconds = match grace {
         StopGrace::Full => STOP_GRACE_SECONDS,
-        StopGrace::None => 0,
+        StopGrace::Zero => 0,
     };
     StopContainerOptionsBuilder::new().t(seconds).build()
 }
@@ -704,7 +704,7 @@ mod tests {
     /// that ordered the stop spends waiting for a kill (issue #40).
     #[test]
     fn stopping_a_parked_container_asks_for_no_grace() {
-        assert_eq!(stop_options(StopGrace::None).t, Some(0));
+        assert_eq!(stop_options(StopGrace::Zero).t, Some(0));
     }
 
     #[test]

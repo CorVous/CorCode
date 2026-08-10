@@ -671,11 +671,11 @@ where
     /// memory stay where they are, and nothing at all is committed
     /// (ADR-0002 rule 2, ADR-0005).
     ///
-    /// A capping is what a chat waits behind, and an evicted container has
-    /// nothing left to finish: whatever the parked chat was talking to is
-    /// being discarded here, so its stop asks for no grace at all (issue #40).
+    /// Every eviction stops with no grace, an idle adapter in the container
+    /// included: PID 1 never passed the signal on, so the grace only ever
+    /// bought the capping request wall-clock ahead of the same kill (#40).
     async fn park(&self, chat_id: &str) {
-        self.release(chat_id, "parked, workspace kept", StopGrace::None)
+        self.release(chat_id, "parked, workspace kept", StopGrace::Zero)
             .await;
     }
 
@@ -704,9 +704,9 @@ where
     /// whole working tree, which is the one thing that must never happen under
     /// an agent that is writing into it.
     ///
-    /// A chat holding no connection is parked, and a parked container is a
-    /// keep-alive over a bind mount: it is stopped with no grace at all, so
-    /// that archiving it costs the request nothing (issue #40).
+    /// A chat holding no connection has nothing in its container but the
+    /// keep-alive, so the stop asks for no grace and the archive costs the
+    /// request nothing (issue #40).
     pub async fn archive(&self, chat_id: &Ulid) -> Result<(), ArchiveError> {
         let chat_id = chat_id.to_string();
         let manifest = match self.store.read_manifest(&chat_id) {
@@ -751,7 +751,7 @@ where
         if self.connections.of(chat_id).is_some() {
             StopGrace::Full
         } else {
-            StopGrace::None
+            StopGrace::Zero
         }
     }
 

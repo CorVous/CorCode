@@ -26,7 +26,7 @@ use cor_code::config::{
     DEFAULT_WARM_POOL,
 };
 use cor_code::git::Remotes;
-use cor_code::plane::{MemoryPlane, StopGrace, Teardown};
+use cor_code::plane::{ContainerPlane as _, MemoryPlane, StopGrace, Teardown};
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
@@ -137,26 +137,32 @@ async fn parking_a_chat_stops_its_container_without_grace() {
         app.teardowns(),
         vec![Teardown {
             chat_id: parked,
-            grace: StopGrace::None,
+            grace: StopGrace::Zero,
         }]
     );
 }
 
+/// Connections live only in memory, so every open chat a restarted core
+/// inherits holds a running container and nothing to talk to it over. That
+/// container is a keep-alive like any parked one, and archiving it must not
+/// buy it a grace nothing in it can spend (issue #40).
 #[tokio::test]
-async fn archiving_a_parked_chat_stops_its_container_without_grace() {
+async fn archiving_a_chat_whose_container_outlived_its_connection_stops_it_without_grace() {
     let app = TestApp::start().await;
-    let parked = app.create_chat("first").await;
+    let chat = app.create_chat("first").await;
     app.create_chat("second").await;
     app.create_chat("third").await;
+    app.spawn_container_for(&chat).await;
 
-    app.archive(&parked).await;
+    app.archive(&chat).await;
 
     assert_eq!(
         app.teardowns().last(),
         Some(&Teardown {
-            chat_id: parked,
-            grace: StopGrace::None,
-        })
+            chat_id: chat,
+            grace: StopGrace::Zero,
+        }),
+        "the container the archive stopped is the one spawned without a connection"
     );
 }
 
@@ -647,9 +653,23 @@ impl TestApp {
         response.text().await.expect("body")
     }
 
-    /// Every teardown the plane behind this app was asked for, in order.
+    /// Every container the plane behind this app stopped, in order.
     fn teardowns(&self) -> Vec<Teardown> {
         self.plane.teardowns()
+    }
+
+    /// Put a container under a chat that has none, the way a restarted core
+    /// finds one: running, and with no connection into it.
+    async fn spawn_container_for(&self, chat_id: &str) {
+        self.plane
+            .spawn(
+                chat_id,
+                &self.workspace(chat_id),
+                &self.chat_dir(chat_id).join("claude"),
+                &std::collections::BTreeMap::new(),
+            )
+            .await
+            .expect("a chat with no container should take one");
     }
 
     fn workspace(&self, chat_id: &str) -> PathBuf {
