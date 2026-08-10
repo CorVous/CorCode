@@ -258,6 +258,13 @@ impl<C: AcpChannel> Connection<C> {
         &self.session_id
     }
 
+    /// The permission mode the adapter says this session is in, where it named
+    /// one (ADR-0001).
+    #[must_use]
+    pub fn current_mode(&self) -> Option<&str> {
+        None
+    }
+
     /// Take one turn: `said` goes into `record` before it goes on the wire,
     /// then everything the adapter says about this session until it ends the
     /// turn. Another session's traffic is the adapter's own business.
@@ -528,6 +535,57 @@ mod tests {
 
         assert_eq!(connection.session_id(), SESSION);
         assert_eq!(adapter.transport().containers(), [CONTAINER]);
+    }
+
+    #[tokio::test]
+    async fn a_new_session_is_kept_with_the_permission_mode_it_actually_opened_in() {
+        let adapter = Adapter::new(ScriptedAdapter::opening_in_mode(SESSION, "default"));
+
+        let connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        assert_eq!(
+            connection.current_mode(),
+            Some("default"),
+            "the mode the session opened in was thrown away with the rest of the answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loaded_session_is_kept_with_the_permission_mode_the_load_answered() {
+        let adapter = Adapter::new(ScriptedAdapter::loading_in_mode(SESSION, "default"));
+        let mut greeting = adapter
+            .greet(CONTAINER)
+            .await
+            .expect("the scripted adapter should say hello");
+
+        greeting
+            .load(SESSION)
+            .await
+            .expect("the scripted adapter should load the session it was given");
+
+        let connection = greeting.over(SESSION.to_owned());
+        assert_eq!(
+            connection.current_mode(),
+            Some("default"),
+            "the mode the load came back in was thrown away with the rest of the answer"
+        );
+    }
+
+    /// An adapter older than the modes field names no mode, which is a case
+    /// rather than a fault: nothing is known, so nothing is claimed.
+    #[tokio::test]
+    async fn a_session_the_adapter_names_no_mode_for_is_kept_without_one() {
+        let adapter = Adapter::new(ScriptedAdapter::opening(SESSION));
+
+        let connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        assert_eq!(connection.current_mode(), None);
     }
 
     #[tokio::test]
