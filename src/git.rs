@@ -817,6 +817,24 @@ mod tests {
     const ROTATED: &str = "ghs-rotated-secret";
 
     #[test]
+    fn a_checkpoint_that_will_not_roll_back_is_logged_with_what_stopped_git() {
+        let logged = unrolled_checkpoint(
+            "chat/2026-08-09-archived-chkpt-20260809T214033172",
+            &GitError::Unusable {
+                doing: "undo the checkpoint commit".to_owned(),
+                source: std::io::ErrorKind::PermissionDenied.into(),
+            },
+        );
+
+        assert_eq!(
+            logged,
+            "chat/2026-08-09-archived-chkpt-20260809T214033172 could not be rolled back: \
+             git could not be run to undo the checkpoint commit: permission denied",
+            "a git that never ran says nothing on its own"
+        );
+    }
+
+    #[test]
     fn a_typed_title_becomes_a_slug_a_branch_can_carry() {
         for (typed, slug) in [
             ("Resume Ladder!", "resume-ladder"),

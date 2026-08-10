@@ -1327,6 +1327,44 @@ mod tests {
         assert_ne!(with_causes(&stubborn), stubborn.to_string());
     }
 
+    /// The shape the operator actually met: a working tree the filesystem
+    /// would not delete, with its refusal one level under the summary.
+    fn a_removal_the_filesystem_refused() -> StoreError {
+        StoreError::Write {
+            path: "/srv/corcode/workspaces/01K1TESTCHATID0000000000".into(),
+            source: std::io::ErrorKind::PermissionDenied.into(),
+        }
+    }
+
+    #[test]
+    fn a_workspace_that_will_not_go_is_logged_with_what_the_filesystem_said() {
+        let logged = stubborn_workspace(
+            "01K1TESTCHATID0000000000",
+            "a workspace",
+            &a_removal_the_filesystem_refused(),
+        );
+
+        assert_eq!(
+            logged,
+            "01K1TESTCHATID0000000000 left a workspace that will not go: \
+             /srv/corcode/workspaces/01K1TESTCHATID0000000000 could not be written: \
+             permission denied",
+            "the summary names the path but not why it stayed"
+        );
+    }
+
+    #[test]
+    fn displaying_the_stubborn_workspace_would_lose_the_filesystems_complaint() {
+        let stubborn = a_removal_the_filesystem_refused();
+
+        assert_eq!(
+            format!("{stubborn:#}"),
+            "/srv/corcode/workspaces/01K1TESTCHATID0000000000 could not be written",
+            "the alternate flag buys a typed error nothing"
+        );
+        assert_ne!(with_causes(&stubborn), format!("{stubborn:#}"));
+    }
+
     #[test]
     fn a_connection_the_adapter_spent_is_logged_with_what_broke_it() {
         let logged = connection_lost(
