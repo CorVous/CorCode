@@ -614,6 +614,36 @@ async fn a_prompt_arriving_mid_archive_is_turned_away_rather_than_waking_the_cha
     );
 }
 
+/// Two archives over one chat: the second is turned away by the same claim,
+/// and is told the archive it lost to rather than a turn nobody is taking
+/// (issue #93).
+#[tokio::test]
+async fn a_second_archive_arriving_mid_archive_is_told_the_first_one_is_running() {
+    let app = TestApp::start().await;
+    let closing = app.create_chat("first").await;
+    app.commit_in_workspace(&closing, "the agent's own commit");
+    app.slow_the_remote();
+
+    let archiving = app.spawn_archive(&closing);
+    tokio::time::sleep(DAWDLE).await;
+    let refused = app.archive(&closing).await;
+
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let told = refused.text().await.expect("a refusal says why");
+    assert!(
+        told.contains("already being archived"),
+        "the second archive was refused over a turn nobody is taking: {told}"
+    );
+    assert_eq!(
+        archiving
+            .await
+            .expect("the archive should not panic")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(app.manifest(&closing)["state"], "archived");
+}
+
 /// `last_active_at` is only written when a turn ends, so the chat that has
 /// been answering longest looks like the stalest chat there is.
 #[tokio::test]
