@@ -33,6 +33,10 @@ const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
 const FORGOTTEN: &str = "3f2b1c4d-0000-4000-8000-00000000dead";
 
 const SAID: &str = "ship the ladder";
+
+/// The mode a session the adapter clamped comes back in: Claude Code's
+/// interactive default, where every call is an ask this client declines.
+const CLAMPED: &str = "default";
 /// The only user that can give a tree away, and so the only one this suite can
 /// watch a handover under.
 #[cfg(unix)]
@@ -126,6 +130,33 @@ async fn an_adapter_that_can_only_load_replays_the_transcript_into_nothing_on_di
         "the replay was written into the log the operator reads"
     );
     assert_eq!(dataset.manifest(&chat)["acp_session_id"], FORGOTTEN);
+}
+
+/// A session comes back in a mode of its own on the rung that answered, not
+/// only on a session/new: a chat woken into asking declines every ask and
+/// reads as a mute agent unless the wake says so (ADR-0001, issue #58).
+#[tokio::test]
+async fn a_session_the_wake_brought_back_clamped_is_said_so_in_the_chats_own_log() {
+    let dataset = Dataset::of(ScriptedAdapter::loading_in_mode(SESSION, CLAMPED));
+    let chat = dataset.create("clamped on the way back").await;
+    dataset.park(&chat).await;
+
+    dataset
+        .prompt(&chat, SAID)
+        .await
+        .expect("a parked chat should wake");
+
+    let events = dataset.events(&chat);
+    assert_eq!(
+        events[0]["corcode"], "mode_notice",
+        "a clamped wake left the chat nothing to read: {events:?}"
+    );
+    assert!(
+        events[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(CLAMPED)),
+        "the notice does not say what mode the session came back in: {events:?}"
+    );
 }
 
 #[tokio::test]

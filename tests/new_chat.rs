@@ -173,6 +173,25 @@ async fn a_session_clamped_out_of_the_managed_mode_says_so_in_the_chats_own_log(
     );
 }
 
+/// An adapter older than the modes field names no mode at all. Nothing is
+/// known then, so nothing is claimed: a guess in the transcript would read as
+/// a fact.
+#[tokio::test]
+async fn a_session_whose_adapter_names_no_mode_leaves_the_log_alone() {
+    let (data_dir, _origin, chats) = chats_over(ScriptedAdapter::opening(SESSION));
+
+    let chat_id = chats
+        .create(wanted("no mode named"))
+        .await
+        .expect("the chat should be created");
+
+    let notices = core_lines(data_dir.path(), &chat_id);
+    assert!(
+        notices.is_empty(),
+        "a mode nobody named was written down as one: {notices:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_session_that_opened_in_the_managed_mode_leaves_the_log_alone() {
     let (data_dir, _origin, chats) = chats_over(ScriptedAdapter::opening_in_mode(
