@@ -10,7 +10,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
 use std::time::Duration;
 
-use log::debug;
+use log::{debug, info};
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
@@ -159,6 +159,7 @@ impl<T: AcpTransport + Sync> Adapter<T> {
         Ok(Greeting {
             calls,
             turn_patience: self.turn_patience,
+            current_mode: None,
         })
     }
 }
@@ -167,6 +168,7 @@ impl<T: AcpTransport + Sync> Adapter<T> {
 pub struct Greeting<C> {
     calls: Calls<C>,
     turn_patience: Duration,
+    current_mode: Option<String>,
 }
 
 impl<C: AcpChannel> Greeting<C> {
@@ -191,7 +193,8 @@ impl<C: AcpChannel> Greeting<C> {
     /// One rung asked for over the chat's workspace. Whatever the adapter
     /// says on the way to its answer is read past and kept nowhere.
     async fn rung(&mut self, method: &str, session_id: &str) -> Result<(), AcpError> {
-        self.calls
+        let session = self
+            .calls
             .call(
                 method,
                 json!({
@@ -200,8 +203,9 @@ impl<C: AcpChannel> Greeting<C> {
                     "mcpServers": [],
                 }),
             )
-            .await
-            .map(|_| ())
+            .await?;
+        self.opened(session_id, &session);
+        Ok(())
     }
 
     /// Rung 3: a session that remembers nothing, answering with its new id.
@@ -213,13 +217,34 @@ impl<C: AcpChannel> Greeting<C> {
                 json!({"cwd": WORKSPACE_MOUNT, "mcpServers": []}),
             )
             .await?;
-        session["sessionId"]
+        let session_id = session["sessionId"]
             .as_str()
             .map(ToOwned::to_owned)
             .ok_or_else(|| AcpError::Unreadable {
                 method: NEW_SESSION.to_owned(),
                 answer: session.to_string(),
-            })
+            })?;
+        self.opened(&session_id, &session);
+        Ok(session_id)
+    }
+
+    /// The permission mode the session this greeting last reached is in, where
+    /// the adapter named one.
+    #[must_use]
+    pub fn current_mode(&self) -> Option<&str> {
+        self.current_mode.as_deref()
+    }
+
+    /// Take down what `session` says about the mode it is in, and say it out
+    /// loud: the adapter clamps a mode its model cannot honour and tells
+    /// nobody but its own stderr, so this line is where a clamped session
+    /// stops being invisible (ADR-0001).
+    fn opened(&mut self, session_id: &str, session: &Value) {
+        self.current_mode = current_mode(session);
+        match &self.current_mode {
+            Some(mode) => info!("session {session_id} is in permission mode {mode}"),
+            None => debug!("session {session_id} came back naming no permission mode"),
+        }
     }
 
     /// The connection turns are taken over, once a rung has put `session_id`
@@ -229,15 +254,25 @@ impl<C: AcpChannel> Greeting<C> {
         Connection {
             calls: self.calls,
             session_id,
+            current_mode: self.current_mode,
             turn_patience: self.turn_patience,
         }
     }
+}
+
+/// The permission mode an answer about a session says it is in. An adapter
+/// older than the field names none, which is a case rather than a fault.
+fn current_mode(session: &Value) -> Option<String> {
+    session["modes"]["currentModeId"]
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 /// One chat's open conversation with its adapter, held across turns.
 pub struct Connection<C> {
     calls: Calls<C>,
     session_id: String,
+    current_mode: Option<String>,
     turn_patience: Duration,
 }
 
@@ -262,7 +297,7 @@ impl<C: AcpChannel> Connection<C> {
     /// one (ADR-0001).
     #[must_use]
     pub fn current_mode(&self) -> Option<&str> {
-        None
+        self.current_mode.as_deref()
     }
 
     /// Take one turn: `said` goes into `record` before it goes on the wire,
