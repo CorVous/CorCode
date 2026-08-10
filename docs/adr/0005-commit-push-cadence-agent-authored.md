@@ -113,3 +113,13 @@ the script can reach, the agent could reach anyway.
   where they name nothing the core already set (ADR-0001), and reserved names
   are refused at the form, so a script can never be pointed at a credential the
   operator typed.
+
+## Amendment (2026-08-09): the stamp is to the millisecond, and never repeats
+
+A second is not fine enough
+([#68](https://github.com/CorVous/CorCode/issues/68)): two archives of one
+chat can fall inside the same second, and the second push is refused as a
+non-fast-forward on a branch the remote already has. The stamp now carries
+milliseconds (`-chkpt-20260805T214033172`), and the core never mints two
+checkpoints from the same millisecond — it waits for the clock — so a name
+collision is not merely unlikely but impossible.

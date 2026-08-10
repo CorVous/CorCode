@@ -7,8 +7,9 @@ use std::io;
 use std::iter;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicI64, Ordering};
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use log::warn;
 use thiserror::Error;
 
@@ -346,11 +347,31 @@ pub fn create_branch(workspace: &Path, branch: &str) -> Result<(), GitError> {
 
 /// The branch a chat's unpushed work is checkpointed onto (ADR-0005).
 ///
-/// The chat's own branch, stamped to the second, so that two archives moments
-/// apart cannot name the same branch.
+/// The chat's own branch, stamped to the millisecond and never twice with the
+/// same millisecond, so that no two checkpoints — however close together the
+/// archives fall — can name the same branch and collide on the remote.
 #[must_use]
 pub fn checkpoint_branch(branch: &str) -> String {
-    format!("{branch}-chkpt-{}", Utc::now().format("%Y%m%dT%H%M%S"))
+    format!(
+        "{branch}-chkpt-{}",
+        unstamped_millisecond().format("%Y%m%dT%H%M%S%3f")
+    )
+}
+
+/// The last millisecond a checkpoint branch was stamped with.
+static STAMPED_THROUGH: AtomicI64 = AtomicI64::new(i64::MIN);
+
+/// Now, once the clock has reached a millisecond no checkpoint carries yet.
+fn unstamped_millisecond() -> DateTime<Utc> {
+    loop {
+        let now = Utc::now();
+        if STAMPED_THROUGH.fetch_max(now.timestamp_millis(), Ordering::Relaxed)
+            < now.timestamp_millis()
+        {
+            return now;
+        }
+        std::thread::yield_now();
+    }
 }
 
 /// What the archive gate got onto the remote (ADR-0005).
