@@ -69,6 +69,13 @@ const PERMISSION_DECLINED: &str = "permission_declined";
 /// JSON-RPC's code for a method the receiver does not implement.
 const NO_SUCH_METHOD: i64 = -32601;
 
+/// How the log says which permission mode a session is in.
+///
+/// The mode a real adapter answered is reachable nowhere else — nothing
+/// writes it down — so the docker-gated vertical reads this line back for it,
+/// and the words are pinned here rather than spelled out twice.
+pub const OPENED_IN: &str = "is in permission mode";
+
 /// Where a turn's payloads go as they happen: the prompt on its way out, then
 /// each update on its way in. Recording is what makes them real (ADR-0006),
 /// so a record that cannot be written ends the turn.
@@ -235,7 +242,7 @@ impl<C: AcpChannel> Greeting<C> {
     fn opened(&mut self, session_id: &str, session: &Value) {
         self.current_mode = current_mode(session);
         match &self.current_mode {
-            Some(mode) => info!("session {session_id} is in permission mode {mode}"),
+            Some(mode) => info!("session {session_id} {OPENED_IN} {mode}"),
             None => debug!("session {session_id} came back naming no permission mode"),
         }
     }

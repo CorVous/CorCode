@@ -156,16 +156,28 @@ const WAKE_FAILURE: &str = "wake_failure";
 /// log (ADR-0006, issue #58).
 const MODE_NOTICE: &str = "mode_notice";
 
+/// Claude Code's interactive mode, and the one the adapter clamps a session
+/// down to: every call the model is unsure of is an ask, and this client
+/// answers no to every ask it is put (ADR-0001).
+const ASKING_MODE: &str = "default";
+
 /// What the chat is told when its session opened in some other mode than the
-/// one the image's managed settings ask for: the adapter clamps a mode the
-/// model will not take and says so nowhere the operator can see, and a chat
-/// clamped into asking declines every ask and reads as a mute agent
+/// one the image's managed settings ask for: the adapter clamps silently, and
+/// nothing else the operator can read says which mode they are watching
 /// (ADR-0001).
+///
+/// What that costs the chat is only said of the mode it costs anything in: a
+/// session clamped into asking reads as a mute agent, and one in any other
+/// mode is named and left at that rather than described wrongly.
 fn clamped_mode(mode: &str) -> String {
+    let asked = if mode == ASKING_MODE {
+        " The agent asks before acting, every such ask is declined, \
+         and so it can look as though it is doing nothing."
+    } else {
+        ""
+    };
     format!(
-        "This session opened in permission mode {mode}, not the {} this deployment asks for. \
-         The agent may ask before acting, and every such ask is declined, \
-         so it can look as though it is doing nothing.",
+        "This session opened in permission mode {mode}, not the {} this deployment asks for.{asked}",
         managed_default_mode(),
     )
 }
@@ -1235,6 +1247,36 @@ mod tests {
             "plain Display is what these warn sites used to get"
         );
         assert_ne!(with_causes(&stubborn), stubborn.to_string());
+    }
+
+    #[test]
+    fn a_session_clamped_into_asking_is_told_what_that_costs_the_chat() {
+        let notice = clamped_mode("default");
+
+        assert!(
+            notice.contains("default") && notice.contains(managed_default_mode()),
+            "the notice names neither mode: {notice}"
+        );
+        assert!(
+            notice.contains("declined"),
+            "an agent whose every ask is declined looks mute, and the chat is not told: {notice}"
+        );
+    }
+
+    /// A mode that asks for nothing is not a mode that asks and is refused, so
+    /// the ask story would be a wrong one told confidently.
+    #[test]
+    fn a_session_in_some_other_mode_is_named_without_the_ask_story() {
+        let notice = clamped_mode("bypassPermissions");
+
+        assert!(
+            notice.contains("bypassPermissions") && notice.contains(managed_default_mode()),
+            "the notice names neither mode: {notice}"
+        );
+        assert!(
+            !notice.contains("declined"),
+            "a mode that declines nothing is described as one that does: {notice}"
+        );
     }
 
     #[test]

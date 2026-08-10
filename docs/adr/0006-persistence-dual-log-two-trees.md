@@ -154,9 +154,8 @@ the chat is still open with its container up and can be archived again
 permission mode than the one the image's managed settings ask for, which is
 otherwise invisible: an agent clamped into asking has every ask declined and
 reads as a mute one (ADR-0001). All of them belong in the log because the log
-is the whole of what
-the chat page renders (ADR-0008); a status code the browser swallows tells the
-operator nothing.
+is the whole of what the chat page renders (ADR-0008); a status code the
+browser swallows tells the operator nothing.
 
 ADR-0008 renders every core line as a block quote.
 

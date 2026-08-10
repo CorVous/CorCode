@@ -96,7 +96,9 @@ when it is not the mode the baked managed settings ask for — which is the one
 place the core reads that mode from, so the file the image ships stays the
 only place it is written down. An adapter that names no mode is a case, not a
 fault: nothing is known, so nothing is claimed. The docker-gated vertical
-asserts a real session leaves no such notice behind.
+reads the mode a real session opened in back off that log line and asserts it
+is the managed one, so an adapter that renames the field fails the gate rather
+than passing it by saying nothing.
 
 ## Consequences
 
