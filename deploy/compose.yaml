@@ -28,6 +28,10 @@ services:
       CORCODE_WARM_POOL: "2"
       CORCODE_CONTAINER_MEMORY_MB: "4096"
       CORCODE_CONTAINER_CPUS: "2"
+      # Connection lifecycle in `docker compose logs`: sessions opening,
+      # connections lost, streams that would not parse. Without it the core
+      # says nothing below WARN and a disconnect leaves no trace.
+      RUST_LOG: info
       # The agent's scratch tmpfs, where its toolchain caches live: a cargo
       # registry alone runs to hundreds of megabytes. A tmpfs is memory, and
       # what it holds is charged to CORCODE_CONTAINER_MEMORY_MB above — a

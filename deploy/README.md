@@ -127,8 +127,12 @@ running — `docker compose --file deploy/compose.yaml logs` says which.
 
 ### Logs and credentials
 
-`RUST_LOG` turns up the core's own modules — `RUST_LOG=debug` when something
-needs diagnosing. Raw Docker-API tracing is a different thing: the client
+`RUST_LOG` turns up the core's own modules. The compose file sets it to
+`info`, which is what makes connection lifecycle readable — sessions opening,
+connections lost, streams that would not parse. The binary's own default is
+WARN, so a core started without it says nothing at all while it is healthy,
+and a dropped agent connection leaves no trace on this side. `RUST_LOG=debug`
+when something needs more. Raw Docker-API tracing is a different thing: the client
 library logs whole request bodies, and the body that spawns an agent carries
 that container's environment, `CLAUDE_CODE_OAUTH_TOKEN` and all. Anything at
 that level lands in `docker compose logs` in the clear.
