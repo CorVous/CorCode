@@ -424,24 +424,50 @@ pub struct Pushed {
     pub rescue_branch: Option<String>,
 }
 
-/// A gate that stopped, and what of the workspace was already on the remote
-/// when it did.
+/// What of a chat's work was already on the remote when a gate stopped.
 ///
-/// The checkpoint goes first, so the chat branch can be the push that fails
-/// with the operator's work already safe. Saying nothing about that would
-/// send them looking for work that is right there.
+/// The checkpoint goes first and a rescue can follow it, so a gate can stop
+/// with either or both of them safe. Saying nothing about that would send the
+/// operator looking for work that is right there.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Landed {
+    /// The checkpoint branch that reached the remote.
+    pub checkpoint: Option<String>,
+    /// The rescue branch that reached the remote (issue #50).
+    pub rescue: Option<String>,
+}
+
+impl Landed {
+    /// Every branch that reached the remote, in the order they were pushed.
+    #[must_use]
+    pub fn branches(&self) -> Vec<&str> {
+        [self.checkpoint.as_deref(), self.rescue.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+}
+
+/// A gate that stopped, and what it had already got onto the remote.
 #[derive(Debug, Error)]
 #[error("{source}")]
 pub struct PushFailure {
-    /// The checkpoint branch that reached the remote before this happened.
-    pub landed: Option<String>,
+    pub landed: Landed,
     pub source: GitError,
 }
 
 /// A failure that happened before anything could reach the remote.
-const fn unpushed(source: GitError) -> PushFailure {
+fn unpushed(source: GitError) -> PushFailure {
     PushFailure {
-        landed: None,
+        landed: Landed::default(),
+        source,
+    }
+}
+
+/// A failure with whatever had already got there named on it.
+fn stopped(landed: &Landed, source: GitError) -> PushFailure {
+    PushFailure {
+        landed: landed.clone(),
         source,
     }
 }
@@ -471,15 +497,12 @@ pub fn push_for_archive(
     let standing = standing(workspace).map_err(unpushed)?;
     let checkpoint = checkpoint_unpushed_work(workspace, branch, &standing).map_err(unpushed)?;
     match push_branches(origin, workspace, branch, checkpoint.as_deref()) {
-        Ok(landed) => {
-            stand_on(workspace, branch).map_err(|source| PushFailure {
-                landed: checkpoint.clone(),
-                source,
-            })?;
+        Ok(reached) => {
+            stand_on(workspace, branch).map_err(|source| stopped(&reached.landed, source))?;
             Ok(Pushed {
-                tip: landed.tip,
-                checkpoint_branch: checkpoint,
-                rescue_branch: landed.rescue,
+                tip: reached.tip,
+                checkpoint_branch: reached.landed.checkpoint,
+                rescue_branch: reached.landed.rescue,
             })
         }
         Err(failure) => {
@@ -595,16 +618,16 @@ fn commit_everything(workspace: &Path, checkpoint: &str) -> Result<(), GitError>
     .map(drop)
 }
 
-/// What the chat's own work reached the remote as: the commit, and the branch
-/// it had to be rescued onto if it could not go under its own name.
-struct Landed {
+/// What the gate got onto the remote, and the commit the chat's branch stands
+/// on now.
+struct Reached {
     tip: String,
-    rescue: Option<String>,
+    landed: Landed,
 }
 
 /// Push the checkpoint branch, then the chat's own, answering with where the
-/// chat's branch stands. Whatever fails, the failure carries the checkpoint
-/// that got there first.
+/// chat's branch stands. Whatever fails, the failure carries whatever got
+/// there first.
 ///
 /// A remote that refuses the chat's branch — protected, or moved on under the
 /// chat — is not argued with and never overruled: the same commit is offered
@@ -615,33 +638,31 @@ fn push_branches(
     workspace: &Path,
     branch: &str,
     checkpoint: Option<&str>,
-) -> Result<Landed, PushFailure> {
+) -> Result<Reached, PushFailure> {
+    let mut landed = Landed::default();
     if let Some(checkpoint) = checkpoint {
         push_one(origin, workspace, checkpoint, checkpoint).map_err(unpushed)?;
+        landed.checkpoint = Some(checkpoint.to_owned());
     }
-    let landed = checkpoint.map(ToOwned::to_owned);
-    let stopped = |source| PushFailure {
-        landed: landed.clone(),
-        source,
-    };
-    let rescue = match push_one(origin, workspace, branch, branch) {
-        Ok(()) => None,
+    match push_one(origin, workspace, branch, branch) {
+        Ok(()) => {}
         Err(refused @ GitError::Refused { .. }) => {
             let rescue = rescue_branch(branch);
             warn!("{branch} was refused, so its work goes onto {rescue}: {refused}");
-            push_one(origin, workspace, branch, &rescue).map_err(stopped)?;
-            Some(rescue)
+            push_one(origin, workspace, branch, &rescue)
+                .map_err(|source| stopped(&landed, source))?;
+            landed.rescue = Some(rescue);
         }
-        Err(unusable) => return Err(stopped(unusable)),
-    };
+        Err(unusable) => return Err(stopped(&landed, unusable)),
+    }
     let tip = run_in(
         workspace,
         &format!("read where {branch} stands"),
         &["rev-parse", branch],
         ToOwned::to_owned,
     )
-    .map_err(stopped)?;
-    Ok(Landed { tip, rescue })
+    .map_err(|source| stopped(&landed, source))?;
+    Ok(Reached { tip, landed })
 }
 
 /// Put the commits `pushing` names on the remote as the branch `onto`, adding

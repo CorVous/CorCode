@@ -283,16 +283,57 @@ async fn a_chat_branch_the_remote_refuses_is_archived_onto_a_rescue_branch() {
         !app.workspace(&chat).exists(),
         "a rescued archive left the chat holding its workspace"
     );
+    let told = app.told(&chat);
+    let note = told
+        .iter()
+        .find(|line| line["corcode"] == "rescue_branch")
+        .and_then(|line| line["text"].as_str())
+        .unwrap_or_else(|| panic!("nothing tells the operator where their work went: {told:?}"));
     assert!(
-        app.events(&chat).contains(&rescue),
-        "nothing tells the operator where their work went: {}",
-        app.events(&chat)
+        note.contains(&rescue),
+        "the notice does not name the branch that holds the work: {note}"
     );
     assert_eq!(
         app.origin_says(&["rev-parse", &app.branch(&chat)]),
         outsider,
         "the chat's branch was forced over what the remote already had"
     );
+}
+
+/// A dirty tree and a refused branch at once: the checkpoint goes under its
+/// own name, the chat's commits go onto a rescue branch, and the manifest
+/// records both of them (issue #50).
+#[tokio::test]
+async fn a_dirty_chat_the_remote_refuses_is_checkpointed_and_rescued_at_once() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    let semantic = app.commit_in_workspace(&chat, "the agent's own commit");
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+    app.push_over_the_chat_branch(&app.branch(&chat));
+
+    let response = app.archive(&chat).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let manifest = app.manifest(&chat);
+    let checkpoint = manifest["checkpoint_branch"]
+        .as_str()
+        .expect("a dirty tree should be archived onto a checkpoint branch");
+    assert_eq!(
+        app.origin_says(&["show", &format!("{checkpoint}:scratch.txt")]),
+        "work in flight",
+        "the work in flight never reached the remote"
+    );
+    assert_eq!(
+        manifest["last_pushed_commit"], semantic,
+        "the manifest does not name the commit the rescue branch carries"
+    );
+    let rescue = app
+        .origin_branches()
+        .into_iter()
+        .find(|branch| branch.contains("-rescue-"))
+        .expect("the refused work should reach the remote on a rescue branch");
+    assert_eq!(app.origin_says(&["rev-parse", &rescue]), semantic);
 }
 
 /// The gate is not the last thing that can fail: the manifest is written
@@ -560,6 +601,18 @@ impl TestApp {
     fn events(&self, chat_id: &str) -> String {
         fs::read_to_string(self.chat_dir(chat_id).join("events.jsonl"))
             .expect("the event log should be readable")
+    }
+
+    /// The payloads the chat's log holds, out of the stamps they are written
+    /// under.
+    fn told(&self, chat_id: &str) -> Vec<Value> {
+        self.events(chat_id)
+            .lines()
+            .map(|line| {
+                let written: Value = serde_json::from_str(line).expect("a line should be json");
+                written["event"].clone()
+            })
+            .collect()
     }
 
     fn chat_dir(&self, chat_id: &str) -> PathBuf {
