@@ -1150,6 +1150,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_method_the_adapter_never_heard_of_is_named_rather_than_waited_out() {
+        let adapter = Adapter::new(ScriptedAdapter::opening(SESSION));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        let error = timeout(IMPATIENT, connection.take_turn("ship it", &mut |_| Ok(())))
+            .await
+            .expect("an unheard method should be answered, not waited out")
+            .expect_err("a method the adapter has never heard of should fail");
+
+        let message = format!("{error}");
+        assert!(
+            message.contains("session/prompt") && message.contains("no method"),
+            "error should name the method the adapter never heard of, got: {message}"
+        );
+        assert!(
+            error.answered(),
+            "a method not found is an answer, not a lost channel"
+        );
+    }
+
+    #[tokio::test]
     async fn a_turn_whose_record_cannot_be_written_fails_rather_than_going_on() {
         let adapter = Adapter::new(ScriptedAdapter::answering(SESSION, &[]));
         let mut connection = adapter
