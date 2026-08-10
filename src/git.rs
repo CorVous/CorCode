@@ -507,10 +507,15 @@ pub fn push_for_archive(
     match push_branches(origin, workspace, branch, checkpoint.as_ref()) {
         Ok(reached) => {
             stand_on(workspace, branch).map_err(|source| stopped(&reached.landed, source))?;
+            let Reached { tip, mut landed } = reached;
+            if landed.checkpoint.is_none() {
+                landed.checkpoint = checkpoint_cut_off(origin, workspace, branch, &tip)
+                    .map_err(|source| stopped(&landed, source))?;
+            }
             Ok(Pushed {
-                tip: reached.tip,
-                checkpoint_branch: reached.landed.checkpoint,
-                rescue_branch: reached.landed.rescue,
+                tip,
+                checkpoint_branch: landed.checkpoint,
+                rescue_branch: landed.rescue,
             })
         }
         Err(failure) => {
@@ -802,6 +807,45 @@ fn checkpoint_holding(
         .into_iter()
         .map(|(_, candidate)| candidate)
         .find(|candidate| work_on_remote(origin, workspace, candidate).as_ref() == Some(&holding)))
+}
+
+/// The checkpoint branch of `branch` on the remote holding work that `tip`
+/// does not carry, when this archive cut no checkpoint of its own.
+///
+/// The gate can get everything onto the remote and the archive fail after it —
+/// on the manifest, on the dataset — and by then the gate has put the
+/// workspace back on `branch` with the work in flight committed away onto the
+/// checkpoint that landed. The retry finds a clean tree, cuts nothing, and
+/// would close the chat naming no checkpoint while the only copy of that work
+/// stands on the remote (issue #105). The remote is asked because nothing of
+/// the attempt before survives on this side: a core restarted between the two
+/// remembers no more than a core that never stopped.
+///
+/// The invariant: an archive that cuts no checkpoint closes on a checkpoint of
+/// this chat if and only if the commit under it names the very commit being
+/// archived as its one parent. That is the shape the gate leaves behind and
+/// nothing else has it — a checkpoint of an earlier archive was cut off
+/// wherever the branch stood then — so a chat worked in again never
+/// resurrects one.
+fn checkpoint_cut_off(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    tip: &str,
+) -> Result<Option<String>, GitError> {
+    Ok(minted_on_remote(origin, workspace, branch, CHECKPOINT)?
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .find(|candidate| {
+            work_on_remote(origin, workspace, candidate).is_some_and(|held| cut_from(&held, tip))
+        }))
+}
+
+/// Whether work read off the remote was cut from `commit`: the commit holding
+/// it names `commit`, and nothing besides, as its parent.
+fn cut_from(held: &str, commit: &str) -> bool {
+    held.split_once(' ')
+        .is_some_and(|(_, parents)| parents == commit)
 }
 
 /// The work a commit holds: the tree it captured and the commit it was cut
