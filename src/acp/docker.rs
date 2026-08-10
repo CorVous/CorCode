@@ -133,6 +133,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_line_that_is_not_text_is_logged_with_where_the_bytes_went_wrong() {
+        let nonsense = String::from_utf8(b"{\"id\":\xff}".to_vec())
+            .expect_err("those bytes are not utf-8");
+
+        let logged = undecodable(&nonsense);
+
+        assert_eq!(
+            logged,
+            "the adapter's stream carried bytes that are not utf-8: \
+             invalid utf-8 sequence of 1 bytes from index 6",
+            "a parse failure nobody can place is a parse failure nobody can diagnose"
+        );
+    }
+
+    #[test]
     fn messages_come_out_of_the_stream_a_line_at_a_time() {
         let mut unread = Vec::from(*b"{\"id\":1}\n{\"id\"");
 
