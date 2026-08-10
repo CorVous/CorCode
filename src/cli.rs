@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::process::ExitCode;
 
 use clap::{ArgAction, Parser, Subcommand};
-use log::{LevelFilter, error};
+use log::{Level, LevelFilter, Log, Metadata, Record, error};
 
 use crate::commands::{hash_password, serve, version};
 
@@ -45,12 +45,57 @@ pub const fn log_level(verbose: u8) -> LevelFilter {
     }
 }
 
+/// Modules that log credentials at their louder levels, and the loudest level
+/// they may reach. `bollard` traces raw Docker API request bodies, which carry
+/// the agent container's environment — tokens included.
+const CAPPED_MODULES: [(&str, LevelFilter); 1] = [("bollard", LevelFilter::Info)];
+
+fn within_module(target: &str, module: &str) -> bool {
+    target == module
+        || target
+            .strip_prefix(module)
+            .is_some_and(|rest| rest.starts_with("::"))
+}
+
+fn above_cap(target: &str, level: Level) -> bool {
+    CAPPED_MODULES
+        .iter()
+        .any(|(module, cap)| within_module(target, module) && level > *cap)
+}
+
+/// A logger that drops capped modules' loud records whatever the spec says.
+struct CappedLogger(env_logger::Logger);
+
+impl CappedLogger {
+    fn max_level(&self) -> LevelFilter {
+        self.0.filter()
+    }
+}
+
+impl Log for CappedLogger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        !above_cap(metadata.target(), metadata.level()) && self.0.enabled(metadata)
+    }
+
+    fn log(&self, record: &Record) {
+        if !above_cap(record.target(), record.level()) {
+            self.0.log(record);
+        }
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+}
+
 /// Build the logger for a filter spec in `RUST_LOG` syntax.
-fn build_logger(spec: &str) -> env_logger::Logger {
-    env_logger::Builder::new()
-        .parse_filters(spec)
-        .format(|buf, record| writeln!(buf, "{}: {}", record.level(), record.args()))
-        .build()
+fn build_logger(spec: &str) -> CappedLogger {
+    CappedLogger(
+        env_logger::Builder::new()
+            .parse_filters(spec)
+            .format(|buf, record| writeln!(buf, "{}: {}", record.level(), record.args()))
+            .build(),
+    )
 }
 
 /// Configure logging based on verbosity level.
@@ -61,7 +106,7 @@ pub fn setup_logging(verbose: u8) {
     let level = log_level(verbose);
     let spec = std::env::var("RUST_LOG").unwrap_or_else(|_| level.as_str().to_owned());
     let logger = build_logger(&spec);
-    log::set_max_level(logger.filter());
+    log::set_max_level(logger.max_level());
     log::set_boxed_logger(Box::new(logger)).expect("logging configured once per process");
     log::debug!("Logging configured: level={level}");
 }
@@ -148,8 +193,16 @@ mod tests {
 
     #[test]
     fn asking_for_docker_client_traces_by_name_does_not_get_them_either() {
-        assert!(!enabled("warn,bollard=trace", "bollard::docker", Level::Trace));
-        assert!(!enabled("bollard::docker=debug", "bollard::docker", Level::Debug));
+        assert!(!enabled(
+            "warn,bollard=trace",
+            "bollard::docker",
+            Level::Trace
+        ));
+        assert!(!enabled(
+            "bollard::docker=debug",
+            "bollard::docker",
+            Level::Debug
+        ));
     }
 
     #[test]
