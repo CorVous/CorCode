@@ -154,9 +154,11 @@ impl MemoryPlane {
         };
     }
 
-    /// Ask this plane about liveness as one whose daemon has stopped: the
-    /// socket is still there and nothing is behind it (issue #25).
-    pub fn take_the_daemon_down(&self) {
+    /// Answer every liveness question as a plane whose daemon has stopped:
+    /// the socket is still there and nothing is behind it. Spawning and
+    /// teardown are left alone, so a test can tell what degrades from what
+    /// fails (issue #25).
+    pub fn refuse_to_list_containers(&self) {
         self.daemon_down.store(true, Ordering::Relaxed);
     }
 
