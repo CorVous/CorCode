@@ -29,6 +29,7 @@ pub struct MemoryPlane {
     torn_down: Arc<Mutex<Vec<Teardown>>>,
     outcome: Arc<Mutex<ScriptRun>>,
     daemon_down: Arc<AtomicBool>,
+    stubborn: Arc<AtomicBool>,
 }
 
 /// One container this plane stopped, kept so a test can read the grace the
@@ -120,6 +121,11 @@ impl ContainerPlane for MemoryPlane {
     }
 
     async fn teardown(&self, chat_id: &str, grace: StopGrace) -> Result<(), PlaneError> {
+        if self.stubborn.load(Ordering::Relaxed) {
+            return Err(PlaneError::runtime(format!("stop chat {chat_id}"))(
+                io::Error::from(io::ErrorKind::ConnectionRefused).into(),
+            ));
+        }
         let stopped = self.live().remove(chat_id);
         if stopped.is_none() {
             return Err(PlaneError::NotLive {
@@ -178,6 +184,13 @@ impl MemoryPlane {
     /// fails (issue #25).
     pub fn refuse_to_list_containers(&self) {
         self.daemon_down.store(true, Ordering::Relaxed);
+    }
+
+    /// Answer every teardown from here on with the daemon's own complaint,
+    /// as a plane whose container will not go does. The container is left
+    /// live: a teardown that failed stopped nothing.
+    pub fn refuse_to_tear_down(&self) {
+        self.stubborn.store(true, Ordering::Relaxed);
     }
 
     /// Every startup script this plane was asked to run, in order.
