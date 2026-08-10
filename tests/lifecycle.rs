@@ -398,6 +398,51 @@ async fn a_dirty_chat_the_remote_refuses_is_checkpointed_and_rescued_at_once() {
     assert_eq!(app.origin_says(&["rev-parse", &rescue]), semantic);
 }
 
+/// The rescue can land and the archive fail after it, on the manifest write.
+/// The retry finds the chat's work already rescued and says so: one rescue
+/// branch on the remote however often the operator tries (issue #82).
+#[tokio::test]
+async fn an_archive_retried_after_its_rescue_landed_mints_no_second_rescue() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    let semantic = app.commit_in_workspace(&chat, "the agent's own commit");
+    app.push_over_the_chat_branch(&app.branch(&chat));
+    app.seal_the_chat_dir(&chat);
+    let stopped = app.archive(&chat).await;
+    app.unseal_the_chat_dir(&chat);
+    assert!(
+        stopped.status().is_server_error(),
+        "an unrecorded archive answered {}",
+        stopped.status()
+    );
+
+    let retried = app.archive(&chat).await;
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    let rescues: Vec<String> = app
+        .origin_branches()
+        .into_iter()
+        .filter(|branch| branch.contains("-rescue-"))
+        .collect();
+    assert_eq!(
+        rescues.len(),
+        1,
+        "the retry minted a rescue branch of its own: {rescues:?}"
+    );
+    assert_eq!(app.origin_says(&["rev-parse", &rescues[0]]), semantic);
+    let told = app.told(&chat);
+    let note = told
+        .iter()
+        .filter(|line| line["corcode"] == "rescue_branch")
+        .filter_map(|line| line["text"].as_str())
+        .next_back()
+        .unwrap_or_else(|| panic!("nothing tells the operator where their work went: {told:?}"));
+    assert!(
+        note.contains(&rescues[0]),
+        "the notice does not name the branch that holds the work: {note}"
+    );
+}
+
 /// The gate is not the last thing that can fail: the manifest is written
 /// after it. Whatever the operator retries from has to be a workspace on the
 /// chat's own branch.
