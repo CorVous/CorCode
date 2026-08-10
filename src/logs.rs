@@ -102,6 +102,23 @@ mod tests {
         );
     }
 
+    /// A pin on wording reads the line itself: what a site said is as much
+    /// the pin's business as how loud it said it.
+    #[test]
+    fn a_line_is_read_back_whole_so_a_caller_can_take_what_it_said_out_of_it() {
+        let capture = capturing_lines();
+
+        log::info!("session 41 is in permission mode acceptEdits");
+
+        assert_eq!(
+            capture.lines_saying("session 41"),
+            vec![(
+                Level::Info,
+                "session 41 is in permission mode acceptEdits".to_owned()
+            )]
+        );
+    }
+
     #[test]
     fn a_line_nobody_logged_has_no_level_at_all() {
         assert_eq!(
