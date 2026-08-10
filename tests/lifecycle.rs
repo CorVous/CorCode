@@ -552,6 +552,11 @@ async fn an_archive_over_a_chat_being_woken_is_refused_and_tears_nothing_down() 
     let refused = app.archive(&parked).await;
 
     assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let told = refused.text().await.expect("a refusal says why");
+    assert!(
+        told.contains("being woken"),
+        "the archive was refused over a turn nobody is taking: {told}"
+    );
     assert_eq!(app.manifest(&parked)["state"], "open");
     assert!(
         app.workspace(&parked).join("README.md").is_file(),
