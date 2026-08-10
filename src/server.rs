@@ -363,10 +363,8 @@ where
     let Ok(chat_id) = chat_id.parse::<Ulid>() else {
         return no_such_chat();
     };
-    match chats.open(&chat_id).await {
-        Ok(Some(((manifest, status), events))) => {
-            Html(ui::chat_page(&manifest, status, &events)).into_response()
-        }
+    match chats.open(&chat_id) {
+        Ok(Some((manifest, events))) => Html(ui::chat_page(&manifest, &events)).into_response(),
         Ok(None) => no_such_chat(),
         Err(failure) => broken_invariant(&failure),
     }

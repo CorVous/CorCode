@@ -432,9 +432,10 @@ where
     }
 
     /// One chat and its whole event log, or nothing if the dataset holds no
-    /// such chat. A pure read: opening a chat never touches a container
-    /// (ADR-0007).
-    pub async fn open(&self, chat_id: &Ulid) -> Result<Option<(ui::Chat, Vec<Event>)>> {
+    /// such chat. A pure read: opening a chat neither touches a container nor
+    /// asks after one, so it stands whatever the plane is doing (ADR-0006,
+    /// issue #25).
+    pub fn open(&self, chat_id: &Ulid) -> Result<Option<(Manifest, Vec<Event>)>> {
         let chat_id = chat_id.to_string();
         let manifest = match self.store.read_manifest(&chat_id) {
             Ok(manifest) => manifest,
@@ -442,9 +443,7 @@ where
             Err(failure) => return Err(failure.into()),
         };
         let events = self.store.read_events(&chat_id)?;
-        let live = self.plane.live_chat_ids().await?;
-        let status = runtime_status(&manifest, &live);
-        Ok(Some(((manifest, status), events)))
+        Ok(Some((manifest, events)))
     }
 
     /// One chat's event log, or nothing if the dataset holds no such chat.

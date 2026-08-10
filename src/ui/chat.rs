@@ -13,10 +13,10 @@ use syntect::html::{ClassStyle, ClassedHTMLGenerator};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-use crate::store::{Event, Manifest, RuntimeStatus};
+use crate::store::{ChatState, Event, Manifest};
 
 use super::{
-    HTMX_PATH, chat_archive_path, chat_events_path, chat_prompt_path, last_push, page, status_word,
+    HTMX_PATH, chat_archive_path, chat_events_path, chat_prompt_path, last_push, page, state_word,
     text,
 };
 
@@ -59,8 +59,13 @@ const RESYNC_SECONDS: u32 = 30;
 
 /// One chat, top to bottom: what it is, everything that has happened to it,
 /// and the prompt box waiting at the end.
+///
+/// The chat is headed with the state its manifest carries and never with
+/// whether its container happens to be up: the page is a file read, and
+/// asking after a container would put the whole of it behind the daemon
+/// (issue #25).
 #[must_use]
-pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -> String {
+pub fn chat_page(manifest: &Manifest, events: &[Event]) -> String {
     page(
         &manifest.title,
         &format!(
@@ -75,10 +80,10 @@ pub fn chat_page(manifest: &Manifest, status: RuntimeStatus, events: &[Event]) -
             text(&manifest.repo),
             text(&manifest.branch),
             text(last_push(manifest)),
-            status_word(status),
-            archive_button(&manifest.chat_id, status),
+            state_word(manifest.state),
+            archive_button(&manifest.chat_id, manifest.state),
             event_log(&manifest.chat_id, events),
-            first_prompt_hint(status),
+            first_prompt_hint(manifest.state),
             text(&chat_prompt_path(&manifest.chat_id)),
         ),
     )
@@ -123,8 +128,8 @@ pub fn hot_log(chat_id: &str, events: &[Event], from: usize) -> String {
 /// wherever a workspace is still held — a parked chat has given up only its
 /// container (ADR-0002 rule 2). A success re-renders the page rather than
 /// swapping a fragment: archiving changes the whole of what the chat is.
-fn archive_button(chat_id: &str, status: RuntimeStatus) -> String {
-    if status == RuntimeStatus::Archived {
+fn archive_button(chat_id: &str, state: ChatState) -> String {
+    if state == ChatState::Archived {
         return String::new();
     }
     format!(
@@ -135,13 +140,13 @@ fn archive_button(chat_id: &str, status: RuntimeStatus) -> String {
 }
 
 /// What a first prompt would do to a chat with no live container (ADR-0007).
-const fn first_prompt_hint(status: RuntimeStatus) -> &'static str {
-    match status {
-        RuntimeStatus::Live => "",
-        RuntimeStatus::Parked => {
-            "<p><small>A prompt re-spins the container over the kept workspace.</small></p>"
+const fn first_prompt_hint(state: ChatState) -> &'static str {
+    match state {
+        ChatState::Open => {
+            "<p><small>A prompt re-spins the container over the kept workspace if it is \
+             not up.</small></p>"
         }
-        RuntimeStatus::Archived => {
+        ChatState::Archived => {
             "<p><small>A prompt revives the chat: a fresh clone at the last pushed \
              commit.</small></p>"
         }
@@ -850,16 +855,21 @@ mod tests {
     /// The chat every test in this module renders.
     const CHAT_ID: &str = "01K1TESTCHATID0000000000";
 
-    fn manifest(status: RuntimeStatus) -> Manifest {
+    fn open_chat() -> Manifest {
+        manifest(ChatState::Open)
+    }
+
+    fn archived_chat() -> Manifest {
+        manifest(ChatState::Archived)
+    }
+
+    fn manifest(state: ChatState) -> Manifest {
         let now = Utc::now();
         Manifest {
             schema: MANIFEST_SCHEMA,
             chat_id: CHAT_ID.to_owned(),
             title: "Resume ladder".to_owned(),
-            state: match status {
-                RuntimeStatus::Archived => ChatState::Archived,
-                RuntimeStatus::Live | RuntimeStatus::Parked => ChatState::Open,
-            },
+            state,
             repo: "CorVous/CorCode".to_owned(),
             branch: "chat/2026-08-05-resume-ladder".to_owned(),
             base_branch: "main".to_owned(),
@@ -962,7 +972,7 @@ mod tests {
     fn an_outbound_prompt_renders_as_the_users_own_block() {
         let events = log(&[outbound_prompt("ship the ladder")]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(
             rendered.contains("<b>you:</b> ship the ladder"),
@@ -981,7 +991,7 @@ mod tests {
             ],
         })]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(
             rendered.contains("<b>you:</b> ship the ladder"),
@@ -993,7 +1003,7 @@ mod tests {
     fn agent_text_comes_out_of_its_content_block() {
         let events = log(&[chunk("agent_message_chunk", "on it")]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(
             rendered.contains("<p>on it</p>"),
@@ -1005,7 +1015,7 @@ mod tests {
     fn a_replayed_user_chunk_reads_as_the_user_too() {
         let events = log(&[chunk("user_message_chunk", "ship the ladder")]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(rendered.contains("<b>you:</b> ship the ladder"));
     }
@@ -2518,7 +2528,7 @@ mod tests {
             chunk("agent_message_chunk", "on it"),
         ]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(
             position(&rendered, "ship the ladder") < position(&rendered, "on it"),
@@ -2530,7 +2540,7 @@ mod tests {
     fn a_tool_call_renders_as_a_small_inline_line() {
         let events = log(&[tool_call("call_1", "git commit")]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(
             rendered.contains("<small>git commit · pending</small>"),
@@ -2545,7 +2555,7 @@ mod tests {
             "text": "Agent memory was reset; the log below is the whole record.",
         })]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(
             rendered.contains("<blockquote class=\"dim\">Agent memory was reset"),
@@ -2557,7 +2567,7 @@ mod tests {
     fn an_event_shape_this_build_does_not_know_still_renders() {
         let events = log(&[json!({"sessionUpdate": "plan", "entries": []})]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(
             rendered.contains("<small>plan</small>"),
@@ -2624,22 +2634,18 @@ mod tests {
     }
 
     #[test]
-    fn a_parked_chat_says_a_prompt_would_re_spin_its_container() {
-        let rendered = chat_page(&manifest(RuntimeStatus::Parked), RuntimeStatus::Parked, &[]);
+    fn an_open_chat_says_a_prompt_would_re_spin_its_container() {
+        let rendered = chat_page(&open_chat(), &[]);
 
         assert!(
             rendered.contains("re-spins"),
-            "the parked chat gives no first-prompt hint: {rendered}"
+            "the open chat gives no first-prompt hint: {rendered}"
         );
     }
 
     #[test]
     fn an_archived_chat_says_a_prompt_would_revive_it() {
-        let rendered = chat_page(
-            &manifest(RuntimeStatus::Archived),
-            RuntimeStatus::Archived,
-            &[],
-        );
+        let rendered = chat_page(&archived_chat(), &[]);
 
         assert!(
             rendered.contains("revives"),
@@ -2647,34 +2653,27 @@ mod tests {
         );
     }
 
-    /// Parked is the state the gate exists for: the workspace is still on
+    /// An open chat is what the gate exists for: the workspace is still on
     /// disk holding work nothing has pushed (ADR-0002 rule 1).
     #[test]
     fn a_chat_that_still_holds_a_workspace_offers_to_archive_itself() {
-        for status in [RuntimeStatus::Live, RuntimeStatus::Parked] {
-            let manifest = manifest(status);
+        let manifest = open_chat();
 
-            let rendered = chat_page(&manifest, status, &[]);
+        let rendered = chat_page(&manifest, &[]);
 
-            assert!(
-                rendered.contains(&format!(
-                    "hx-post=\"{}\"",
-                    chat_archive_path(&manifest.chat_id)
-                )),
-                "a {} chat cannot be archived from its own page: {rendered}",
-                status_word(status)
-            );
-            assert!(rendered.contains("Archive</button>"));
-        }
+        assert!(
+            rendered.contains(&format!(
+                "hx-post=\"{}\"",
+                chat_archive_path(&manifest.chat_id)
+            )),
+            "an open chat cannot be archived from its own page: {rendered}"
+        );
+        assert!(rendered.contains("Archive</button>"));
     }
 
     #[test]
     fn an_archived_chat_is_offered_no_archive_button() {
-        let rendered = chat_page(
-            &manifest(RuntimeStatus::Archived),
-            RuntimeStatus::Archived,
-            &[],
-        );
+        let rendered = chat_page(&archived_chat(), &[]);
 
         assert!(
             !rendered.contains("Archive</button>"),
@@ -2682,20 +2681,25 @@ mod tests {
         );
     }
 
+    /// The page is a file read, so it can say what the chat is and never
+    /// whether its container happens to be up (issue #25).
     #[test]
-    fn a_live_chat_needs_no_first_prompt_hint() {
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &[]);
+    fn a_chat_page_says_nothing_only_the_plane_could_know() {
+        let rendered = chat_page(&open_chat(), &[]);
 
-        assert!(!rendered.contains("re-spins") && !rendered.contains("revives"));
+        assert!(
+            !rendered.contains("Live") && !rendered.contains("Parked"),
+            "the page reads a container status off a file: {rendered}"
+        );
     }
 
     #[test]
     fn the_chat_view_heads_with_its_branch_last_push_and_state() {
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &[]);
+        let rendered = chat_page(&open_chat(), &[]);
 
         assert!(rendered.contains("chat/2026-08-05-resume-ladder"));
         assert!(rendered.contains("push abc1234"));
-        assert!(rendered.contains("Live"));
+        assert!(rendered.contains("Open"));
         assert!(
             rendered.contains("href=\"/\""),
             "there is no way back to the console: {rendered}"
@@ -2706,16 +2710,16 @@ mod tests {
     fn the_chat_view_styles_itself_only_from_the_stylesheet() {
         let events = log(&[chunk("agent_message_chunk", "on it")]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         crate::ui::tests::assert_styling_is_only_the_stylesheet(&rendered);
     }
 
     #[test]
     fn the_prompt_box_posts_the_prompt_and_swaps_the_log_it_lands_in() {
-        let manifest = manifest(RuntimeStatus::Live);
+        let manifest = open_chat();
 
-        let rendered = chat_page(&manifest, RuntimeStatus::Live, &[]);
+        let rendered = chat_page(&manifest, &[]);
 
         assert!(
             rendered.contains(&format!(
@@ -2736,7 +2740,7 @@ mod tests {
 
     #[test]
     fn a_sent_prompt_clears_the_box_it_was_typed_in() {
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &[]);
+        let rendered = chat_page(&open_chat(), &[]);
 
         assert!(
             rendered.contains("hx-on::after-request=\"if(event.detail.successful)this.reset()\""),
@@ -2746,7 +2750,7 @@ mod tests {
 
     #[test]
     fn the_log_asks_for_itself_again_while_the_page_is_open() {
-        let manifest = manifest(RuntimeStatus::Live);
+        let manifest = open_chat();
 
         let fragment = event_log(
             &manifest.chat_id,
@@ -2851,10 +2855,10 @@ mod tests {
 
     #[test]
     fn the_chat_page_carries_the_log_and_the_script_that_polls_it() {
-        let manifest = manifest(RuntimeStatus::Live);
+        let manifest = open_chat();
         let events = log(&[chunk("agent_message_chunk", "on it")]);
 
-        let rendered = chat_page(&manifest, RuntimeStatus::Live, &events);
+        let rendered = chat_page(&manifest, &events);
 
         assert!(
             rendered.contains(&event_log(&manifest.chat_id, &events)),
@@ -2870,7 +2874,7 @@ mod tests {
     fn agent_text_cannot_smuggle_markup_into_the_log() {
         let events = log(&[chunk("agent_message_chunk", "<script>alert(1)</script>")]);
 
-        let rendered = chat_page(&manifest(RuntimeStatus::Live), RuntimeStatus::Live, &events);
+        let rendered = chat_page(&open_chat(), &events);
 
         assert!(
             !rendered.contains("<script>"),
