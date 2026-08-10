@@ -176,7 +176,10 @@ mod tests {
         let logged = capturing_lines();
         let mut channel = channel_reading(&[b"{\"id\":\xff}\n"]);
 
-        channel.receive().await.expect_err("that stream ends");
+        channel
+            .receive()
+            .await
+            .expect("the lossy rendering still arrives (issue #65)");
 
         assert_eq!(
             logged.quietest_level_of("carried a line that is not utf-8"),
