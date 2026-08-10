@@ -20,7 +20,7 @@ use cor_code::config::{
     Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_SCRATCH_MB,
 };
 use cor_code::git::Remotes;
-use cor_code::logs::capturing_lines;
+use cor_code::logs::{LoggedLines, capturing_lines};
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::store::{ChatStore, Owner};
@@ -43,6 +43,14 @@ const CONTAINER: &str = "corcode-chat-01K1TESTCHATID0000000000";
 /// A line an adapter should never send, and does when it is wedged: the one
 /// symptom of a session that has stopped speaking JSON-RPC.
 const GARBLED: &str = "Error: EACCES: permission denied";
+
+/// What the filesystem says of a read that found a directory. It is the
+/// store's summary that names the file; only this says what was wrong with it.
+const EISDIR: &str = "Is a directory";
+
+/// What a daemon that is not answering says for itself, under the plane's own
+/// summary of the action it refused.
+const REFUSED_CONNECTION: &str = "connection refused";
 
 /// A wedged adapter is the incident, and the operator only learns of it from
 /// this line (issue #66).
@@ -89,7 +97,10 @@ async fn a_dropped_adapter_connection_reaches_the_operator_as_a_warning() {
 #[tokio::test]
 async fn the_mode_a_session_opened_in_reaches_the_operator_as_chatter() {
     let logged = capturing_lines();
-    let adapter = Adapter::new(ScriptedAdapter::opening_in_mode(OPENED_SESSION, ASKING_MODE));
+    let adapter = Adapter::new(ScriptedAdapter::opening_in_mode(
+        OPENED_SESSION,
+        ASKING_MODE,
+    ));
 
     adapter
         .open_session(CONTAINER)
@@ -118,6 +129,66 @@ async fn a_session_clamped_into_another_mode_reaches_the_operator_as_a_warning()
         Some(Level::Warn),
         "src/chats.rs: a clamped session below WARN is a mute agent nobody was warned about"
     );
+}
+
+/// The store's own summary names the file and stops there, so the cause is
+/// the whole of what says whether the operator has a permission to fix or a
+/// mount to unbusy. The wording of these lines is pinned where they are
+/// built; this drives the real site, which is where the causes could be
+/// dropped without a test noticing (issues #41, #81).
+#[tokio::test]
+async fn a_turn_the_store_could_not_date_is_logged_with_what_the_filesystem_said() {
+    let logged = capturing_lines();
+    let dataset = Dataset::of(ScriptedAdapter::answering(SESSION, &[]));
+    let chat = dataset.create("undated").await;
+    dataset.stand_a_directory_where_the_manifest_was(&chat);
+
+    dataset
+        .prompt(&chat, SAID)
+        .await
+        .expect("a turn goes through whatever the manifest is doing");
+
+    assert!(
+        said_by_a_line(
+            &logged,
+            &format!("{chat} took a turn that could not be dated"),
+            EISDIR
+        ),
+        "src/chats.rs: the store family's warning reached the operator without the cause \
+         under it, which is the only part that says what to do about it"
+    );
+}
+
+/// The plane's own summary names the action and stops there: what the daemon
+/// said is under it, and reverting the warning to the failure alone would
+/// leave the operator the summary of a summary (issue #41).
+#[tokio::test]
+async fn a_container_that_would_not_stop_is_logged_with_what_the_daemon_said() {
+    let logged = capturing_lines();
+    let plane = MemoryPlane::default();
+    let dataset = Dataset::over(plane.clone(), ScriptedAdapter::answering(SESSION, &[]));
+    let chat = dataset.create("stubborn").await;
+    plane.refuse_to_tear_down();
+
+    dataset.archive(&chat).await;
+
+    assert!(
+        said_by_a_line(
+            &logged,
+            &format!("{chat} (archived) would not stop"),
+            REFUSED_CONNECTION
+        ),
+        "src/chats.rs: the plane family's warning reached the operator without the daemon's \
+         own complaint under it"
+    );
+}
+
+/// Whether any captured line saying `saying` carries `cause` too.
+fn said_by_a_line(logged: &LoggedLines, saying: &str, cause: &str) -> bool {
+    logged
+        .lines_saying(saying)
+        .iter()
+        .any(|(_, line)| line.contains(cause))
 }
 
 /// An adapter that answers every call, having said something that is not
@@ -161,12 +232,16 @@ impl AcpChannel for GarblingChannel {
 /// One dataset, its remote, and the fake adapter every chat in it talks to.
 struct Dataset {
     chats: Chats<MemoryPlane, ScriptedAdapter>,
-    _data_dir: TempDir,
+    data_dir: TempDir,
     _origin: TempDir,
 }
 
 impl Dataset {
     fn of(adapter: ScriptedAdapter) -> Self {
+        Self::over(MemoryPlane::default(), adapter)
+    }
+
+    fn over(plane: MemoryPlane, adapter: ScriptedAdapter) -> Self {
         let data_dir = TempDir::new().expect("temp dir should be creatable");
         let (origin, remotes) = seeded_repository();
         let config = test_config(data_dir.path().to_path_buf());
@@ -176,14 +251,14 @@ impl Dataset {
         let chats = Chats::new(
             &config,
             Owner::of(&config.data_dir).expect("we own the dataset we just made"),
-            MemoryPlane::default(),
+            plane,
             adapter,
             remotes,
             Arc::new(Secrets::from_config(&config)),
         );
         Self {
             chats,
-            _data_dir: data_dir,
+            data_dir,
             _origin: origin,
         }
     }
@@ -205,6 +280,27 @@ impl Dataset {
     async fn prompt(&self, chat_id: &str, said: &str) -> Result<(), cor_code::chats::PromptError> {
         let chat_id: Ulid = chat_id.parse().expect("a chat id is a ulid");
         self.chats.prompt(&chat_id, said).await
+    }
+
+    async fn archive(&self, chat_id: &str) {
+        let chat_id: Ulid = chat_id.parse().expect("a chat id is a ulid");
+        self.chats
+            .archive(&chat_id)
+            .await
+            .expect("a chat whose work is on the remote should archive");
+    }
+
+    /// Leave a directory where the chat's manifest was, so that the store
+    /// fails to read it for a reason the filesystem has words for.
+    fn stand_a_directory_where_the_manifest_was(&self, chat_id: &str) {
+        let manifest = self
+            .data_dir
+            .path()
+            .join("chats")
+            .join(chat_id)
+            .join("manifest.json");
+        fs::remove_file(&manifest).expect("a created chat has a manifest");
+        fs::create_dir(&manifest).expect("the manifest's place should be takeable");
     }
 }
 
