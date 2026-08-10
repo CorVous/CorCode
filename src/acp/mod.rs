@@ -36,6 +36,18 @@ const PATIENCE: Duration = Duration::from_secs(120);
 /// so what this catches is an adapter that has stopped speaking altogether.
 const TURN_PATIENCE: Duration = Duration::from_secs(600);
 
+/// How many lines in a row may fail to be JSON-RPC before the stream is taken
+/// to be somebody else's. One stray line is noise — a process the agent ran
+/// wrote to its stdout once and stopped — and a client that gave up on noise
+/// would end turns nothing is wrong with. A run of them is desync: the pipe is
+/// carrying another program's output, no answer will ever be read out of it,
+/// and waiting is only a slower way to fail (issue #65).
+const GARBLE_TOLERANCE: usize = 3;
+
+/// How much of the line that gave up on a stream is worth carrying: enough to
+/// recognise what wrote it, not a screenful of build output in the log.
+const SAMPLE: usize = 200;
+
 /// The notification an adapter streams a turn over.
 const SESSION_UPDATE: &str = "session/update";
 
@@ -43,6 +55,14 @@ const SESSION_UPDATE: &str = "session/update";
 /// fixes no order between the replay and the answer that ends the load, so the
 /// tail of one can outlive the other by as much as a scheduling hiccup.
 const REPLAY_TAIL: Duration = Duration::from_millis(100);
+
+/// How long a replay may go on being read past before the client stops waiting
+/// for a gap in it. A container replaying faster than the quiet it is waited
+/// for never leaves one, and a load that never returns holds the chat's wake
+/// claim for good: every later prompt is turned away until the core restarts.
+/// Generous, because a long transcript read past is exactly the healthy case
+/// (issue #65).
+const REPLAY_LIMIT: Duration = Duration::from_secs(30);
 
 /// The cheapest way back into a session: the adapter's own state restored,
 /// with nothing replayed to us (ADR-0007 rung 1). Not every adapter offers it,
@@ -194,7 +214,9 @@ impl<C: AcpChannel> Greeting<C> {
     /// pipe for the next turn to mistake for its own.
     pub async fn load(&mut self, session_id: &str) -> Result<(), AcpError> {
         self.rung(LOAD_SESSION, session_id).await?;
-        self.calls.drain(REPLAY_TAIL, LOAD_SESSION).await
+        self.calls
+            .drain(REPLAY_TAIL, REPLAY_LIMIT, LOAD_SESSION)
+            .await
     }
 
     /// One rung asked for over the chat's workspace. Whatever the adapter
@@ -403,6 +425,25 @@ fn keep(record: &mut Record<'_>, payload: &Value) -> Result<(), AcpError> {
     record(payload).map_err(|source| AcpError::Unrecorded { source })
 }
 
+/// The message in `line`, where there is one. JSON-RPC numbers requests and
+/// names methods, so a line carrying neither is nobody's message however well
+/// it parses: a build tool asked for its output as JSON writes whole documents
+/// into the pipe, and reading those as protocol traffic is what leaves a turn
+/// waiting out its patience on a stream that has nothing for it (issue #65).
+fn protocol_message(line: &str) -> Option<Value> {
+    let message: Value = serde_json::from_str(line).ok()?;
+    (message.get("method").is_some() || message.get("id").is_some()).then_some(message)
+}
+
+/// As much of `line` as a failure carries, cut on a character boundary and
+/// marked where it was cut.
+fn sample_of(line: &str) -> String {
+    match line.char_indices().nth(SAMPLE) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line.to_owned(),
+    }
+}
+
 fn silent(method: &str, patience: Duration) -> AcpError {
     AcpError::Silent {
         method: method.to_owned(),
@@ -443,10 +484,33 @@ impl<C: AcpChannel> Calls<C> {
         self.answer_to(id, method, patience, overhear).await
     }
 
+    /// Read the channel until it has said nothing for `quiet`, and for no
+    /// longer than `limit` whatever it says: a container that fills the pipe
+    /// faster than the gap being waited for leaves no gap, and the reader must
+    /// come back for the chat's sake rather than keep it (issue #65).
+    async fn drain(
+        &mut self,
+        quiet: Duration,
+        limit: Duration,
+        method: &str,
+    ) -> Result<(), AcpError> {
+        let Ok(outcome) = timeout(limit, self.read_past(quiet, method)).await else {
+            warn!(
+                "the adapter was still replaying {method} after {}s and was left to it",
+                limit.as_secs()
+            );
+            return Ok(());
+        };
+        outcome
+    }
+
     /// Read the channel until it has said nothing for `quiet`, answering what
     /// it asks of us and keeping none of it. A pipe that breaks while it is
     /// being emptied has nothing left to say and says so.
-    async fn drain(&mut self, quiet: Duration, method: &str) -> Result<(), AcpError> {
+    ///
+    /// Lines nothing can be read out of are read past rather than counted: a
+    /// replay is not a turn to fail, and there is no answer here to lose.
+    async fn read_past(&mut self, quiet: Duration, method: &str) -> Result<(), AcpError> {
         while let Ok(line) = timeout(quiet, self.channel.receive()).await {
             let Ok(message) = serde_json::from_str::<Value>(&line?) else {
                 continue;
@@ -486,17 +550,29 @@ impl<C: AcpChannel> Calls<C> {
         patience: Duration,
         overhear: &mut Overhear<'_>,
     ) -> Result<Value, AcpError> {
+        let mut garble = 0;
         loop {
             let line = timeout(patience, self.channel.receive())
                 .await
                 .map_err(|_| silent(method, patience))??;
-            let message: Value = match serde_json::from_str(&line) {
-                Ok(message) => message,
-                Err(nonsense) => {
-                    warn!("adapter said something that is not json-rpc: {nonsense}");
-                    continue;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Some(message) = protocol_message(&line) else {
+                warn!(
+                    "the adapter's stream carried no message: {}",
+                    sample_of(&line)
+                );
+                garble += 1;
+                if garble >= GARBLE_TOLERANCE {
+                    return Err(AcpError::Garbled {
+                        method: method.to_owned(),
+                        sample: sample_of(&line),
+                    });
                 }
+                continue;
             };
+            garble = 0;
             if message.get("method").is_some() {
                 overhear(&message)?;
                 if let Some(answer) = owed(&message) {
@@ -525,7 +601,7 @@ impl<C: AcpChannel> Calls<C> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
 
@@ -1127,6 +1203,136 @@ mod tests {
                 }),
                 recorded("on i"),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_stops_being_json_ends_the_turn_instead_of_waiting_it_out() {
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::garbling(SESSION, GARBLE_TOLERANCE, &[]),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let started = Instant::now();
+
+        let error = connection
+            .take_turn("ship the ladder", &mut |_| Ok(()))
+            .await
+            .expect_err("a stream that is no longer json-rpc should end the turn");
+
+        assert!(
+            matches!(&error, AcpError::Garbled { method, sample }
+                if method == PROMPT && !sample.is_empty()),
+            "a desynced stream should say so and show what it read, got: {error}"
+        );
+        assert!(
+            started.elapsed() < IMPATIENT,
+            "the turn sat out its patience rather than failing on the garble (issue #65)"
+        );
+        assert!(
+            error.spent_the_connection() && !error.answered(),
+            "a stream nobody can read a message out of is not one the next turn \
+             can go over: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lines_that_parse_as_json_without_being_messages_are_garble_too() {
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::interrupted(SESSION, &["42", "null", r#""done""#], &[]),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        let error = connection
+            .take_turn("ship the ladder", &mut |_| Ok(()))
+            .await
+            .expect_err("json that is nobody's message should end the turn");
+
+        assert!(
+            matches!(error, AcpError::Garbled { .. }),
+            "another program's json read as protocol traffic, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blank_lines_are_nothing_said_rather_than_garble() {
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::interrupted(SESSION, &["", "  ", "\r"], &[update(SESSION, "on it")]),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("blank lines are the likeliest stray output and cost nothing");
+
+        assert_eq!(record.last(), Some(&recorded("on it")));
+    }
+
+    #[tokio::test]
+    async fn a_replay_that_never_pauses_is_given_up_on_rather_than_read_forever() {
+        let transport = ScriptedAdapter::never_pausing();
+        let mut calls = Calls {
+            channel: transport
+                .open(CONTAINER)
+                .await
+                .expect("the scripted adapter should attach"),
+            patience: IMPATIENT,
+            next_id: 1,
+        };
+
+        let drained = timeout(
+            IMPATIENT * 4,
+            calls.drain(REPLAY_TAIL, IMPATIENT, LOAD_SESSION),
+        )
+        .await;
+
+        assert!(
+            drained.is_ok_and(|outcome| outcome.is_ok()),
+            "a chat whose replay never pauses holds its wake claim for good, and \
+             every later prompt is turned away until the core restarts (issue #65)"
+        );
+    }
+
+    #[tokio::test]
+    async fn noise_a_well_formed_message_follows_leaves_the_turn_alone() {
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::garbling(SESSION, GARBLE_TOLERANCE - 1, &[update(SESSION, "on it")]),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("noise short of a desync should not cost the chat its turn");
+
+        assert_eq!(
+            record.last(),
+            Some(&recorded("on it")),
+            "the turn was cut short by noise it read past: {record:?}"
         );
     }
 

@@ -284,10 +284,72 @@ fn unwritten_line(kind: &str, failure: &StoreError) -> String {
 /// after. Without it a disconnect leaves no trace on this side at all (issue
 /// #66). A refusal drops the connection too, and the adapter that gave one is
 /// alive — so the line says what followed, not that anything broke.
-fn connection_lost(chat_id: &str, failure: &AcpError) -> String {
+fn lost_the_connection(chat_id: &str, failure: &AcpError) -> String {
     format!(
         "{chat_id} dropped its adapter connection after: {}",
         with_causes(failure)
+    )
+}
+
+/// What a turn that ended in a failure rather than an answer calls itself in
+/// the chat's own log (issue #65).
+const CONNECTION_LOST: &str = "connection_lost";
+
+/// What the chat is told when its turn ended in a failure: what went wrong,
+/// what became of the connection it went over, that the prompt can simply be
+/// put again, and that the agent is not necessarily idle — the container is
+/// still running whatever the turn was in the middle of.
+///
+/// Without this line the log ends at the prompt and the page shows a chat that
+/// is still thinking, for as long as the operator is willing to believe it
+/// (issue #65).
+fn turn_lost(failure: &AcpError) -> String {
+    match failure {
+        AcpError::Garbled { sample, .. } => channel_corrupted(sample),
+        AcpError::Unrecorded { source } => turn_unrecorded(&format!("{source:#}")),
+        spent => connection_dropped(&with_causes(spent)),
+    }
+}
+
+/// What the chat is told when the adapter's connection went with its turn: the
+/// next prompt climbs ADR-0007's ladder over a fresh one, so it is a clean
+/// thing to put again.
+fn connection_dropped(why: &str) -> String {
+    format!(
+        "The turn ended without an answer: {why}. The connection to the agent was \
+         dropped, so the prompt can be sent again. The agent may have kept working \
+         inside its container meanwhile."
+    )
+}
+
+/// What the chat is told when the turn failed at this end and left the
+/// connection standing: the agent was never told to stop, so the rest of the
+/// turn is still coming down a pipe nobody is reading, and the next prompt
+/// reads it as its own reply. The core promises no clean re-send here rather
+/// than draining a stream it cannot know the end of (issue #65).
+fn turn_unrecorded(why: &str) -> String {
+    format!(
+        "The turn was abandoned because it could not be written down: {why}. The \
+         connection to the agent is still open, but what the agent went on saying \
+         is still in the pipe, so the next prompt may see the tail of this turn \
+         before its own reply. The agent may have kept working inside its \
+         container meanwhile."
+    )
+}
+
+/// What the chat is told when its turn ended because the protocol channel
+/// stopped carrying protocol: which is not a pipe that broke but a program the
+/// agent started writing where the messages go, and the operator can act on the
+/// difference. A container that keeps garbling every turn is one to archive and
+/// revive, since the thing writing over the channel is inside it (issue #65).
+fn channel_corrupted(sample: &str) -> String {
+    format!(
+        "Something the agent ran wrote over its own protocol channel, so what \
+         reached the core stopped being messages (last read: {sample}). The turn \
+         was abandoned and the connection dropped, but the agent may still be \
+         running whatever it started inside its container. The prompt can be sent \
+         again; if the chat stays stuck, archiving and reviving it gives the agent \
+         a container of its own again."
     )
 }
 
@@ -863,8 +925,9 @@ where
     /// over: one the adapter spent is dropped, so the next prompt climbs
     /// ADR-0007's ladder rather than going over a pipe nobody is holding.
     fn ended(&self, chat_id: &str, failure: AcpError) -> PromptError {
+        self.note(chat_id, CONNECTION_LOST, &turn_lost(&failure));
         if failure.spent_the_connection() {
-            warn!("{}", connection_lost(chat_id, &failure));
+            warn!("{}", lost_the_connection(chat_id, &failure));
             self.connections.forget(chat_id);
             PromptError::Broke(failure.into())
         } else {
@@ -1461,7 +1524,7 @@ mod tests {
 
     #[test]
     fn a_connection_the_adapter_spent_is_logged_with_what_broke_it() {
-        let logged = connection_lost(
+        let logged = lost_the_connection(
             "01K1TESTCHATID0000000000",
             &AcpError::Broken {
                 doing: "reading the adapter's answer".to_owned(),
@@ -1480,7 +1543,7 @@ mod tests {
 
     #[test]
     fn a_connection_dropped_after_a_refusal_is_not_called_a_broken_one() {
-        let logged = connection_lost(
+        let logged = lost_the_connection(
             "01K1TESTCHATID0000000000",
             &AcpError::Refused {
                 method: "session/prompt".to_owned(),
@@ -1494,6 +1557,62 @@ mod tests {
              the adapter refused session/prompt: unknown session",
             "an adapter that answered is alive, whatever became of the connection"
         );
+    }
+
+    #[test]
+    fn a_turn_that_spent_its_connection_tells_the_chat_the_prompt_can_go_again() {
+        let told = turn_lost(&AcpError::Broken {
+            doing: "reading the adapter's answer".to_owned(),
+            source: std::io::ErrorKind::BrokenPipe.into(),
+        });
+
+        assert_eq!(
+            told,
+            "The turn ended without an answer: the adapter's channel broke while \
+             reading the adapter's answer: broken pipe. The connection to the agent \
+             was dropped, so the prompt can be sent again. The agent may have kept \
+             working inside its container meanwhile.",
+            "a turn that dies saying nothing here leaves the page frozen (issue #65)"
+        );
+    }
+
+    #[test]
+    fn a_turn_nothing_could_write_down_promises_no_clean_re_send() {
+        let told = turn_lost(&AcpError::Unrecorded {
+            source: anyhow::anyhow!("no space left on device"),
+        });
+
+        assert_eq!(
+            told,
+            "The turn was abandoned because it could not be written down: no space \
+             left on device. The connection to the agent is still open, but what \
+             the agent went on saying is still in the pipe, so the next prompt may \
+             see the tail of this turn before its own reply. The agent may have \
+             kept working inside its container meanwhile.",
+            "the connection this failure leaves alone is not a clean one to prompt \
+             over, and saying so would be a promise the core cannot keep"
+        );
+    }
+
+    #[test]
+    fn a_turn_lost_to_a_corrupted_channel_is_not_told_as_an_ordinary_drop() {
+        let told = turn_lost(&AcpError::Garbled {
+            method: "session/prompt".to_owned(),
+            sample: "\u{fffd}\u{fffd} building: 42%".to_owned(),
+        });
+
+        assert_eq!(
+            told,
+            "Something the agent ran wrote over its own protocol channel, so what \
+             reached the core stopped being messages (last read: \u{fffd}\u{fffd} \
+             building: 42%). The turn was abandoned and the connection dropped, but \
+             the agent may still be running whatever it started inside its \
+             container. The prompt can be sent again; if the chat stays stuck, \
+             archiving and reviving it gives the agent a container of its own again.",
+            "a corrupted channel is a different thing from a pipe that broke, and \
+             the operator can act on the difference (issue #65)"
+        );
+        assert_ne!(told, turn_lost(&AcpError::Closed));
     }
 
     const CHECKPOINT: &str = "chat/2026-08-09-archived-chkpt-20260809T214033172";

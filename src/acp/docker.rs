@@ -73,6 +73,10 @@ impl AcpTransport for DockerExec {
 /// One adapter's stdio, cut into newline-delimited messages. The bytes are
 /// held as bytes until a whole line is there: the daemon breaks the pipe
 /// wherever it likes, and a character broken in half is not text yet.
+///
+/// A whole line that is still not text is handed on with those bytes stood in
+/// for rather than dropped: it is one more line no message can be read out of,
+/// and only the parse it fails counts a stream as garbled (issue #65).
 pub struct ExecChannel {
     output: Pin<Box<dyn Stream<Item = Result<LogOutput, DockerError>> + Send>>,
     input: Pin<Box<dyn AsyncWrite + Send>>,
@@ -95,11 +99,15 @@ impl AcpChannel for ExecChannel {
     async fn receive(&mut self) -> Result<String, AcpError> {
         loop {
             if let Some(line) = take_line(&mut self.unread) {
-                match String::from_utf8(line) {
-                    Ok(message) => return Ok(message.trim().to_owned()),
-                    Err(nonsense) => warn!("{}", undecodable(&nonsense)),
-                }
-                continue;
+                return Ok(match String::from_utf8(line) {
+                    Ok(message) => message.trim().to_owned(),
+                    Err(nonsense) => {
+                        warn!("{}", undecodable(&nonsense));
+                        String::from_utf8_lossy(nonsense.as_bytes())
+                            .trim()
+                            .to_owned()
+                    }
+                });
             }
             match self.output.next().await {
                 Some(Ok(LogOutput::StdErr { message })) => {
@@ -202,6 +210,19 @@ mod tests {
         unread.extend_from_slice(b":2}\n");
         assert_eq!(take_line(&mut unread).as_deref(), Some(&b"{\"id\":2}"[..]));
         assert!(unread.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_line_that_is_not_text_arrives_with_its_bad_bytes_stood_in_for() {
+        let mut channel = channel_reading(&[b"{\"id\":\xff}\n"]);
+
+        let arrived = channel.receive().await.expect("the line should arrive");
+
+        assert_eq!(
+            arrived, "{\"id\":\u{fffd}}",
+            "a line dropped here never reaches the parse that calls the stream \
+             garbled (issue #65)"
+        );
     }
 
     #[tokio::test]

@@ -139,6 +139,7 @@ Core-injected notices are the one payload that is not ACP. They carry a
 {"corcode": "wake_failure", "text": "..."}
 {"corcode": "push_failure", "text": "..."}
 {"corcode": "mode_notice", "text": "..."}
+{"corcode": "connection_lost", "text": "..."}
 ```
 
 `reset_notice` says where the agent's memory was cut. `permission_declined`
@@ -153,8 +154,19 @@ the chat is still open with its container up and can be archived again
 (ADR-0002 rule 3). `mode_notice` says the session opened in some other
 permission mode than the one the image's managed settings ask for, which is
 otherwise invisible: an agent clamped into asking has every ask declined and
-reads as a mute one (ADR-0001). All of them belong in the log because the log
-is the whole of what the chat page renders (ADR-0008); a status code the
+reads as a mute one (ADR-0001). `connection_lost` says a turn ended in a
+failure rather than an answer, what became of the connection it went over, and
+what the operator can do about it: without it the log stops at the prompt and
+the page shows a chat that is still thinking (issue #65). It is the one kind
+whatever ended the turn, and what ended it is told in the `text`. A channel
+some process the agent ran wrote over reads differently there — it names the
+corruption and says to archive and revive a chat it keeps happening to — but
+it is the same news about the same chat, and ADR-0008's renderer says every
+kind out loud the same way. The line is a guarantee only where the connection
+broke: a turn lost because the dataset would not take it writes its notice
+through the store that just refused one, and can be lost with it. All of them
+belong in the log because the log is the whole of what the chat page renders
+(ADR-0008); a status code the
 browser swallows tells the operator nothing.
 
 ADR-0008 renders every core line as a block quote.

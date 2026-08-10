@@ -85,6 +85,19 @@ fn recorded_wake_failure(why: &str) -> Value {
     })
 }
 
+/// A turn that ended in a failure rather than an answer, as the core writes it
+/// into the chat's log so the page does not simply sit there (issue #65).
+fn recorded_connection_lost(why: &str) -> Value {
+    json!({
+        "corcode": "connection_lost",
+        "text": format!(
+            "The turn ended without an answer: {why}. The connection to the agent \
+             was dropped, so the prompt can be sent again. The agent may have kept \
+             working inside its container meanwhile."
+        ),
+    })
+}
+
 /// What waking a chat cost it, as the core writes it into the chat's log.
 fn recorded_reset_notice(text: &str) -> Value {
     json!({"corcode": "reset_notice", "text": text})
@@ -336,7 +349,11 @@ async fn an_adapter_that_dies_mid_turn_keeps_what_it_said_and_the_next_prompt_cl
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(
         app.events(&chat_id),
-        [recorded_prompt(SAID), recorded("on i")],
+        [
+            recorded_prompt(SAID),
+            recorded("on i"),
+            recorded_connection_lost("the adapter closed its channel without answering"),
+        ],
         "a broken turn took its own record with it"
     );
     assert_eq!(
@@ -349,10 +366,66 @@ async fn an_adapter_that_dies_mid_turn_keeps_what_it_said_and_the_next_prompt_cl
         [
             recorded_prompt(SAID),
             recorded("on i"),
+            recorded_connection_lost("the adapter closed its channel without answering"),
             recorded_reset_notice(cor_code::resume::MEMORY_RESET),
             recorded_prompt("still there?"),
             recorded("on i"),
         ]
+    );
+    app.stop().await;
+}
+
+#[tokio::test]
+async fn a_turn_that_loses_its_connection_says_so_in_the_chats_own_log() {
+    let app = TestApp::start(ScriptedAdapter::dying_mid_turn(
+        SESSION,
+        &[update(SESSION, "on i")],
+    ))
+    .await;
+    let chat_id = app.create_chat().await;
+
+    let response = app.prompt(&chat_id, SAID).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let events = app.events(&chat_id);
+    let last = events
+        .last()
+        .expect("the turn wrote its prompt down at least");
+    assert_eq!(
+        last["corcode"], "connection_lost",
+        "a lost turn left nothing in the log, so the page still reads as thinking"
+    );
+    let text = last["text"].as_str().expect("a notice says something");
+    assert!(
+        text.contains("dropped") && text.contains("can be sent again"),
+        "the notice says nothing the operator can act on: {text}"
+    );
+    app.stop().await;
+}
+
+/// More lines of another program's output than any noise tolerance could read
+/// past, so the turn meets a stream that is nobody's protocol any more.
+const GARBLE: usize = 8;
+
+#[tokio::test]
+async fn a_turn_lost_to_a_corrupted_stream_says_so_in_words_of_its_own() {
+    let app = TestApp::start(ScriptedAdapter::garbling(SESSION, GARBLE, &[])).await;
+    let chat_id = app.create_chat().await;
+
+    let response = app.prompt(&chat_id, SAID).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let events = app.events(&chat_id);
+    let last = events
+        .last()
+        .expect("the turn wrote its prompt down at least");
+    assert_eq!(last["corcode"], "connection_lost");
+    let text = last["text"].as_str().expect("a notice says something");
+    assert!(
+        text.contains("wrote over its own protocol channel")
+            && text.contains("may still be running")
+            && text.contains("archiving and reviving"),
+        "corruption reads like any other dropped connection: {text}"
     );
     app.stop().await;
 }

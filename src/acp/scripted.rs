@@ -23,6 +23,11 @@ const PROMPT: &str = "session/prompt";
 /// does: no client may assume the next line is the one it is waiting for.
 const CHATTER: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}}"#;
 
+/// One line of the kind a process the agent ran leaves in the protocol stream
+/// when it writes to the agent's own stdout: text, with no message in it
+/// (issue #65).
+const GARBLE: &str = "\u{fffd}\u{fffd} building: 42% [====>      ]";
+
 /// What the script says to one method.
 #[derive(Clone)]
 enum Answer {
@@ -93,6 +98,8 @@ pub struct ScriptedAdapter {
     dies: Dies,
     replay_trails: bool,
     dawdle: Duration,
+    interruptions: Arc<Vec<String>>,
+    endless: bool,
 }
 
 /// Everything the fake was told, for the assertions to read back.
@@ -201,6 +208,37 @@ impl ScriptedAdapter {
         Self {
             asks: Arc::new(asks.to_vec()),
             ..Self::answering(session_id, updates)
+        }
+    }
+
+    /// An adapter whose stream carries `junk` lines that are not JSON-RPC
+    /// before each turn's updates, as one whose stdout something else is
+    /// writing to does (issue #65).
+    #[must_use]
+    pub fn garbling(session_id: &str, junk: usize, updates: &[Value]) -> Self {
+        let garble: Vec<_> = std::iter::repeat_n(GARBLE, junk).collect();
+        Self::interrupted(session_id, &garble, updates)
+    }
+
+    /// An adapter whose stream carries `lines` verbatim before each turn's
+    /// updates, whatever they are: blank lines, another program's JSON, or
+    /// anything else that reaches the pipe without being a message (issue #65).
+    #[must_use]
+    pub fn interrupted(session_id: &str, lines: &[&str], updates: &[Value]) -> Self {
+        Self {
+            interruptions: Arc::new(lines.iter().map(|line| (*line).to_owned()).collect()),
+            ..Self::answering(session_id, updates)
+        }
+    }
+
+    /// An adapter whose channel never once pauses, as a container replaying a
+    /// long transcript faster than any gap in it does (issue #65).
+    #[must_use]
+    pub fn never_pausing() -> Self {
+        Self {
+            endless: true,
+            dawdle: Duration::from_millis(1),
+            ..Self::reading(Script::new())
         }
     }
 
@@ -314,6 +352,8 @@ impl ScriptedAdapter {
             dies: Dies::Never,
             replay_trails: false,
             dawdle: Duration::ZERO,
+            interruptions: Arc::new(Vec::new()),
+            endless: false,
         }
     }
 
@@ -389,6 +429,8 @@ impl AcpTransport for ScriptedAdapter {
             death,
             replay_trails: self.replay_trails,
             dawdle: self.dawdle,
+            interruptions: Arc::clone(&self.interruptions),
+            endless: self.endless,
         })
     }
 }
@@ -406,6 +448,8 @@ pub struct ScriptedChannel {
     death: Death,
     replay_trails: bool,
     dawdle: Duration,
+    interruptions: Arc<Vec<String>>,
+    endless: bool,
 }
 
 impl ScriptedChannel {
@@ -468,6 +512,9 @@ impl AcpChannel for ScriptedChannel {
         }
         self.unread.push_back(CHATTER.to_owned());
         if method == PROMPT {
+            for line in self.interruptions.iter() {
+                self.unread.push_back(line.clone());
+            }
             for ask in self.asks.iter() {
                 self.unread.push_back(ask.to_string());
             }
@@ -490,6 +537,7 @@ impl AcpChannel for ScriptedChannel {
         tokio::time::sleep(self.dawdle).await;
         match self.unread.pop_front() {
             Some(line) => Ok(line),
+            None if self.endless => Ok(CHATTER.to_owned()),
             None if self.death != Death::None => Err(AcpError::Closed),
             None => std::future::pending().await,
         }
