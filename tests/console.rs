@@ -72,7 +72,7 @@ async fn the_chat_view_renders_the_event_log_from_disk() {
 async fn a_chat_renders_while_the_container_daemon_is_down() {
     let (data_dir, chat_id) = fixture_chat();
     let plane = MemoryPlane::default();
-    plane.take_the_daemon_down();
+    plane.refuse_to_list_containers();
     let app = TestApp::start_over(data_dir, plane).await;
 
     let body = app.body(&format!("/chats/{chat_id}")).await;
@@ -112,7 +112,7 @@ async fn a_corrupt_event_log_surfaces_as_an_error_rather_than_a_gap() {
 #[tokio::test]
 async fn the_console_stands_while_the_container_daemon_is_down() {
     let plane = MemoryPlane::default();
-    plane.take_the_daemon_down();
+    plane.refuse_to_list_containers();
     let app = TestApp::start_over(with_fixture_chat(), plane).await;
 
     let body = app.body("/").await;
@@ -128,6 +128,53 @@ async fn the_console_stands_while_the_container_daemon_is_down() {
     assert!(
         status_details(&body).contains("list the workspace containers"),
         "the daemon's own words are not in the status details: {body}"
+    );
+    app.stop().await;
+}
+
+/// The console's Refresh button asks for this fragment, so it degrades where
+/// the console does or the button is a dead end (issue #25).
+#[tokio::test]
+async fn the_chat_list_fragment_stands_while_the_container_daemon_is_down() {
+    let plane = MemoryPlane::default();
+    plane.refuse_to_list_containers();
+    let app = TestApp::start_over(with_fixture_chat(), plane).await;
+
+    let body = app.body("/chats").await;
+
+    assert!(
+        body.contains("Container status unknown"),
+        "the fragment does not say the plane went quiet: {body}"
+    );
+    assert!(
+        body.contains("Resume ladder"),
+        "the open chat is not listed: {body}"
+    );
+    assert!(
+        !body.contains("<h2>Live</h2>") && !body.contains("<h2>Parked</h2>"),
+        "the fragment groups chats nothing answered for: {body}"
+    );
+    app.stop().await;
+}
+
+/// Reading degrades with the daemon down; changing something must not. A
+/// prompt that cannot reach a container is a failure, and says so
+/// (ADR-0007 rule 5).
+#[tokio::test]
+async fn a_prompt_still_fails_loudly_while_the_container_daemon_is_down() {
+    let (data_dir, chat_id) = fixture_chat();
+    let plane = MemoryPlane::default();
+    plane.refuse_to_list_containers();
+    let app = TestApp::start_over(data_dir, plane).await;
+
+    let response = app
+        .post(&format!("/chats/{chat_id}/prompt"), &[("prompt", "ship it")])
+        .await;
+
+    assert!(
+        response.status().is_server_error(),
+        "a prompt was answered as though the plane had spoken: {}",
+        response.status()
     );
     app.stop().await;
 }
@@ -400,6 +447,16 @@ impl TestApp {
         client()
             .get(self.url(path))
             .header("cookie", &self.cookie)
+            .send()
+            .await
+            .expect("request")
+    }
+
+    async fn post(&self, path: &str, form: &[(&str, &str)]) -> reqwest::Response {
+        client()
+            .post(self.url(path))
+            .header("cookie", &self.cookie)
+            .form(form)
             .send()
             .await
             .expect("request")
