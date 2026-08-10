@@ -491,3 +491,85 @@ impl AcpChannel for ScriptedChannel {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::time::timeout;
+
+    use super::*;
+
+    const CONTAINER: &str = "corcode-chat-01K1TESTCHATID0000000000";
+    const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
+
+    /// Long enough that a queued line is always there, short enough that a
+    /// test proving the fake said nothing does not hold the suite up.
+    const BRIEF: Duration = Duration::from_millis(50);
+
+    /// The next thing the fake says that answers a request rather than
+    /// volunteering something of its own.
+    async fn answer_from(channel: &mut ScriptedChannel) -> Value {
+        loop {
+            let line = timeout(BRIEF, channel.receive())
+                .await
+                .expect("the fake should answer a request it was sent")
+                .expect("the channel should stay open");
+            let message: Value = serde_json::from_str(&line).expect("the fake should speak JSON");
+            if message.get("method").is_none() {
+                return message;
+            }
+        }
+    }
+
+    async fn channel_to(adapter: &ScriptedAdapter) -> ScriptedChannel {
+        adapter
+            .open(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a channel")
+    }
+
+    async fn say(channel: &mut ScriptedChannel, message: &Value) {
+        channel
+            .send(&message.to_string())
+            .await
+            .expect("the fake should take a message");
+    }
+
+    #[tokio::test]
+    async fn a_method_the_script_does_not_name_is_refused_with_the_code_json_rpc_reserves() {
+        let mut channel = channel_to(&ScriptedAdapter::opening(SESSION)).await;
+
+        say(
+            &mut channel,
+            &json!({"jsonrpc": "2.0", "id": 7, "method": "session/wander", "params": {}}),
+        )
+        .await;
+
+        let answer = answer_from(&mut channel).await;
+        assert_eq!(answer["id"], json!(7));
+        assert_eq!(
+            answer["error"]["code"].as_i64(),
+            Some(-32601),
+            "an unheard method is JSON-RPC's method-not-found, got: {answer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_notification_is_taken_and_left_unanswered() {
+        let mut channel = channel_to(&ScriptedAdapter::opening(SESSION)).await;
+
+        say(
+            &mut channel,
+            &json!({"jsonrpc": "2.0", "method": "session/cancel", "params": {}}),
+        )
+        .await;
+
+        let mut said = Vec::new();
+        while let Ok(line) = timeout(BRIEF, channel.receive()).await {
+            said.push(line.expect("the channel should stay open"));
+        }
+        assert!(
+            said.iter().all(|line| line.contains("\"method\"")),
+            "a notification is owed no answer, got: {said:?}"
+        );
+    }
+}
