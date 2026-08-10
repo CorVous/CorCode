@@ -237,6 +237,42 @@ async fn an_archived_chat_whose_commit_the_branch_lost_comes_back_at_the_tip_and
     );
 }
 
+/// A chat that comes back behind its branch will have its next archive
+/// refused and rescued (issue #50). The drift is said out loud on the way in,
+/// so the rescue is not the first anyone hears of it.
+#[tokio::test]
+async fn an_archived_chat_the_remote_has_moved_past_is_told_it_is_behind() {
+    let dataset = Dataset::of(ScriptedAdapter::resuming(
+        SESSION,
+        &[update(SESSION, "on it")],
+    ));
+    let chat = dataset.create("behind").await;
+    let pushed = dataset.commit_in_workspace(&chat, "the agent's own commit");
+    dataset.archive(&chat).await;
+    let ahead = dataset.move_the_branch_past(&chat, &pushed);
+
+    dataset
+        .prompt(&chat, SAID)
+        .await
+        .expect("a chat behind the tip should still revive");
+
+    assert_eq!(
+        says(&dataset.workspace(&chat), &["rev-parse", "HEAD"]),
+        pushed,
+        "the revival did not come back where the chat was archived"
+    );
+    let told = dataset.events(&chat);
+    let drift = told
+        .iter()
+        .find(|line| line["corcode"] == "drift_notice")
+        .and_then(|line| line["text"].as_str())
+        .unwrap_or_else(|| panic!("a chat behind its branch is told nothing: {told:?}"));
+    assert!(
+        drift.contains(&ahead) && drift.contains(&dataset.branch(&chat)),
+        "the notice does not say what this chat is behind: {drift}"
+    );
+}
+
 #[tokio::test]
 async fn an_archived_chat_whose_branch_is_gone_stays_archived_and_can_be_tried_again() {
     let dataset = Dataset::of(ScriptedAdapter::resuming(
@@ -761,6 +797,27 @@ impl Dataset {
             &self.origin.path().join(BARE),
             &["update-ref", &self.branch_ref(chat_id), commit],
         );
+    }
+
+    /// Somebody else's commit on top of the chat's own, as a push from outside
+    /// this core leaves the branch: what the chat archived is still there, and
+    /// the branch has moved past it. Answers with the new tip.
+    fn move_the_branch_past(&self, chat_id: &str, commit: &str) -> String {
+        let tree = self.origin_says(&["rev-parse", &format!("{commit}^{{tree}}")]);
+        let ahead = self.origin_says(&[
+            "-c",
+            "user.name=Someone Else",
+            "-c",
+            "user.email=else@example.invalid",
+            "commit-tree",
+            &tree,
+            "-p",
+            commit,
+            "-m",
+            "somebody else's work",
+        ]);
+        self.move_the_branch(chat_id, &ahead);
+        ahead
     }
 
     fn delete_the_branch(&self, chat_id: &str) {
