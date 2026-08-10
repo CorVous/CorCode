@@ -22,7 +22,7 @@ use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
 use crate::status::{Containers, Slot, Status};
 use crate::store::{
     self, ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, Owner, RuntimeStatus,
-    runtime_status,
+    StoreError, runtime_status,
 };
 use crate::sweep::{self, Sweep, Swept};
 use crate::ui;
@@ -241,6 +241,39 @@ fn stubborn_teardown(chat_id: &str, why: &str, stubborn: &PlaneError) -> String 
     format!(
         "{chat_id} ({why}) would not stop: {}",
         with_causes(stubborn)
+    )
+}
+
+/// The line the operator reads when a working tree stays on disk: which
+/// chat, what was left of it, and everything the filesystem said under the
+/// store's own summary (issue #81). Only the cause says whether the operator
+/// has a permission to fix or a mount to unbusy.
+fn stubborn_workspace(chat_id: &str, what: &str, stubborn: &StoreError) -> String {
+    format!(
+        "{chat_id} left {what} that will not go: {}",
+        with_causes(stubborn)
+    )
+}
+
+/// The line the operator reads when a turn goes undated: which chat, and
+/// everything the filesystem said under the store's own summary (issue #81).
+/// The warm pool's order is only as good as these writes, so the cause is
+/// what says whether the pool is about to park the wrong chats.
+fn undated_turn(chat_id: &str, failure: &StoreError) -> String {
+    format!(
+        "{chat_id} took a turn that could not be dated: {}",
+        with_causes(failure)
+    )
+}
+
+/// The line the operator reads when the core's own voice does not reach a
+/// chat's log: which kind of line was lost, and everything the filesystem
+/// said under the store's own summary (issue #81). The chat's log is where
+/// this would otherwise have been read, so this line is all there is.
+fn unwritten_line(kind: &str, failure: &StoreError) -> String {
+    format!(
+        "a {kind} line could not be written down: {}",
+        with_causes(failure)
     )
 }
 
@@ -581,7 +614,7 @@ where
             })
         });
         if let Err(failure) = touched {
-            warn!("{chat_id} took a turn that could not be dated: {failure:#}");
+            warn!("{}", undated_turn(chat_id, &failure));
         }
     }
 
@@ -734,7 +767,7 @@ where
                     outcome.removed.push(chat_id);
                 }
                 Err(stubborn) => {
-                    warn!("{chat_id} left a workspace that will not go: {stubborn:#}");
+                    warn!("{}", stubborn_workspace(&chat_id, "a workspace", &stubborn));
                     outcome.stubborn.push(chat_id);
                 }
             }
@@ -841,7 +874,7 @@ where
     fn note(&self, chat_id: &str, kind: &str, text: &str) {
         let line = json!({"corcode": kind, "text": text});
         if let Err(failure) = self.store.append_event(chat_id, &line) {
-            warn!("a {kind} line could not be written down: {failure:#}");
+            warn!("{}", unwritten_line(kind, &failure));
         }
     }
 
@@ -1019,7 +1052,7 @@ where
     /// hear about: the chat is already as safe as it can be made.
     fn wipe_the_half_clone(&self, chat_id: &str) {
         if let Err(stubborn) = self.store.remove_workspace(chat_id) {
-            warn!("{chat_id} left half a clone that will not go: {stubborn:#}");
+            warn!("{}", stubborn_workspace(chat_id, "half a clone", &stubborn));
         }
     }
 
@@ -1325,6 +1358,81 @@ mod tests {
             "plain Display is what these warn sites used to get"
         );
         assert_ne!(with_causes(&stubborn), stubborn.to_string());
+    }
+
+    /// The shape the operator actually met: a write to `path` the filesystem
+    /// refused, with its refusal one level under the store's summary.
+    fn a_write_the_filesystem_refused(path: &str) -> StoreError {
+        StoreError::Write {
+            path: path.into(),
+            source: std::io::ErrorKind::PermissionDenied.into(),
+        }
+    }
+
+    #[test]
+    fn a_workspace_that_will_not_go_is_logged_with_what_the_filesystem_said() {
+        let logged = stubborn_workspace(
+            "01K1TESTCHATID0000000000",
+            "a workspace",
+            &a_write_the_filesystem_refused("/srv/corcode/workspaces/01K1TESTCHATID0000000000"),
+        );
+
+        assert_eq!(
+            logged,
+            "01K1TESTCHATID0000000000 left a workspace that will not go: \
+             /srv/corcode/workspaces/01K1TESTCHATID0000000000 could not be written: \
+             permission denied",
+            "the summary names the path but not why it stayed"
+        );
+    }
+
+    #[test]
+    fn a_turn_that_could_not_be_dated_is_logged_with_what_the_filesystem_said() {
+        let logged = undated_turn(
+            "01K1TESTCHATID0000000000",
+            &a_write_the_filesystem_refused(
+                "/srv/corcode/chats/01K1TESTCHATID0000000000/manifest.json",
+            ),
+        );
+
+        assert_eq!(
+            logged,
+            "01K1TESTCHATID0000000000 took a turn that could not be dated: \
+             /srv/corcode/chats/01K1TESTCHATID0000000000/manifest.json could not be written: \
+             permission denied",
+            "a warm pool that stops being ordered is read from this line alone"
+        );
+    }
+
+    #[test]
+    fn a_line_that_could_not_be_written_down_is_logged_with_what_the_filesystem_said() {
+        let logged = unwritten_line(
+            REFUSAL,
+            &a_write_the_filesystem_refused(
+                "/srv/corcode/chats/01K1TESTCHATID0000000000/events.jsonl",
+            ),
+        );
+
+        assert_eq!(
+            logged,
+            "a refusal line could not be written down: \
+             /srv/corcode/chats/01K1TESTCHATID0000000000/events.jsonl could not be written: \
+             permission denied",
+            "the chat's own log just failed, so this line is all the operator gets"
+        );
+    }
+
+    #[test]
+    fn displaying_the_stubborn_workspace_would_lose_the_filesystems_complaint() {
+        let stubborn =
+            a_write_the_filesystem_refused("/srv/corcode/workspaces/01K1TESTCHATID0000000000");
+
+        assert_eq!(
+            format!("{stubborn:#}"),
+            "/srv/corcode/workspaces/01K1TESTCHATID0000000000 could not be written",
+            "the alternate flag buys a typed error nothing"
+        );
+        assert_ne!(with_causes(&stubborn), format!("{stubborn:#}"));
     }
 
     #[test]

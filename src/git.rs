@@ -13,6 +13,7 @@ use log::warn;
 use thiserror::Error;
 
 use crate::config::REDACTED;
+use crate::failure::with_causes;
 
 /// Where the repositories named in `CORCODE_REPOS` actually live.
 pub const GITHUB: &str = "https://github.com";
@@ -509,11 +510,22 @@ pub fn push_for_archive(
             if let Some(checkpoint) = &checkpoint
                 && let Err(stubborn) = undo_checkpoint(workspace, &standing, checkpoint)
             {
-                warn!("{checkpoint} could not be rolled back: {stubborn}");
+                warn!("{}", unrolled_checkpoint(checkpoint, &stubborn));
             }
             Err(failure)
         }
     }
+}
+
+/// The line the operator reads when a checkpoint stays on the workspace:
+/// which branch, and everything under git's own summary (issue #81). A git
+/// that could not be run at all says only that, so the io error beneath it is
+/// the whole of what the operator has to go on.
+fn unrolled_checkpoint(checkpoint: &str, stubborn: &GitError) -> String {
+    format!(
+        "{checkpoint} could not be rolled back: {}",
+        with_causes(stubborn)
+    )
 }
 
 /// The commit `workspace` has checked out.
@@ -815,6 +827,24 @@ mod tests {
 
     const TOKEN: &str = "ghs-clone-secret";
     const ROTATED: &str = "ghs-rotated-secret";
+
+    #[test]
+    fn a_checkpoint_that_will_not_roll_back_is_logged_with_what_stopped_git() {
+        let logged = unrolled_checkpoint(
+            "chat/2026-08-09-archived-chkpt-20260809T214033172",
+            &GitError::Unusable {
+                doing: "undo the checkpoint commit".to_owned(),
+                source: std::io::ErrorKind::PermissionDenied.into(),
+            },
+        );
+
+        assert_eq!(
+            logged,
+            "chat/2026-08-09-archived-chkpt-20260809T214033172 could not be rolled back: \
+             git could not be run to undo the checkpoint commit: permission denied",
+            "a git that never ran says nothing on its own"
+        );
+    }
 
     #[test]
     fn a_typed_title_becomes_a_slug_a_branch_can_carry() {
