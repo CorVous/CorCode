@@ -15,7 +15,9 @@ use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder,
     StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
-use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings, container_name};
+use cor_code::plane::{
+    ContainerPlane, DockerPlane, PlaneError, PlaneSettings, StopGrace, container_name,
+};
 use cor_code::store::{ChatStore, NewChat, Owner, hand_tree_to};
 use futures_util::StreamExt as _;
 use tempfile::TempDir;
@@ -106,7 +108,7 @@ async fn a_real_spawned_container_wears_every_hardening_flag() {
         .await
         .is_ok();
     plane
-        .teardown(CHAT_ID)
+        .teardown(CHAT_ID, StopGrace::Zero)
         .await
         .expect("the chat should tear down");
 
@@ -196,7 +198,7 @@ async fn a_real_container_can_write_in_both_of_the_trees_it_was_handed() {
         .expect("the chat should spawn");
     let wrote = exec_exit_code(&docker, &container.name, &AGENTS_OWN_WORK).await;
     plane
-        .teardown(&chat_id)
+        .teardown(&chat_id, StopGrace::Zero)
         .await
         .expect("the chat should tear down");
 
@@ -241,7 +243,7 @@ async fn a_spawn_replaces_the_internal_network_an_older_deployment_left() {
         .expect("the agent network should exist");
     let live = plane.list_live().await.expect("liveness should answer");
     plane
-        .teardown(MIGRATION_CHAT_ID)
+        .teardown(MIGRATION_CHAT_ID, StopGrace::Zero)
         .await
         .expect("the chat should tear down");
 
@@ -437,7 +439,7 @@ async fn a_container_outlives_the_command_its_image_would_have_run() {
     let live = plane.list_live().await.expect("liveness should answer");
     let exec_exit_code = exec_exit_code(&docker, &container.name, &["true"]).await;
     plane
-        .teardown(KEEP_ALIVE_CHAT_ID)
+        .teardown(KEEP_ALIVE_CHAT_ID, StopGrace::Zero)
         .await
         .expect("the chat should tear down");
 
@@ -571,7 +573,7 @@ async fn stop(docker: &Docker, name: &str) {
 /// A run that died mid-test leaves the fixed-name container behind; it would
 /// meet every later run with `AlreadyLive`.
 async fn clear_any_leftover(plane: &DockerPlane, chat_id: &str) {
-    match plane.teardown(chat_id).await {
+    match plane.teardown(chat_id, StopGrace::Zero).await {
         Ok(()) | Err(PlaneError::NotLive { .. }) => {}
         Err(error) => panic!("a leftover container should be removable: {error}"),
     }

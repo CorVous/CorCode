@@ -26,7 +26,7 @@ use cor_code::config::{
 };
 use cor_code::git::Remotes;
 use cor_code::plane::{
-    ContainerPlane, DockerPlane, PlaneError, PlaneSettings, managed_default_mode,
+    ContainerPlane, DockerPlane, PlaneError, PlaneSettings, StopGrace, managed_default_mode,
 };
 use cor_code::secrets::Secrets;
 use cor_code::server;
@@ -430,7 +430,7 @@ fn socket_is_there() -> bool {
 async fn teardown(deployment: &Deployment, chat_id: &str) {
     let plane =
         DockerPlane::connect(settings(deployment)).expect("the daemon should still be reachable");
-    match plane.teardown(chat_id).await {
+    match plane.teardown(chat_id, StopGrace::Zero).await {
         Ok(()) | Err(PlaneError::NotLive { .. }) => {}
         Err(error) => panic!("the chat's container should be removable: {error}"),
     }

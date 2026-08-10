@@ -26,7 +26,7 @@ use cor_code::config::{
     DEFAULT_WARM_POOL,
 };
 use cor_code::git::Remotes;
-use cor_code::plane::MemoryPlane;
+use cor_code::plane::{ContainerPlane as _, MemoryPlane, StopGrace, Teardown};
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
@@ -120,6 +120,68 @@ async fn a_completed_turn_moves_its_chat_to_the_front_of_the_pool() {
     );
     assert_eq!(group(&console, &second), "Live");
     assert_eq!(group(&console, &fourth), "Live");
+}
+
+/// The evicted container's keep-alive discards the signal, so every second
+/// of grace is a second the request that ordered the eviction waits for a
+/// kill it could have asked for at once (issue #40).
+#[tokio::test]
+async fn parking_a_chat_stops_its_container_without_grace() {
+    let app = TestApp::start().await;
+    let parked = app.create_chat("first").await;
+    app.create_chat("second").await;
+
+    app.create_chat("third").await;
+
+    assert_eq!(
+        app.teardowns(),
+        vec![Teardown {
+            chat_id: parked,
+            grace: StopGrace::Zero,
+        }]
+    );
+}
+
+/// Connections live only in memory, so every open chat a restarted core
+/// inherits holds a running container and nothing to talk to it over. That
+/// container is a keep-alive like any parked one, and archiving it must not
+/// buy it a grace nothing in it can spend (issue #40).
+#[tokio::test]
+async fn archiving_a_chat_whose_container_outlived_its_connection_stops_it_without_grace() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    app.create_chat("second").await;
+    app.create_chat("third").await;
+    app.spawn_container_for(&chat).await;
+
+    app.archive(&chat).await;
+
+    assert_eq!(
+        app.teardowns().last(),
+        Some(&Teardown {
+            chat_id: chat,
+            grace: StopGrace::Zero,
+        }),
+        "the container the archive stopped is the one spawned without a connection"
+    );
+}
+
+/// A chat still holding its adapter is torn down with the plane's whole
+/// grace: what is in the container is the agent's, not a keep-alive's.
+#[tokio::test]
+async fn archiving_a_live_chat_leaves_its_container_the_whole_grace() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+
+    app.archive(&chat).await;
+
+    assert_eq!(
+        app.teardowns(),
+        vec![Teardown {
+            chat_id: chat,
+            grace: StopGrace::Full,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -467,6 +529,7 @@ struct TestApp {
     address: SocketAddr,
     cookie: String,
     data_dir: TempDir,
+    plane: MemoryPlane,
     origin: TempDir,
     _server: JoinHandle<anyhow::Result<()>>,
     _shutdown: oneshot::Sender<()>,
@@ -496,10 +559,11 @@ impl TestApp {
             .prepare()
             .expect("the dataset should prepare, as serving does");
         let secrets = Arc::new(Secrets::from_config(&config));
+        let plane = MemoryPlane::default();
         let chats = Chats::new(
             &config,
             Owner::of(&config.data_dir).expect("we own the dataset we just made"),
-            MemoryPlane::default(),
+            plane.clone(),
             adapter,
             remotes,
             Arc::clone(&secrets),
@@ -518,6 +582,7 @@ impl TestApp {
             cookie: sign_in(address).await,
             address,
             data_dir,
+            plane,
             origin,
             _server: server,
             _shutdown: shutdown,
@@ -586,6 +651,25 @@ impl TestApp {
             .expect("request");
         assert_eq!(response.status(), StatusCode::OK, "{path} did not answer");
         response.text().await.expect("body")
+    }
+
+    /// Every container the plane behind this app stopped, in order.
+    fn teardowns(&self) -> Vec<Teardown> {
+        self.plane.teardowns()
+    }
+
+    /// Put a container under a chat that has none, the way a restarted core
+    /// finds one: running, and with no connection into it.
+    async fn spawn_container_for(&self, chat_id: &str) {
+        self.plane
+            .spawn(
+                chat_id,
+                &self.workspace(chat_id),
+                &self.chat_dir(chat_id).join("claude"),
+                &std::collections::BTreeMap::new(),
+            )
+            .await
+            .expect("a chat with no container should take one");
     }
 
     fn workspace(&self, chat_id: &str) -> PathBuf {

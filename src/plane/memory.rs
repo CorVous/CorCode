@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::{ContainerPlane, ContainerRef, PlaneError, ScriptRun};
+use super::{ContainerPlane, ContainerRef, PlaneError, ScriptRun, StopGrace};
 use crate::store::ContainerLiveness;
 
 /// The two directories a chat's container was asked to bind (ADR-0006), in
@@ -26,8 +26,18 @@ pub struct Mounts {
 pub struct MemoryPlane {
     live: Arc<Mutex<HashMap<String, Spawned>>>,
     scripts: Arc<Mutex<Vec<StartupRun>>>,
+    torn_down: Arc<Mutex<Vec<Teardown>>>,
     outcome: Arc<Mutex<ScriptRun>>,
     daemon_down: Arc<AtomicBool>,
+}
+
+/// One container this plane stopped, kept so a test can read the grace the
+/// daemon would have been asked to wait (issue #40). A teardown that found
+/// no container stopped nothing and is not one of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Teardown {
+    pub chat_id: String,
+    pub grace: StopGrace,
 }
 
 /// One startup script this plane was asked to run, kept so a test can read what
@@ -109,13 +119,21 @@ impl ContainerPlane for MemoryPlane {
             .clone())
     }
 
-    async fn teardown(&self, chat_id: &str) -> Result<(), PlaneError> {
-        self.live()
-            .remove(chat_id)
-            .map(|_| ())
-            .ok_or_else(|| PlaneError::NotLive {
+    async fn teardown(&self, chat_id: &str, grace: StopGrace) -> Result<(), PlaneError> {
+        let stopped = self.live().remove(chat_id);
+        if stopped.is_none() {
+            return Err(PlaneError::NotLive {
                 chat_id: chat_id.to_owned(),
-            })
+            });
+        }
+        self.torn_down
+            .lock()
+            .expect("no holder of the lock panics")
+            .push(Teardown {
+                chat_id: chat_id.to_owned(),
+                grace,
+            });
+        Ok(())
     }
 
     async fn list_live(&self) -> Result<HashSet<String>, PlaneError> {
@@ -166,6 +184,15 @@ impl MemoryPlane {
     #[must_use]
     pub fn startup_runs(&self) -> Vec<StartupRun> {
         self.scripts
+            .lock()
+            .expect("no holder of the lock panics")
+            .clone()
+    }
+
+    /// Every container this plane stopped, in the order it stopped them.
+    #[must_use]
+    pub fn teardowns(&self) -> Vec<Teardown> {
+        self.torn_down
             .lock()
             .expect("no holder of the lock panics")
             .clone()
@@ -257,7 +284,7 @@ mod tests {
         spawn(&plane, "01K1SECONDCHAT0000000000").await;
 
         plane
-            .teardown("01K1FIRSTCHAT00000000000")
+            .teardown("01K1FIRSTCHAT00000000000", StopGrace::Full)
             .await
             .expect("live chat should tear down");
 
@@ -293,7 +320,7 @@ mod tests {
         let plane = MemoryPlane::default();
 
         let error = plane
-            .teardown("01K1TESTCHATID0000000000")
+            .teardown("01K1TESTCHATID0000000000", StopGrace::Full)
             .await
             .expect_err("tearing down nothing should fail");
 

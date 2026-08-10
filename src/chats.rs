@@ -15,7 +15,9 @@ use crate::acp::{AcpError, AcpTransport, Adapter, Connection, Connections, Held,
 use crate::config::Config;
 use crate::failure::with_causes;
 use crate::git::{self, Remotes};
-use crate::plane::{ContainerPlane, PlaneError, ScriptRun, container_name, managed_default_mode};
+use crate::plane::{
+    ContainerPlane, PlaneError, ScriptRun, StopGrace, container_name, managed_default_mode,
+};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
 use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
@@ -668,15 +670,20 @@ where
     /// Park one chat: the container goes, the workspace and the agent's
     /// memory stay where they are, and nothing at all is committed
     /// (ADR-0002 rule 2, ADR-0005).
+    ///
+    /// Every eviction stops with no grace, an idle adapter in the container
+    /// included: PID 1 never passed the signal on, so the grace only ever
+    /// bought the capping request wall-clock ahead of the same kill (#40).
     async fn park(&self, chat_id: &str) {
-        self.release(chat_id, "parked, workspace kept").await;
+        self.release(chat_id, "parked, workspace kept", StopGrace::Zero)
+            .await;
     }
 
-    /// Give a chat's container up. What is left on disk is the caller's to
-    /// decide: parking keeps the workspace, the archive gate deletes it once
-    /// everything in it is on the remote.
-    async fn release(&self, chat_id: &str, why: &str) {
-        match self.plane.teardown(chat_id).await {
+    /// Give a chat's container up under `grace`. What is left on disk is the
+    /// caller's to decide: parking keeps the workspace, the archive gate
+    /// deletes it once everything in it is on the remote.
+    async fn release(&self, chat_id: &str, why: &str, grace: StopGrace) {
+        match self.plane.teardown(chat_id, grace).await {
             Ok(()) => {
                 self.connections.forget(chat_id);
                 info!("{chat_id} {why}: container torn down");
@@ -696,6 +703,10 @@ where
     /// The turn lock is held throughout: the gate commits and then deletes the
     /// whole working tree, which is the one thing that must never happen under
     /// an agent that is writing into it.
+    ///
+    /// A chat holding no connection has nothing in its container but the
+    /// keep-alive, so the stop asks for no grace and the archive costs the
+    /// request nothing (issue #40).
     pub async fn archive(&self, chat_id: &Ulid) -> Result<(), ArchiveError> {
         let chat_id = chat_id.to_string();
         let manifest = match self.store.read_manifest(&chat_id) {
@@ -726,10 +737,22 @@ where
                 ..manifest
             })
             .map_err(unarchived)?;
-        self.release(&chat_id, "archived").await;
+        self.release(&chat_id, "archived", self.grace_owed(&chat_id))
+            .await;
         self.store.remove_workspace(&chat_id).map_err(unarchived)?;
         self.sweep().await;
         Ok(())
+    }
+
+    /// What a chat's container is owed when it goes down: one the chat is
+    /// still holding a connection to has an adapter in it, one that is parked
+    /// has nothing but its keep-alive (issue #40).
+    fn grace_owed(&self, chat_id: &str) -> StopGrace {
+        if self.connections.of(chat_id).is_some() {
+            StopGrace::Full
+        } else {
+            StopGrace::Zero
+        }
     }
 
     /// Take the chat's connection for as long as the caller keeps what comes
@@ -965,7 +988,8 @@ where
             Ok(climbed) => Ok(climbed),
             Err(failure) => {
                 if housing.spawned {
-                    self.release(chat_id, "woken but out of reach").await;
+                    self.release(chat_id, "woken but out of reach", StopGrace::Full)
+                        .await;
                 }
                 Err(failure.into())
             }
@@ -1181,7 +1205,7 @@ where
                 Ok(chat_id)
             }
             Err(failure) => {
-                if let Err(stubborn) = self.plane.teardown(&chat_id).await {
+                if let Err(stubborn) = self.plane.teardown(&chat_id, StopGrace::Full).await {
                     warn!(
                         "{}",
                         stubborn_teardown(&chat_id, "never opened a session", &stubborn)

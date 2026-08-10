@@ -14,7 +14,7 @@ use serde_json::Value;
 
 pub use docker::{DockerPlane, PlaneSettings};
 pub use error::PlaneError;
-pub use memory::{MemoryPlane, Mounts, StartupRun};
+pub use memory::{MemoryPlane, Mounts, StartupRun, Teardown};
 
 const NAME_PREFIX: &str = "corcode-chat-";
 
@@ -54,6 +54,18 @@ pub fn container_name(chat_id: &str) -> String {
 pub struct ScriptRun {
     pub output: String,
     pub exit_code: i64,
+}
+
+/// How long a stop waits before the daemon kills what is in a container
+/// (issue #40).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopGrace {
+    /// A live container: whatever the chat is still talking to gets every
+    /// second the plane allows to finish.
+    Full,
+    /// A parked container: PID 1 is a keep-alive over a bind-mounted
+    /// workspace, so there is nothing in it to wait for.
+    Zero,
 }
 
 /// A chat's live workspace container.
@@ -98,8 +110,13 @@ pub trait ContainerPlane {
         env: &BTreeMap<String, String>,
     ) -> impl Future<Output = Result<ScriptRun, PlaneError>> + Send;
 
-    /// Stop and remove a chat's container, leaving its dirs alone.
-    fn teardown(&self, chat_id: &str) -> impl Future<Output = Result<(), PlaneError>> + Send;
+    /// Stop and remove a chat's container, leaving its dirs alone. `grace`
+    /// says how long the stop waits for what is inside it.
+    fn teardown(
+        &self,
+        chat_id: &str,
+        grace: StopGrace,
+    ) -> impl Future<Output = Result<(), PlaneError>> + Send;
 
     /// The chats that own a running container right now.
     fn list_live(&self) -> impl Future<Output = Result<HashSet<String>, PlaneError>> + Send;
