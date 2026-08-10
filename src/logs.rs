@@ -28,14 +28,17 @@ impl LoggedLines {
         }
     }
 
-    /// The level of the first line that says `saying`, or nothing where no
-    /// line said it.
+    /// The quietest level anything saying `saying` went out at, or nothing
+    /// where no line said it. The quietest, because a pin asks whether the
+    /// site is loud enough for a deployment to hear: one demoted line is a
+    /// silent site, whatever some louder line saying the same thing does.
     #[must_use]
-    pub fn level_of(&self, saying: &str) -> Option<Level> {
+    pub fn quietest_level_of(&self, saying: &str) -> Option<Level> {
         self.held()
             .iter()
-            .find(|(_, line)| line.contains(saying))
+            .filter(|(_, line)| line.contains(saying))
             .map(|(level, _)| *level)
+            .max()
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Vec<(Level, String)>> {
@@ -60,7 +63,7 @@ static CAPTURED: LoggedLines = LoggedLines::new();
 static INSTALLED: Once = Once::new();
 
 /// The lines this process logs, capturing them from the first call onwards.
-pub fn logged_lines() -> &'static LoggedLines {
+pub fn capturing_lines() -> &'static LoggedLines {
     INSTALLED.call_once(|| {
         log::set_logger(&CAPTURED).expect("nothing else logs in a process that captures");
         log::set_max_level(LevelFilter::Trace);
@@ -74,18 +77,36 @@ mod tests {
 
     #[test]
     fn a_line_is_read_back_at_the_level_it_was_logged_at() {
-        let logged = logged_lines();
+        let capture = capturing_lines();
 
         log::warn!("the capture reads this one back");
 
         assert_eq!(
-            logged.level_of("the capture reads this one back"),
+            capture.quietest_level_of("the capture reads this one back"),
             Some(Level::Warn)
+        );
+    }
+
+    /// A pin reads whichever line is quietest, so a site demoted behind a
+    /// louder line that says the same thing is still caught.
+    #[test]
+    fn a_demoted_line_is_not_masked_by_a_louder_one_saying_the_same_thing() {
+        let capture = capturing_lines();
+
+        log::warn!("two sites say this one");
+        log::debug!("two sites say this one");
+
+        assert_eq!(
+            capture.quietest_level_of("two sites say this one"),
+            Some(Level::Debug)
         );
     }
 
     #[test]
     fn a_line_nobody_logged_has_no_level_at_all() {
-        assert_eq!(logged_lines().level_of("nothing says this"), None);
+        assert_eq!(
+            capturing_lines().quietest_level_of("nothing says this"),
+            None
+        );
     }
 }

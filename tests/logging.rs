@@ -20,7 +20,7 @@ use cor_code::config::{
     Config, DEFAULT_CONTAINER_CPUS, DEFAULT_CONTAINER_MEMORY_MB, DEFAULT_SCRATCH_MB,
 };
 use cor_code::git::Remotes;
-use cor_code::logs::logged_lines;
+use cor_code::logs::capturing_lines;
 use cor_code::plane::MemoryPlane;
 use cor_code::secrets::Secrets;
 use cor_code::store::{ChatStore, Owner};
@@ -39,7 +39,7 @@ const GARBLED: &str = "Error: EACCES: permission denied";
 /// this line (issue #66).
 #[tokio::test]
 async fn a_line_that_is_not_json_rpc_reaches_the_operator_as_a_warning() {
-    let logged = logged_lines();
+    let logged = capturing_lines();
     let adapter = Adapter::new(Garbling);
 
     adapter
@@ -48,7 +48,7 @@ async fn a_line_that_is_not_json_rpc_reaches_the_operator_as_a_warning() {
         .expect("the garbling adapter still answers every call it is sent");
 
     assert_eq!(
-        logged.level_of("adapter said something that is not json-rpc"),
+        logged.quietest_level_of("adapter said something that is not json-rpc"),
         Some(Level::Warn),
         "src/acp/mod.rs: a wedged adapter below WARN is a wedged adapter nobody hears about"
     );
@@ -58,7 +58,7 @@ async fn a_line_that_is_not_json_rpc_reaches_the_operator_as_a_warning() {
 /// line has to be one a deployment reads (issue #66).
 #[tokio::test]
 async fn a_dropped_adapter_connection_reaches_the_operator_as_a_warning() {
-    let logged = logged_lines();
+    let logged = capturing_lines();
     let dataset = Dataset::of(ScriptedAdapter::dying_mid_turn(SESSION, &[]));
     let chat = dataset.create("dropped").await;
 
@@ -68,7 +68,7 @@ async fn a_dropped_adapter_connection_reaches_the_operator_as_a_warning() {
         .expect_err("this adapter dies mid turn");
 
     assert_eq!(
-        logged.level_of("dropped its adapter connection"),
+        logged.quietest_level_of("dropped its adapter connection"),
         Some(Level::Warn),
         "src/chats.rs: a connection lost below WARN is the silent core of issue #66"
     );

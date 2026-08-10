@@ -144,7 +144,7 @@ mod tests {
     use log::Level;
 
     use super::*;
-    use crate::logs::logged_lines;
+    use crate::logs::capturing_lines;
 
     #[test]
     fn a_line_that_is_not_text_is_logged_with_where_the_bytes_went_wrong() {
@@ -165,13 +165,13 @@ mod tests {
     /// deployment reads warnings (issue #84).
     #[tokio::test]
     async fn a_line_that_is_not_text_reaches_the_operator_as_a_warning() {
-        let logged = logged_lines();
+        let logged = capturing_lines();
         let mut channel = channel_reading(&[b"{\"id\":\xff}\n"]);
 
         channel.receive().await.expect_err("that stream ends");
 
         assert_eq!(
-            logged.level_of("carried a line that is not utf-8"),
+            logged.quietest_level_of("carried a line that is not utf-8"),
             Some(Level::Warn),
             "src/acp/docker.rs: an undecodable line below WARN is one the deployed core never says"
         );
@@ -181,13 +181,13 @@ mod tests {
     /// `RUST_LOG=info`, not worth warning a deployment about (issue #84).
     #[tokio::test]
     async fn the_adapters_own_stderr_is_forwarded_as_chatter_rather_than_a_warning() {
-        let logged = logged_lines();
+        let logged = capturing_lines();
         let mut channel = channel_hearing(b"npm notice: a new version is out");
 
         channel.receive().await.expect_err("that stream ends");
 
         assert_eq!(
-            logged.level_of("adapter stderr: npm notice"),
+            logged.quietest_level_of("adapter stderr: npm notice"),
             Some(Level::Info),
             "src/acp/docker.rs: the adapter's stderr is forwarded at INFO"
         );
