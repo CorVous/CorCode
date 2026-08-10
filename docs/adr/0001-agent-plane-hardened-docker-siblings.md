@@ -89,6 +89,15 @@ whole deployment could quietly fall back to asking. Surfacing the session's
 mode — logged at open, or asserted in the docker-gated vertical — is the fix,
 and it is a core change this image increment did not make.
 
+**Closed ([#58](https://github.com/CorVous/CorCode/issues/58)).** The core
+reads `modes.currentModeId` from the `session/new` and `session/load` answers,
+logs it at open, and writes a `mode_notice` into the chat's own log (ADR-0006)
+when it is not the mode the baked managed settings ask for — which is the one
+place the core reads that mode from, so the file the image ships stays the
+only place it is written down. An adapter that names no mode is a case, not a
+fault: nothing is known, so nothing is claimed. The docker-gated vertical
+asserts a real session leaves no such notice behind.
+
 ## Consequences
 
 - Simplest possible MVP: one runtime, no new infra, the socket the core

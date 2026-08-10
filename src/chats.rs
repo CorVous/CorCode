@@ -15,7 +15,7 @@ use crate::acp::{AcpError, AcpTransport, Adapter, Connection, Connections, Held,
 use crate::config::Config;
 use crate::failure::with_causes;
 use crate::git::{self, Remotes};
-use crate::plane::{ContainerPlane, PlaneError, ScriptRun, container_name};
+use crate::plane::{ContainerPlane, PlaneError, ScriptRun, container_name, managed_default_mode};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
 use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
@@ -151,6 +151,24 @@ const RESET_NOTICE: &str = "reset_notice";
 
 /// What a prompt that never got as far as an agent calls itself there.
 const WAKE_FAILURE: &str = "wake_failure";
+
+/// What a session running in a mode nobody asked for calls itself in a chat's
+/// log (ADR-0006, issue #58).
+const MODE_NOTICE: &str = "mode_notice";
+
+/// What the chat is told when its session opened in some other mode than the
+/// one the image's managed settings ask for: the adapter clamps a mode the
+/// model will not take and says so nowhere the operator can see, and a chat
+/// clamped into asking declines every ask and reads as a mute agent
+/// (ADR-0001).
+fn clamped_mode(mode: &str) -> String {
+    format!(
+        "This session opened in permission mode {mode}, not the {} this deployment asks for. \
+         The agent may ask before acting, and every such ask is declined, \
+         so it can look as though it is doing nothing.",
+        managed_default_mode(),
+    )
+}
 
 /// What a startup script's outcome calls itself in a chat's log (issue #14).
 const STARTUP_SCRIPT: &str = "startup_script";
@@ -722,6 +740,19 @@ where
         self.note(chat_id, REFUSAL, &format!("Prompt not sent: {refusal}."));
     }
 
+    /// Say in the chat's log when its session runs in some mode other than the
+    /// one this deployment asks for. A session whose adapter names no mode
+    /// says nothing: an unknown mode is not a wrong one.
+    fn note_the_mode(&self, chat_id: &str, connection: &Connection<T::Channel>) {
+        let clamped = connection
+            .current_mode()
+            .filter(|mode| *mode != managed_default_mode());
+        if let Some(mode) = clamped {
+            warn!("{chat_id} opened a session in permission mode {mode}");
+            self.note(chat_id, MODE_NOTICE, &clamped_mode(mode));
+        }
+    }
+
     /// A line in the core's own voice in a chat's log, which is the only
     /// place the UI can say anything the agent did not (ADR-0006).
     fn note(&self, chat_id: &str, kind: &str, text: &str) {
@@ -793,6 +824,7 @@ where
             manifest
         };
         let climbed = self.climbed_in_a_container(chat_id, &remembered).await?;
+        self.note_the_mode(chat_id, &climbed.connection);
         if climbed.forgot_everything {
             self.store.write_manifest(&Manifest {
                 acp_session_id: Some(climbed.connection.session_id().to_owned()),
@@ -1147,6 +1179,7 @@ where
         container: &str,
     ) -> Result<(), CreateError> {
         let connection = self.adapter.open_session(container).await.map_err(broke)?;
+        self.note_the_mode(&manifest.chat_id, &connection);
         manifest.acp_session_id = Some(connection.session_id().to_owned());
         self.store.write_manifest(&manifest).map_err(broke)?;
         self.connections
