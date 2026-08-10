@@ -291,6 +291,31 @@ fn connection_lost(chat_id: &str, failure: &AcpError) -> String {
     )
 }
 
+/// What a turn that ended in a failure rather than an answer calls itself in
+/// the chat's own log (issue #65).
+const CONNECTION_LOST: &str = "connection_lost";
+
+/// What the chat is told when its turn ended in a failure: what went wrong,
+/// what became of the connection it went over, that the prompt can simply be
+/// put again, and that the agent is not necessarily idle — the container is
+/// still running whatever the turn was in the middle of.
+///
+/// Without this line the log ends at the prompt and the page shows a chat that
+/// is still thinking, for as long as the operator is willing to believe it
+/// (issue #65).
+fn turn_lost(failure: &AcpError) -> String {
+    let connection = if failure.spent_the_connection() {
+        "The connection to the agent was dropped"
+    } else {
+        "The connection to the agent is still open"
+    };
+    format!(
+        "The turn ended without an answer: {}. {connection}, so the prompt can be \
+         sent again. The agent may have kept working inside its container meanwhile.",
+        with_causes(failure)
+    )
+}
+
 /// `output` cut to the transcript's limit on a character boundary, marked when
 /// anything was dropped.
 fn truncated(output: &str) -> String {
@@ -863,6 +888,7 @@ where
     /// over: one the adapter spent is dropped, so the next prompt climbs
     /// ADR-0007's ladder rather than going over a pipe nobody is holding.
     fn ended(&self, chat_id: &str, failure: AcpError) -> PromptError {
+        self.note(chat_id, CONNECTION_LOST, &turn_lost(&failure));
         if failure.spent_the_connection() {
             warn!("{}", connection_lost(chat_id, &failure));
             self.connections.forget(chat_id);

@@ -139,6 +139,7 @@ Core-injected notices are the one payload that is not ACP. They carry a
 {"corcode": "wake_failure", "text": "..."}
 {"corcode": "push_failure", "text": "..."}
 {"corcode": "mode_notice", "text": "..."}
+{"corcode": "connection_lost", "text": "..."}
 ```
 
 `reset_notice` says where the agent's memory was cut. `permission_declined`
@@ -153,7 +154,11 @@ the chat is still open with its container up and can be archived again
 (ADR-0002 rule 3). `mode_notice` says the session opened in some other
 permission mode than the one the image's managed settings ask for, which is
 otherwise invisible: an agent clamped into asking has every ask declined and
-reads as a mute one (ADR-0001). All of them belong in the log because the log
+reads as a mute one (ADR-0001). `connection_lost` says a turn ended in a
+failure rather than an answer, what became of the connection it went over, and
+that the prompt can be put again: without it the log stops at the prompt and
+the page shows a chat that is still thinking (issue #65). All of them belong in
+the log because the log
 is the whole of what the chat page renders (ADR-0008); a status code the
 browser swallows tells the operator nothing.
 
