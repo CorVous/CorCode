@@ -106,6 +106,44 @@ async fn a_corrupt_event_log_surfaces_as_an_error_rather_than_a_gap() {
     app.stop().await;
 }
 
+/// A daemon that will not answer costs the live/parked grouping and nothing
+/// else: the chats are still on disk, and the operator is told why they are
+/// ungrouped (issue #25).
+#[tokio::test]
+async fn the_console_stands_while_the_container_daemon_is_down() {
+    let plane = MemoryPlane::default();
+    plane.take_the_daemon_down();
+    let app = TestApp::start_over(with_fixture_chat(), plane).await;
+
+    let body = app.body("/").await;
+
+    assert!(
+        body.contains("Container status unknown"),
+        "the console does not say the plane went quiet: {body}"
+    );
+    assert!(
+        body.contains("Resume ladder"),
+        "the open chat is not listed: {body}"
+    );
+    assert!(
+        status_details(&body).contains("list the workspace containers"),
+        "the daemon's own words are not in the status details: {body}"
+    );
+    app.stop().await;
+}
+
+/// What the status line holds when it is expanded.
+fn status_details(console: &str) -> &str {
+    let details = console
+        .split_once("<details id=\"status\"")
+        .expect("the console carries a status line")
+        .1;
+    details
+        .split_once("</details>")
+        .expect("the status line is closed")
+        .0
+}
+
 #[tokio::test]
 async fn the_chat_list_fragment_comes_back_without_the_page_around_it() {
     let app = TestApp::start(with_fixture_chat()).await;
