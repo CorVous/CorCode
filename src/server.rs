@@ -286,8 +286,8 @@ where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
     T: AcpTransport + Send + Sync + 'static,
 {
-    match chats.survey().await {
-        Ok(survey) => Html(ui::chat_list(&survey)).into_response(),
+    match chats.survey_or_unknown().await {
+        Ok(survey) => Html(ui::chat_list(&survey.chats, &survey.containers)).into_response(),
         Err(failure) => broken_invariant(&failure),
     }
 }

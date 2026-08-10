@@ -168,7 +168,10 @@ async fn a_prompt_still_fails_loudly_while_the_container_daemon_is_down() {
     let app = TestApp::start_over(data_dir, plane).await;
 
     let response = app
-        .post(&format!("/chats/{chat_id}/prompt"), &[("prompt", "ship it")])
+        .post(
+            &format!("/chats/{chat_id}/prompt"),
+            &[("prompt", "ship it")],
+        )
         .await;
 
     assert!(
