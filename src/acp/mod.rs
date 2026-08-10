@@ -1132,7 +1132,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_turn_the_adapter_never_ends_gives_up_rather_than_hangs() {
-        let adapter = Adapter::waiting(ScriptedAdapter::opening(SESSION), IMPATIENT);
+        let adapter = Adapter::waiting(ScriptedAdapter::never_ending_a_turn(SESSION), IMPATIENT);
         let mut connection = adapter
             .open_session(CONTAINER)
             .await

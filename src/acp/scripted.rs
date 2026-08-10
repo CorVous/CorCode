@@ -23,13 +23,16 @@ const PROMPT: &str = "session/prompt";
 /// does: no client may assume the next line is the one it is waiting for.
 const CHATTER: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}}"#;
 
-/// What the script says to one method. A method the script does not name is
-/// one the fake never answers.
+/// What the script says to one method.
+#[derive(Clone)]
 enum Answer {
     Result(Value),
     Refusal(String),
     /// A method this adapter has never heard of, answered as JSON-RPC says.
     Unheard,
+    /// A method this adapter takes and never answers, so that a client's
+    /// patience can be proved rather than assumed.
+    Silence,
 }
 
 /// What the fake answers to each method it knows.
@@ -81,6 +84,7 @@ enum Death {
 #[derive(Clone)]
 pub struct ScriptedAdapter {
     answers: Arc<Script>,
+    unscripted: Answer,
     asks: Arc<Vec<Value>>,
     replay: Arc<Vec<Value>>,
     updates: Arc<Vec<Value>>,
@@ -250,7 +254,19 @@ impl ScriptedAdapter {
     /// An adapter that starts and then says nothing at all.
     #[must_use]
     pub fn silent() -> Self {
-        Self::reading(Script::new())
+        Self {
+            unscripted: Answer::Silence,
+            ..Self::reading(Script::new())
+        }
+    }
+
+    /// An adapter that opens a session, takes a prompt and never ends the
+    /// turn, as one whose agent has wandered off does.
+    #[must_use]
+    pub fn never_ending_a_turn(session_id: &str) -> Self {
+        let mut script = working_script(session_id);
+        script.insert(PROMPT.to_owned(), Answer::Silence);
+        Self::reading(script)
     }
 
     /// An adapter whose start never finishes, as a wedged container's exec
@@ -289,6 +305,7 @@ impl ScriptedAdapter {
     fn reading(script: Script) -> Self {
         Self {
             answers: Arc::new(script),
+            unscripted: Answer::Unheard,
             asks: Arc::new(Vec::new()),
             replay: Arc::new(Vec::new()),
             updates: Arc::new(Vec::new()),
@@ -313,7 +330,8 @@ impl ScriptedAdapter {
 }
 
 /// What every scripted adapter answers before anything goes wrong: a
-/// handshake, a new session, and neither rung of ADR-0007's ladder.
+/// handshake and a new session. Neither rung of ADR-0007's ladder is in it, so
+/// an adapter that has not been given one has never heard of it.
 fn working_script(session_id: &str) -> Script {
     Script::from([
         (
@@ -327,8 +345,6 @@ fn working_script(session_id: &str) -> Script {
             NEW_SESSION.to_owned(),
             Answer::Result(json!({"sessionId": session_id})),
         ),
-        (RESUME_SESSION.to_owned(), Answer::Unheard),
-        (LOAD_SESSION.to_owned(), Answer::Unheard),
     ])
 }
 
@@ -363,6 +379,7 @@ impl AcpTransport for ScriptedAdapter {
         }
         Ok(ScriptedChannel {
             answers: Arc::clone(&self.answers),
+            unscripted: self.unscripted.clone(),
             asks: Arc::clone(&self.asks),
             replay: Arc::clone(&self.replay),
             updates: Arc::clone(&self.updates),
@@ -379,6 +396,7 @@ impl AcpTransport for ScriptedAdapter {
 /// One scripted conversation.
 pub struct ScriptedChannel {
     answers: Arc<Script>,
+    unscripted: Answer,
     asks: Arc<Vec<Value>>,
     replay: Arc<Vec<Value>>,
     updates: Arc<Vec<Value>>,
@@ -402,7 +420,8 @@ impl ScriptedChannel {
     }
 
     /// What the script says to `method`, unless this channel dies before it
-    /// gets there.
+    /// gets there. A method the script does not name is one this adapter has
+    /// never heard of, as a real one says rather than falling quiet.
     fn answer_to(&self, method: &str, id: &Value) -> Option<String> {
         let withheld = match self.death {
             Death::None => false,
@@ -412,7 +431,7 @@ impl ScriptedChannel {
         if withheld {
             return None;
         }
-        let answer = match self.answers.get(method)? {
+        let answer = match self.answers.get(method).unwrap_or(&self.unscripted) {
             Answer::Result(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
             Answer::Refusal(complaint) => {
                 json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32000, "message": complaint}})
@@ -422,6 +441,7 @@ impl ScriptedChannel {
                 "id": id,
                 "error": {"code": NO_SUCH_METHOD, "message": format!("no method {method}")},
             }),
+            Answer::Silence => return None,
         };
         Some(answer.to_string())
     }
