@@ -24,7 +24,9 @@ use cor_code::config::{
     DEFAULT_WARM_POOL,
 };
 use cor_code::git::Remotes;
-use cor_code::plane::{ContainerPlane, DockerPlane, PlaneError, PlaneSettings};
+use cor_code::plane::{
+    ContainerPlane, DockerPlane, PlaneError, PlaneSettings, managed_default_mode,
+};
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
@@ -42,6 +44,11 @@ const TRIVIAL: &str = "Reply with the single word: ready";
 
 /// The word the trivial prompt asks for, as the rendered log would hold it.
 const READY: &str = "ready";
+
+/// What the core calls a session running in a mode nobody asked for. The real
+/// adapter clamps the managed mode when its model will not take it, and this
+/// line is the only place that shows (ADR-0001, issue #58).
+const MODE_NOTICE: &str = "mode_notice";
 
 #[tokio::test]
 async fn the_real_adapter_opens_a_session_inside_a_hardened_container() {
@@ -81,6 +88,7 @@ struct Created {
     status: StatusCode,
     chat_id: Option<String>,
     manifest: Option<Value>,
+    notices: Vec<Value>,
     console: String,
 }
 
@@ -169,10 +177,15 @@ impl Serving {
                 .ok()
                 .and_then(|json| serde_json::from_str(&json).ok())
         });
+        let notices = chat_id
+            .as_deref()
+            .map(|chat_id| core_lines(self.data_dir.path(), chat_id))
+            .unwrap_or_default();
         Created {
             status,
             chat_id,
             manifest,
+            notices,
             console: self.body("/").await,
         }
     }
@@ -240,6 +253,16 @@ fn assert_created(created: &Created) {
         !session_id.is_empty(),
         "the adapter opened a session under no id"
     );
+    let clamped: Vec<&Value> = created
+        .notices
+        .iter()
+        .filter(|notice| notice["corcode"] == MODE_NOTICE)
+        .collect();
+    assert!(
+        clamped.is_empty(),
+        "the real session did not open in {}: {clamped:?}",
+        managed_default_mode()
+    );
     let console = &created.console;
     let live = console
         .find("<h2>Live</h2>")
@@ -290,6 +313,14 @@ fn events(data_dir: &Path, chat_id: &str) -> Vec<Value> {
             let event: Value = serde_json::from_str(line).expect("a line should be json");
             event["event"].clone()
         })
+        .collect()
+}
+
+/// The lines the core wrote in a chat's log in its own voice (ADR-0006).
+fn core_lines(data_dir: &Path, chat_id: &str) -> Vec<Value> {
+    events(data_dir, chat_id)
+        .into_iter()
+        .filter(|event| event["corcode"].is_string())
         .collect()
 }
 

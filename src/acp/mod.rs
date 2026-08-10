@@ -228,13 +228,6 @@ impl<C: AcpChannel> Greeting<C> {
         Ok(session_id)
     }
 
-    /// The permission mode the session this greeting last reached is in, where
-    /// the adapter named one.
-    #[must_use]
-    pub fn current_mode(&self) -> Option<&str> {
-        self.current_mode.as_deref()
-    }
-
     /// Take down what `session` says about the mode it is in, and say it out
     /// loud: the adapter clamps a mode its model cannot honour and tells
     /// nobody but its own stderr, so this line is where a clamped session
