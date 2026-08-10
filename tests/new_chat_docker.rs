@@ -6,11 +6,11 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::Arc;
 
 use argon2::password_hash::{PasswordHasher as _, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
-use log::{LevelFilter, Log, Metadata, Record};
+use log::Level;
 use reqwest::{Client, StatusCode, redirect::Policy};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -25,6 +25,7 @@ use cor_code::config::{
     DEFAULT_WARM_POOL,
 };
 use cor_code::git::Remotes;
+use cor_code::logs::capturing_lines;
 use cor_code::plane::{
     ContainerPlane, DockerPlane, PlaneError, PlaneSettings, StopGrace, managed_default_mode,
 };
@@ -113,7 +114,7 @@ struct Serving {
 
 impl Serving {
     async fn start(deployment: &Deployment) -> Self {
-        capture_the_log();
+        capturing_lines();
         let data_dir = TempDir::new().expect("temp dir should be creatable");
         let (origin, remotes) = seeded_repository();
         let config = test_config(data_dir.path().to_path_buf(), deployment);
@@ -256,9 +257,10 @@ fn assert_created(created: &Created) {
         "the adapter opened a session under no id"
     );
     assert_eq!(
-        logged_mode_of(session_id).as_deref(),
-        Some(managed_default_mode()),
-        "the real adapter named no mode this build could read, or named another one"
+        logged_mode_of(session_id),
+        Some((Level::Info, managed_default_mode().to_owned())),
+        "the real adapter named no mode this build could read, named another one, \
+         or the core said so too quietly for a deployment to hear"
     );
     let clamped: Vec<&Value> = created
         .notices
@@ -322,49 +324,21 @@ fn events(data_dir: &Path, chat_id: &str) -> Vec<Value> {
         .collect()
 }
 
-/// Everything the core logged in this process. The mode a session opened in
-/// is written down nowhere — a notice only says when it was the wrong one —
-/// so the log is where this suite reads it, and reading it is the whole of
-/// what proves the answer's field is still the one the core parses.
-static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-struct Capture;
-
-impl Log for Capture {
-    fn enabled(&self, _: &Metadata<'_>) -> bool {
-        true
-    }
-
-    fn log(&self, record: &Record<'_>) {
-        LOGGED
-            .lock()
-            .expect("no holder of the lock panics")
-            .push(record.args().to_string());
-    }
-
-    fn flush(&self) {}
-}
-
-/// Keep what the core logs from here on. Every test in this binary shares the
-/// one logger the process may have, so the first to ask installs it.
-fn capture_the_log() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        log::set_logger(&Capture).expect("nothing else logs in this suite");
-        log::set_max_level(LevelFilter::Info);
-    });
-}
-
-/// The permission mode the core logged `session_id` as being in, where it
-/// logged one at all.
-fn logged_mode_of(session_id: &str) -> Option<String> {
-    LOGGED
-        .lock()
-        .expect("no holder of the lock panics")
-        .iter()
-        .filter(|line| line.contains(session_id))
-        .find_map(|line| line.split_once(OPENED_IN))
-        .map(|(_, mode)| mode.trim().to_owned())
+/// The permission mode the core logged `session_id` as being in and how loud
+/// it said so, where it logged one at all.
+///
+/// The mode a session opened in is written down nowhere — a notice only says
+/// when it was the wrong one — so the log is where this suite reads it, and
+/// reading it is the whole of what proves the answer's field is still the one
+/// the core parses.
+fn logged_mode_of(session_id: &str) -> Option<(Level, String)> {
+    capturing_lines()
+        .lines_saying(session_id)
+        .into_iter()
+        .find_map(|(level, line)| {
+            line.split_once(OPENED_IN)
+                .map(|(_, mode)| (level, mode.trim().to_owned()))
+        })
 }
 
 /// The lines the core wrote in a chat's log in its own voice (ADR-0006).

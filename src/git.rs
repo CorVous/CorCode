@@ -875,6 +875,7 @@ fn answers<S: AsRef<OsStr>>(doing: &str, args: &[S]) -> Result<bool, GitError> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -882,6 +883,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::logs::capturing_lines;
 
     const TOKEN: &str = "ghs-clone-secret";
     const ROTATED: &str = "ghs-rotated-secret";
@@ -1402,6 +1404,62 @@ mod tests {
             CHAT_BRANCH,
             "the workspace was left standing on the checkpoint branch"
         );
+    }
+
+    /// A checkpoint that stays behind is only ever mentioned here, and a
+    /// rollback the operator cannot read is a branch nobody knows to go and
+    /// look for (issue #81). Which branch, and what git said of it, are both
+    /// the call site's to carry: the line is built for it and nothing else.
+    ///
+    /// A git that refused says why in its own summary, so this shape of
+    /// failure has no cause under it to lose. The cause chain itself is
+    /// pinned where the line is built, over the git that never ran at all.
+    #[test]
+    fn a_checkpoint_that_would_not_roll_back_reaches_the_operator_with_gits_complaint() {
+        let logged = capturing_lines();
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+        jam_the_index_on_push(&workspace);
+
+        push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect_err("a push the hook refuses should fail");
+
+        let stranded = only_checkpoint_in(&workspace);
+        let warned = logged.lines_saying(&format!("{stranded} could not be rolled back"));
+        assert!(
+            warned.iter().any(|(_, line)| line.contains(JAMMED_INDEX)),
+            "src/git.rs: the rollback's warning reached the operator without the branch it \
+             stranded or without git's own words for why: {warned:?}"
+        );
+    }
+
+    /// What git says of a tree whose index it cannot take.
+    const JAMMED_INDEX: &str = "index.lock";
+
+    /// The checkpoint branch a failed rollback left in `workspace`.
+    fn only_checkpoint_in(workspace: &Path) -> String {
+        let stranded = git_says(
+            workspace,
+            &["branch", "--list", "*chkpt*", "--format=%(refname:short)"],
+        );
+        assert!(
+            !stranded.is_empty(),
+            "a rollback that failed leaves its checkpoint branch behind"
+        );
+        stranded
+    }
+
+    /// Leave `workspace` with a push that fails and an index no command can
+    /// take afterwards, which is a checkpoint git will not roll back.
+    fn jam_the_index_on_push(workspace: &Path) {
+        let hook = workspace.join(".git").join("hooks").join("pre-push");
+        let lock = workspace.join(".git").join("index.lock");
+        std::fs::write(&hook, format!(": > {}\nexit 1\n", lock.display()))
+            .expect("a hook should be writable");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("a hook should be runnable");
     }
 
     #[test]

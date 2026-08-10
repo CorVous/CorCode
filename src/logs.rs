@@ -34,11 +34,23 @@ impl LoggedLines {
     /// silent site, whatever some louder line saying the same thing does.
     #[must_use]
     pub fn quietest_level_of(&self, saying: &str) -> Option<Level> {
+        self.lines_saying(saying)
+            .into_iter()
+            .map(|(level, _)| level)
+            .max()
+    }
+
+    /// Every line saying `saying`, in the order the sites logged them, each
+    /// with the level it went out at. A pin on wording reads the line itself:
+    /// what a site named — a session's mode, a failure's causes — is only in
+    /// the words it logged.
+    #[must_use]
+    pub fn lines_saying(&self, saying: &str) -> Vec<(Level, String)> {
         self.held()
             .iter()
             .filter(|(_, line)| line.contains(saying))
-            .map(|(level, _)| *level)
-            .max()
+            .cloned()
+            .collect()
     }
 
     fn held(&self) -> std::sync::MutexGuard<'_, Vec<(Level, String)>> {
@@ -99,6 +111,23 @@ mod tests {
         assert_eq!(
             capture.quietest_level_of("two sites say this one"),
             Some(Level::Debug)
+        );
+    }
+
+    /// A pin on wording reads the line itself: what a site said is as much
+    /// the pin's business as how loud it said it.
+    #[test]
+    fn a_line_is_read_back_whole_so_a_caller_can_take_what_it_said_out_of_it() {
+        let capture = capturing_lines();
+
+        log::info!("session 41 is in permission mode acceptEdits");
+
+        assert_eq!(
+            capture.lines_saying("session 41"),
+            vec![(
+                Level::Info,
+                "session 41 is in permission mode acceptEdits".to_owned()
+            )]
         );
     }
 
