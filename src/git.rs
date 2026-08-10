@@ -1054,12 +1054,27 @@ mod tests {
     /// Two archives of one chat a few seconds apart must not name the same
     /// branch: the second push would be refused as a non-fast-forward.
     #[test]
-    fn a_checkpoint_branch_is_stamped_to_the_second() {
+    fn a_checkpoint_branch_is_named_after_the_chat_and_the_moment() {
         let stamp = Utc::now().format("%Y%m%dT%H%M%S");
+        let checkpoint = checkpoint_branch(CHAT_BRANCH);
+
+        assert!(
+            checkpoint.starts_with(&format!("{CHAT_BRANCH}-chkpt-{stamp}")),
+            "the checkpoint branch does not read as the chat's, at this second: {checkpoint}"
+        );
+    }
+
+    /// A refused push is retried at once: two checkpoints of one chat within
+    /// the same second must still name two branches.
+    #[test]
+    fn checkpoints_minted_back_to_back_are_named_apart() {
+        let names: Vec<String> = (0..100).map(|_| checkpoint_branch(CHAT_BRANCH)).collect();
+        let distinct: std::collections::HashSet<&String> = names.iter().collect();
 
         assert_eq!(
-            checkpoint_branch(CHAT_BRANCH),
-            format!("{CHAT_BRANCH}-chkpt-{stamp}")
+            distinct.len(),
+            names.len(),
+            "checkpoints minted back to back collided: {names:?}"
         );
     }
 
