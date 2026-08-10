@@ -139,11 +139,25 @@ fn half_pushed(failure: &git::PushFailure) -> String {
     )
 }
 
+/// What the chat's log is told when the remote would not take its branch and
+/// the work went onto a rescue branch instead (issue #50). The archive is
+/// done; this is the only place the operator can read where their work is.
+fn rescued(branch: &str, rescue: &str) -> String {
+    format!(
+        "The remote would not take {branch}, so this chat's work was pushed to {rescue} instead. \
+         Nothing on {branch} was overwritten: what the remote has there still stands."
+    )
+}
+
 /// What a refusal calls itself in a chat's own log (ADR-0006).
 const REFUSAL: &str = "refusal";
 
 /// What an archive that got nothing onto the remote calls itself there.
 const PUSH_FAILURE: &str = "push_failure";
+
+/// What an archive that had to put the chat's work somewhere else calls itself
+/// there (issue #50).
+const RESCUE_BRANCH: &str = "rescue_branch";
 
 /// What waking a chat costs it calls itself in its log: memory the agent could
 /// not get back, or a workspace that came back as a fresh clone (ADR-0006).
@@ -615,6 +629,9 @@ where
                 return Err(ArchiveError::NotPushed(failure.into()));
             }
         };
+        if let Some(rescue) = &pushed.rescue_branch {
+            self.note(&chat_id, RESCUE_BRANCH, &rescued(&manifest.branch, rescue));
+        }
         self.store
             .write_manifest(&Manifest {
                 state: ChatState::Archived,

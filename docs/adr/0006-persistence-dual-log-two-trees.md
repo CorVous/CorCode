@@ -214,6 +214,20 @@ A poll that names no cursor, or one this build cannot read — garbled, empty,
 or given twice — is answered with the whole render rather than an error. A
 section whose cursor has gone wrong therefore heals into a resync.
 
+## Amendment (2026-08-09): `rescue_branch`, a core line of its own
+
+```json
+{"corcode": "rescue_branch", "text": "..."}
+```
+
+`rescue_branch` says the remote would not take the chat's own branch —
+protected, or moved on under the chat — so the archive pushed the same work
+once more under a `chat/<name>-rescue-<timestamp>` name and finished (issue
+#50, ruled 2026-08-07). It is not a `push_failure`: the archive is done and
+the chat is closed. The line exists because the log is the only place the
+operator can read where their work went. Nothing was forced, so what the
+remote holds on the chat's branch still stands.
+
 ## Consequences
 
 - ADR-0002's "transcript flushed" step in park/close is a no-op — no buffered
