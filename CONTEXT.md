@@ -17,7 +17,7 @@ Code. Decisions live in `docs/adr/`; this file holds the vocabulary.
   the UI lists. States: `open` or `archived` (ADR-0002, ADR-0006).
 - **Session** — the ACP conversation inside a chat, identified by the
   adapter's session id (`acp_session_id`). Resumed via
-  `resumeSession`/`session/load`. A session is not a container (ADR-0002).
+  `session/resume`/`session/load`. A session is not a container (ADR-0002).
 - **Workspace** — the git clone a chat's agent works in: a dir under
   `workspaces/<chat-id>/` on the NAS, bind-mounted at the fixed container
   path `/workspace`. Exists iff the chat is open (ADR-0002, ADR-0006).
@@ -45,7 +45,7 @@ Code. Decisions live in `docs/adr/`; this file holds the vocabulary.
   `session/load`; the core never parses it (ADR-0006).
 - **Reconnect ladder** — the ordered attempts to restore agent memory when a
   prompt hits a chat with no live ACP connection:
-  `resumeSession` → `session/load` → `session/new` + reset notice. Replay
+  `session/resume` → `session/load` → `session/new` + reset notice. Replay
   during `session/load` is display-silent — it never feeds the events log
   (ADR-0007).
 - **Reset notice** — the automated context line the core injects before the
