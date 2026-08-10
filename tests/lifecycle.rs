@@ -398,6 +398,52 @@ async fn a_dirty_chat_the_remote_refuses_is_checkpointed_and_rescued_at_once() {
     assert_eq!(app.origin_says(&["rev-parse", &rescue]), semantic);
 }
 
+/// The checkpoint is pushed first, so a gate that stops on the chat's own
+/// branch stops with the checkpoint already on the remote. The retry commits
+/// the same work again — a commit of its own, cut a moment later — and has to
+/// close the chat on the checkpoint branch already holding it: one checkpoint
+/// on the remote however often the operator tries (issue #99).
+#[tokio::test]
+async fn an_archive_retried_after_its_checkpoint_landed_mints_no_second_checkpoint() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+    app.refuse_the_chat_branch();
+    let stopped = app.archive(&chat).await;
+    assert!(
+        stopped.status().is_server_error(),
+        "a half-finished archive answered {}",
+        stopped.status()
+    );
+    let landed = app.checkpoint_branches();
+    assert_eq!(
+        landed.len(),
+        1,
+        "the archive that failed did not leave a checkpoint behind: {landed:?}"
+    );
+
+    app.allow_the_chat_branch();
+    let retried = app.archive(&chat).await;
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    assert_eq!(
+        app.checkpoint_branches(),
+        landed,
+        "the retry did not close the chat on the checkpoint its work was already on"
+    );
+    assert_eq!(
+        app.manifest(&chat)["checkpoint_branch"],
+        landed[0],
+        "the manifest does not name the checkpoint the work in flight is on"
+    );
+    assert_eq!(
+        app.origin_says(&["show", &format!("{}:scratch.txt", landed[0])]),
+        "work in flight",
+        "the checkpoint the chat was closed on does not carry the work in flight"
+    );
+}
+
 /// The rescue can land and the archive fail after it, on the manifest write.
 /// The retry finds the chat's work already rescued and says so: one rescue
 /// branch on the remote however often the operator tries (issue #82).
@@ -977,9 +1023,19 @@ impl TestApp {
 
     /// Every rescue branch the remote carries, in the order it lists them.
     fn rescue_branches(&self) -> Vec<String> {
+        self.branches_marked("-rescue-")
+    }
+
+    /// Every checkpoint branch the remote carries, in the order it lists them.
+    fn checkpoint_branches(&self) -> Vec<String> {
+        self.branches_marked("-chkpt-")
+    }
+
+    /// The branches the remote carries that this core minted for `mark`.
+    fn branches_marked(&self, mark: &str) -> Vec<String> {
         self.origin_branches()
             .into_iter()
-            .filter(|branch| branch.contains("-rescue-"))
+            .filter(|branch| branch.contains(mark))
             .collect()
     }
 
