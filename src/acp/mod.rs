@@ -45,9 +45,9 @@ const SESSION_UPDATE: &str = "session/update";
 const REPLAY_TAIL: Duration = Duration::from_millis(100);
 
 /// The cheapest way back into a session: the adapter's own state restored,
-/// with nothing replayed to us (ADR-0007 rung 1). The method is unstable, so
-/// an adapter that has never heard of it is a case, not a fault.
-const RESUME_SESSION: &str = "unstable_resumeSession";
+/// with nothing replayed to us (ADR-0007 rung 1). Not every adapter offers it,
+/// so one that has never heard of it is a case, not a fault.
+const RESUME_SESSION: &str = "session/resume";
 
 /// The whole transcript replayed as notifications and then answered, which is
 /// how an adapter that cannot resume remembers instead (rung 2).
@@ -615,7 +615,7 @@ mod tests {
             Some(&json!({
                 "jsonrpc": "2.0",
                 "id": 2,
-                "method": "unstable_resumeSession",
+                "method": "session/resume",
                 "params": {"sessionId": SESSION, "cwd": "/workspace", "mcpServers": []},
             }))
         );

@@ -9,7 +9,8 @@ Wayfinder: [decision #9](https://github.com/CorVous/CorCode/issues/9)
 Chats outlive containers (ADR-0002) and the UI renders any chat from
 `events.jsonl` without one (ADR-0006), so "reading a chat" and "resuming a
 session" are separable acts. The ACP research (issue #3) gives two memory
-restoration paths — `unstable_resumeSession` (cheap, no replay) and
+restoration paths — `session/resume` (cheap, no replay; named
+`methods.agent.session.resume` in ACP SDK 1.3.0, see #56) and
 `session/load` (full transcript replay) — plus acpx's precedent of chaining
 them. Open questions: when resume fires, how agent memory is restored, and
 what happens when the remote or on-disk state has drifted underneath the
@@ -25,7 +26,7 @@ manifest.
    a container, remount workspace + `claude/`. Archived → fresh workspace
    dir, clone, check out `branch` at `last_pushed_commit`, inject ADR-0002's
    reset notice.
-3. **Reconnect ladder** once a container is up: `unstable_resumeSession` →
+3. **Reconnect ladder** once a container is up: `session/resume` →
    `session/load` → `session/new` plus an injected memory-reset notice.
    While a `session/load` replay is in flight the connection is
    **display-silent**: replayed `sessionUpdate`s rebuild agent memory only
