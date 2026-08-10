@@ -244,6 +244,16 @@ fn stubborn_teardown(chat_id: &str, why: &str, stubborn: &PlaneError) -> String 
     )
 }
 
+/// The line the operator reads when a chat's connection is dropped: which
+/// chat lost its adapter, and everything under the ACP summary that says why.
+/// Without it a disconnect leaves no trace on this side at all (issue #66).
+fn connection_lost(chat_id: &str, failure: &AcpError) -> String {
+    format!(
+        "{chat_id} lost its adapter connection: {}",
+        with_causes(failure)
+    )
+}
+
 /// `output` cut to the transcript's limit on a character boundary, marked when
 /// anything was dropped.
 fn truncated(output: &str) -> String {
@@ -796,6 +806,7 @@ where
     /// ADR-0007's ladder rather than going over a pipe nobody is holding.
     fn ended(&self, chat_id: &str, failure: AcpError) -> PromptError {
         if failure.spent_the_connection() {
+            warn!("{}", connection_lost(chat_id, &failure));
             self.connections.forget(chat_id);
             PromptError::Broke(failure.into())
         } else {

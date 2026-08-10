@@ -2,6 +2,7 @@
 //! chat's own container, speaking JSON-RPC over its stdio.
 
 use std::pin::Pin;
+use std::string::FromUtf8Error;
 
 use bollard::Docker;
 use bollard::container::LogOutput;
@@ -9,7 +10,7 @@ use bollard::errors::Error as DockerError;
 use bollard::exec::StartExecResults;
 use bollard::models::ExecConfig;
 use futures_util::{Stream, StreamExt as _};
-use log::debug;
+use log::warn;
 use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 
 use super::{AcpChannel, AcpError, AcpTransport};
@@ -96,13 +97,13 @@ impl AcpChannel for ExecChannel {
             if let Some(line) = take_line(&mut self.unread) {
                 match String::from_utf8(line) {
                     Ok(message) => return Ok(message.trim().to_owned()),
-                    Err(nonsense) => debug!("adapter said something that is not utf-8: {nonsense}"),
+                    Err(nonsense) => warn!("{}", undecodable(&nonsense)),
                 }
                 continue;
             }
             match self.output.next().await {
                 Some(Ok(LogOutput::StdErr { message })) => {
-                    debug!(
+                    warn!(
                         "adapter stderr: {}",
                         String::from_utf8_lossy(&message).trim()
                     );
@@ -120,6 +121,13 @@ impl AcpChannel for ExecChannel {
     }
 }
 
+/// The line the operator reads when the adapter's stream carries bytes that
+/// are not text: the reason names where in the line they went wrong, which is
+/// all there is to go on once the message is gone (issue #66).
+fn undecodable(nonsense: &FromUtf8Error) -> String {
+    format!("the adapter's stream carried bytes that are not utf-8: {nonsense}")
+}
+
 /// The first whole line waiting in `unread`, taken out of it.
 fn take_line(unread: &mut Vec<u8>) -> Option<Vec<u8>> {
     let end = unread.iter().position(|byte| *byte == b'\n')?;
@@ -134,8 +142,8 @@ mod tests {
 
     #[test]
     fn a_line_that_is_not_text_is_logged_with_where_the_bytes_went_wrong() {
-        let nonsense = String::from_utf8(b"{\"id\":\xff}".to_vec())
-            .expect_err("those bytes are not utf-8");
+        let nonsense =
+            String::from_utf8(b"{\"id\":\xff}".to_vec()).expect_err("those bytes are not utf-8");
 
         let logged = undecodable(&nonsense);
 
