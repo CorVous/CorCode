@@ -1132,7 +1132,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_turn_the_adapter_never_ends_gives_up_rather_than_hangs() {
-        let adapter = Adapter::waiting(ScriptedAdapter::opening(SESSION), IMPATIENT);
+        let adapter = Adapter::waiting(ScriptedAdapter::never_ending_a_turn(SESSION), IMPATIENT);
         let mut connection = adapter
             .open_session(CONTAINER)
             .await
@@ -1146,6 +1146,30 @@ mod tests {
         assert!(
             format!("{error}").contains("session/prompt"),
             "error should name the call that hung, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_method_the_adapter_never_heard_of_is_named_rather_than_waited_out() {
+        let adapter = Adapter::new(ScriptedAdapter::opening(SESSION));
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+
+        let error = timeout(IMPATIENT, connection.take_turn("ship it", &mut |_| Ok(())))
+            .await
+            .expect("an unheard method should be answered, not waited out")
+            .expect_err("a method the adapter has never heard of should fail");
+
+        let message = format!("{error}");
+        assert!(
+            message.contains("session/prompt") && message.contains("no method"),
+            "error should name the method the adapter never heard of, got: {message}"
+        );
+        assert!(
+            error.answered(),
+            "a method not found is an answer, not a lost channel"
         );
     }
 
