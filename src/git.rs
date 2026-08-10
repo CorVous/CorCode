@@ -1650,6 +1650,32 @@ mod tests {
         );
     }
 
+    /// A chat archived once and worked in since carries a checkpoint of that
+    /// earlier archive on the remote, cut off wherever the branch stood then.
+    /// The archive of the fresh work closes on no checkpoint at all rather than
+    /// on that one: the manifest names where this archive's own work went
+    /// (issue #105).
+    #[test]
+    fn a_checkpoint_of_an_earlier_archive_is_left_where_it_is() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+        let earlier = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a dirty workspace should push")
+            .checkpoint_branch
+            .expect("a dirty tree should cut a checkpoint branch");
+        commit_in(&workspace, "third.txt", "what the agent did next");
+
+        let pushed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a clean workspace should push");
+
+        assert_eq!(
+            pushed.checkpoint_branch, None,
+            "an archive of fresh work was closed on {earlier}, a checkpoint of the archive before"
+        );
+    }
+
     #[test]
     fn a_push_that_fails_leaves_the_workspace_as_it_was() {
         let (_origin_dir, remotes) = seeded_repository();
