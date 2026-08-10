@@ -875,6 +875,7 @@ fn answers<S: AsRef<OsStr>>(doing: &str, args: &[S]) -> Result<bool, GitError> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
@@ -882,6 +883,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::logs::capturing_lines;
 
     const TOKEN: &str = "ghs-clone-secret";
     const ROTATED: &str = "ghs-rotated-secret";
@@ -1402,6 +1404,48 @@ mod tests {
             CHAT_BRANCH,
             "the workspace was left standing on the checkpoint branch"
         );
+    }
+
+    /// A checkpoint that stays behind is only ever mentioned here, and the
+    /// rollback's own summary names the branch and stops there: what git
+    /// refused is under it (issue #81). The wording is pinned where the line
+    /// is built; this drives the call site, where the causes could be dropped
+    /// without a test noticing.
+    #[test]
+    fn a_checkpoint_that_would_not_roll_back_reaches_the_operator_with_gits_complaint() {
+        let logged = capturing_lines();
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+        jam_the_index_on_push(&workspace);
+
+        push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect_err("a push the hook refuses should fail");
+
+        assert!(
+            logged
+                .lines_saying("could not be rolled back")
+                .iter()
+                .any(|(_, line)| line.contains(JAMMED_INDEX)),
+            "src/git.rs: the rollback's warning reached the operator without git's own \
+             complaint under it, which is the whole of what says why the checkpoint stayed: \
+             {:?}",
+            logged.lines_saying("could not be rolled back")
+        );
+    }
+
+    /// What git says of a tree whose index it cannot take.
+    const JAMMED_INDEX: &str = "index.lock";
+
+    /// Leave `workspace` with a push that fails and an index no command can
+    /// take afterwards, which is a checkpoint git will not roll back.
+    fn jam_the_index_on_push(workspace: &Path) {
+        let hook = workspace.join(".git").join("hooks").join("pre-push");
+        std::fs::write(&hook, ": > \"${GIT_DIR:-.git}/index.lock\"\nexit 1\n")
+            .expect("a hook should be writable");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("a hook should be runnable");
     }
 
     #[test]
