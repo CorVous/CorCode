@@ -696,6 +696,53 @@ async fn an_archive_the_dataset_cannot_record_leaves_the_workspace_on_the_chat_b
     );
 }
 
+/// The gate can get everything onto the remote and the archive still fail on
+/// the manifest. By then the gate has put the workspace back on the chat's
+/// branch, with the work in flight committed away onto the checkpoint that
+/// landed: the retry finds a clean tree and cuts nothing, while the only copy
+/// of that work is the checkpoint branch on the remote. The manifest has to
+/// name it, or the record sends the operator nowhere (issue #105).
+#[tokio::test]
+async fn an_archive_retried_after_the_manifest_failed_names_the_checkpoint_holding_its_work() {
+    let app = TestApp::start().await;
+    let chat = app.create_chat("first").await;
+    fs::write(app.workspace(&chat).join("scratch.txt"), "work in flight")
+        .expect("a dirty file should be writable");
+    app.seal_the_chat_dir(&chat);
+    let stopped = app.archive(&chat).await;
+    app.unseal_the_chat_dir(&chat);
+    assert!(
+        stopped.status().is_server_error(),
+        "an unrecorded archive answered {}",
+        stopped.status()
+    );
+    let landed = app.checkpoint_branches();
+    assert_eq!(
+        landed.len(),
+        1,
+        "the archive that failed did not leave a checkpoint behind: {landed:?}"
+    );
+
+    let retried = app.archive(&chat).await;
+
+    assert_eq!(retried.status(), StatusCode::OK);
+    assert_eq!(
+        app.checkpoint_branches(),
+        landed,
+        "the retry did not close the chat on the checkpoint its work was already on"
+    );
+    assert_eq!(
+        app.manifest(&chat)["checkpoint_branch"],
+        landed[0],
+        "the manifest does not name the checkpoint the work in flight is on"
+    );
+    assert_eq!(
+        app.origin_says(&["show", &format!("{}:scratch.txt", landed[0])]),
+        "work in flight",
+        "the checkpoint the chat was closed on does not carry the work in flight"
+    );
+}
+
 /// The gate stages and commits the whole working tree, and then kills the
 /// container: doing that to an agent mid-turn destroys work git never saw
 /// (ADR-0002 rule 3).

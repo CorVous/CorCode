@@ -507,10 +507,15 @@ pub fn push_for_archive(
     match push_branches(origin, workspace, branch, checkpoint.as_ref()) {
         Ok(reached) => {
             stand_on(workspace, branch).map_err(|source| stopped(&reached.landed, source))?;
+            let Reached { tip, mut landed } = reached;
+            if landed.checkpoint.is_none() {
+                landed.checkpoint = checkpoint_cut_off(origin, workspace, branch, &tip)
+                    .map_err(|source| stopped(&landed, source))?;
+            }
             Ok(Pushed {
-                tip: reached.tip,
-                checkpoint_branch: reached.landed.checkpoint,
-                rescue_branch: reached.landed.rescue,
+                tip,
+                checkpoint_branch: landed.checkpoint,
+                rescue_branch: landed.rescue,
             })
         }
         Err(failure) => {
@@ -802,6 +807,62 @@ fn checkpoint_holding(
         .into_iter()
         .map(|(_, candidate)| candidate)
         .find(|candidate| work_on_remote(origin, workspace, candidate).as_ref() == Some(&holding)))
+}
+
+/// The checkpoint branch of `branch` on the remote holding work that `tip`
+/// does not carry, when this archive cut no checkpoint of its own.
+///
+/// The gate can get everything onto the remote and the archive fail after it —
+/// on the manifest, on the dataset — and by then the gate has put the
+/// workspace back on `branch` with the work in flight committed away onto the
+/// checkpoint that landed. The retry finds a clean tree, cuts nothing, and
+/// would close the chat naming no checkpoint while the only copy of that work
+/// stands on the remote (issue #105). The remote is asked because nothing of
+/// the attempt before survives on this side: a core restarted between the two
+/// remembers no more than a core that never stopped.
+///
+/// The invariant: an archive that cuts no checkpoint closes on a checkpoint of
+/// this chat cut off the very commit being archived — the latest of them, by
+/// the stamp every checkpoint is named with, since two attempts that both
+/// landed leave the later one holding the work as the agent left it. Which
+/// archive left a checkpoint there is not asked and does not matter: a
+/// checkpoint cut off this commit holds work this commit does not carry,
+/// whoever cut it, and that is what the manifest is for. A chat archived
+/// before and revived onto an untouched workspace closes on that earlier
+/// checkpoint again, which is where its uncarried work still is.
+///
+/// The known hole is the other side of that rule: a commit made between the
+/// attempts moves the tip past the checkpoint that landed, and this archive
+/// closes on nothing while that checkpoint still holds work. Adopting it would
+/// mean naming a checkpoint of a tree the chat has moved on from, and a
+/// manifest that points at the wrong moment is worse than one that points
+/// nowhere — the operator has the branch itself and the log either way.
+///
+/// The lookup runs after the gate, so a remote that has gone quiet in between
+/// fails an archive whose work is already safe. It is retried from a workspace
+/// the gate left standing on `branch`, and guessing here would write the very
+/// silence issue #105 is about.
+fn checkpoint_cut_off(
+    origin: &Origin,
+    workspace: &Path,
+    branch: &str,
+    tip: &str,
+) -> Result<Option<String>, GitError> {
+    let mut candidates: Vec<String> = minted_on_remote(origin, workspace, branch, CHECKPOINT)?
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect();
+    candidates.sort_unstable();
+    Ok(candidates.into_iter().rev().find(|candidate| {
+        work_on_remote(origin, workspace, candidate).is_some_and(|held| cut_from(&held, tip))
+    }))
+}
+
+/// Whether work read off the remote was cut from `commit`: the commit holding
+/// it names `commit`, and nothing besides, as its parent.
+fn cut_from(held: &str, commit: &str) -> bool {
+    held.split_once(' ')
+        .is_some_and(|(_, parents)| parents == commit)
 }
 
 /// The work a commit holds: the tree it captured and the commit it was cut
@@ -1647,6 +1708,90 @@ mod tests {
         assert_eq!(
             held, None,
             "a checkpoint the remote no longer carries was read as work to close a chat on"
+        );
+    }
+
+    /// Two attempts can fail after their checkpoints land, each committing a
+    /// tree of its own, and both checkpoints then stand cut off the commit
+    /// being archived. The chat closes on the one holding the work as the agent
+    /// left it — the latest — and not on whatever the remote happens to list
+    /// first (issue #105).
+    #[test]
+    fn an_archive_closes_on_the_latest_checkpoint_cut_off_the_commit_it_archives() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        let scratch = workspace.join("scratch.txt");
+        std::fs::write(&scratch, "work in flight").expect("a dirty file should be writable");
+        push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a dirty workspace should push");
+        std::fs::write(&scratch, "what the agent did next")
+            .expect("a dirty file should be writable");
+        let latest = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a dirty workspace should push")
+            .checkpoint_branch
+            .expect("a tree the earlier checkpoint never held should cut one of its own");
+
+        let pushed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a clean workspace should push");
+
+        assert_eq!(
+            pushed.checkpoint_branch,
+            Some(latest),
+            "the chat was closed on a checkpoint without the work the agent left behind"
+        );
+    }
+
+    /// A checkpoint of commits the agent made off its branch is one the gate
+    /// never committed itself, and it stands cut off the commit being archived
+    /// just the same. An attempt that failed after it landed is retried onto
+    /// it, not onto nothing (issue #105).
+    #[test]
+    fn a_checkpoint_of_the_agents_own_commits_is_what_a_retry_closes_on() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        run(&workspace, &["checkout", "--detach"]);
+        commit_in(
+            &workspace,
+            "fourth.txt",
+            "a commit the chat branch never saw",
+        );
+        let landed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a workspace off its branch should push")
+            .checkpoint_branch
+            .expect("work off the chat branch should be checkpointed");
+
+        let pushed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a clean workspace should push");
+
+        assert_eq!(
+            pushed.checkpoint_branch,
+            Some(landed),
+            "the retry closed the chat on nothing while the agent's commits stood on a checkpoint"
+        );
+    }
+
+    /// A chat worked in since its last archive stands on a commit that
+    /// checkpoint was never cut off. The archive of the fresh work closes on no
+    /// checkpoint at all rather than on that one: the manifest names where this
+    /// archive's own work went (issue #105).
+    #[test]
+    fn a_checkpoint_cut_off_a_commit_the_branch_has_moved_past_is_not_adopted() {
+        let (_origin_dir, remotes) = seeded_repository();
+        let (_into, workspace) = chat_workspace(&remotes.origin(REPO, None));
+        std::fs::write(workspace.join("scratch.txt"), "work in flight")
+            .expect("a dirty file should be writable");
+        let earlier = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a dirty workspace should push")
+            .checkpoint_branch
+            .expect("a dirty tree should cut a checkpoint branch");
+        commit_in(&workspace, "third.txt", "what the agent did next");
+
+        let pushed = push_for_archive(&remotes.origin(REPO, None), &workspace, CHAT_BRANCH)
+            .expect("a clean workspace should push");
+
+        assert_eq!(
+            pushed.checkpoint_branch, None,
+            "an archive of fresh work was closed on {earlier}, a checkpoint of the archive before"
         );
     }
 
