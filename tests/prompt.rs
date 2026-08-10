@@ -358,6 +358,32 @@ async fn an_adapter_that_dies_mid_turn_keeps_what_it_said_and_the_next_prompt_cl
 }
 
 #[tokio::test]
+async fn a_turn_that_loses_its_connection_says_so_in_the_chats_own_log() {
+    let app = TestApp::start(ScriptedAdapter::dying_mid_turn(
+        SESSION,
+        &[update(SESSION, "on i")],
+    ))
+    .await;
+    let chat_id = app.create_chat().await;
+
+    let response = app.prompt(&chat_id, SAID).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let events = app.events(&chat_id);
+    let last = events.last().expect("the turn wrote its prompt down at least");
+    assert_eq!(
+        last["corcode"], "connection_lost",
+        "a lost turn left nothing in the log, so the page still reads as thinking"
+    );
+    let text = last["text"].as_str().expect("a notice says something");
+    assert!(
+        text.contains("dropped") && text.contains("can be sent again"),
+        "the notice says nothing the operator can act on: {text}"
+    );
+    app.stop().await;
+}
+
+#[tokio::test]
 async fn prompting_is_behind_the_session_gate_and_this_origin() {
     let app = TestApp::start(ScriptedAdapter::answering(SESSION, &[])).await;
     let chat_id = app.create_chat().await;

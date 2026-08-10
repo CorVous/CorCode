@@ -1496,6 +1496,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_turn_that_spent_its_connection_tells_the_chat_the_prompt_can_go_again() {
+        let told = turn_lost(&AcpError::Broken {
+            doing: "reading the adapter's answer".to_owned(),
+            source: std::io::ErrorKind::BrokenPipe.into(),
+        });
+
+        assert_eq!(
+            told,
+            "The turn ended without an answer: the adapter's channel broke while \
+             reading the adapter's answer: broken pipe. The connection to the agent \
+             was dropped, so the prompt can be sent again. The agent may have kept \
+             working inside its container meanwhile.",
+            "a turn that dies saying nothing here leaves the page frozen (issue #65)"
+        );
+    }
+
+    #[test]
+    fn a_turn_nothing_could_write_down_does_not_say_the_connection_went() {
+        let told = turn_lost(&AcpError::Unrecorded {
+            source: anyhow::anyhow!("no space left on device"),
+        });
+
+        assert_eq!(
+            told,
+            "The turn ended without an answer: the turn could not be written down: \
+             no space left on device. The connection to the agent is still open, so \
+             the prompt can be sent again. The agent may have kept working inside \
+             its container meanwhile.",
+            "the connection this failure leaves alone must not be called dropped"
+        );
+    }
+
     const CHECKPOINT: &str = "chat/2026-08-09-archived-chkpt-20260809T214033172";
     const RESCUE: &str = "chat/2026-08-09-archived-rescue-20260809T214033173";
 
