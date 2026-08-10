@@ -1555,6 +1555,27 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_turn_lost_to_a_corrupted_channel_is_not_told_as_an_ordinary_drop() {
+        let told = turn_lost(&AcpError::Garbled {
+            method: "session/prompt".to_owned(),
+            sample: "\u{fffd}\u{fffd} building: 42%".to_owned(),
+        });
+
+        assert_eq!(
+            told,
+            "Something the agent ran wrote over its own protocol channel, so what \
+             reached the core stopped being messages (last read: \u{fffd}\u{fffd} \
+             building: 42%). The turn was abandoned and the connection dropped, but \
+             the agent may still be running whatever it started inside its \
+             container. The prompt can be sent again; if the chat stays stuck, \
+             archiving and reviving it gives the agent a container of its own again.",
+            "a corrupted channel is a different thing from a pipe that broke, and \
+             the operator can act on the difference (issue #65)"
+        );
+        assert_ne!(told, turn_lost(&AcpError::Closed));
+    }
+
     const CHECKPOINT: &str = "chat/2026-08-09-archived-chkpt-20260809T214033172";
     const RESCUE: &str = "chat/2026-08-09-archived-rescue-20260809T214033173";
 

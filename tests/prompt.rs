@@ -403,6 +403,33 @@ async fn a_turn_that_loses_its_connection_says_so_in_the_chats_own_log() {
     app.stop().await;
 }
 
+/// More lines of another program's output than any noise tolerance could read
+/// past, so the turn meets a stream that is nobody's protocol any more.
+const GARBLE: usize = 8;
+
+#[tokio::test]
+async fn a_turn_lost_to_a_corrupted_stream_says_so_in_words_of_its_own() {
+    let app = TestApp::start(ScriptedAdapter::garbling(SESSION, GARBLE, &[])).await;
+    let chat_id = app.create_chat().await;
+
+    let response = app.prompt(&chat_id, SAID).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let events = app.events(&chat_id);
+    let last = events
+        .last()
+        .expect("the turn wrote its prompt down at least");
+    assert_eq!(last["corcode"], "connection_lost");
+    let text = last["text"].as_str().expect("a notice says something");
+    assert!(
+        text.contains("wrote over its own protocol channel")
+            && text.contains("may still be running")
+            && text.contains("archiving and reviving"),
+        "corruption reads like any other dropped connection: {text}"
+    );
+    app.stop().await;
+}
+
 #[tokio::test]
 async fn prompting_is_behind_the_session_gate_and_this_origin() {
     let app = TestApp::start(ScriptedAdapter::answering(SESSION, &[])).await;
