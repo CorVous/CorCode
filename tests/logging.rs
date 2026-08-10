@@ -48,7 +48,7 @@ async fn a_line_that_is_not_json_rpc_reaches_the_operator_as_a_warning() {
         .expect("the garbling adapter still answers every call it is sent");
 
     assert_eq!(
-        logged.quietest_level_of("adapter said something that is not json-rpc"),
+        logged.quietest_level_of("the adapter's stream carried no message"),
         Some(Level::Warn),
         "src/acp/mod.rs: a wedged adapter below WARN is a wedged adapter nobody hears about"
     );
