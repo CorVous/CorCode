@@ -28,6 +28,10 @@ pub enum AcpError {
     Refused { method: String, complaint: String },
     #[error("the adapter answered {method} with something unreadable: {answer}")]
     Unreadable { method: String, answer: String },
+    #[error(
+        "the adapter's stream stopped being json-rpc while {method} was outstanding, last reading: {sample}"
+    )]
+    Garbled { method: String, sample: String },
     #[error("the turn could not be written down")]
     Unrecorded {
         #[source]

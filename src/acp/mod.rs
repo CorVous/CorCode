@@ -36,6 +36,18 @@ const PATIENCE: Duration = Duration::from_secs(120);
 /// so what this catches is an adapter that has stopped speaking altogether.
 const TURN_PATIENCE: Duration = Duration::from_secs(600);
 
+/// How many lines in a row may fail to be JSON-RPC before the stream is taken
+/// to be somebody else's. One stray line is noise — a process the agent ran
+/// wrote to its stdout once and stopped — and a client that gave up on noise
+/// would end turns nothing is wrong with. A run of them is desync: the pipe is
+/// carrying another program's output, no answer will ever be read out of it,
+/// and waiting is only a slower way to fail (issue #65).
+const GARBLE_TOLERANCE: usize = 3;
+
+/// How much of the line that gave up on a stream is worth carrying: enough to
+/// recognise what wrote it, not a screenful of build output in the log.
+const SAMPLE: usize = 200;
+
 /// The notification an adapter streams a turn over.
 const SESSION_UPDATE: &str = "session/update";
 
@@ -403,6 +415,15 @@ fn keep(record: &mut Record<'_>, payload: &Value) -> Result<(), AcpError> {
     record(payload).map_err(|source| AcpError::Unrecorded { source })
 }
 
+/// As much of `line` as a failure carries, cut on a character boundary and
+/// marked where it was cut.
+fn sample_of(line: &str) -> String {
+    match line.char_indices().nth(SAMPLE) {
+        Some((end, _)) => format!("{}…", &line[..end]),
+        None => line.to_owned(),
+    }
+}
+
 fn silent(method: &str, patience: Duration) -> AcpError {
     AcpError::Silent {
         method: method.to_owned(),
@@ -486,14 +507,25 @@ impl<C: AcpChannel> Calls<C> {
         patience: Duration,
         overhear: &mut Overhear<'_>,
     ) -> Result<Value, AcpError> {
+        let mut garble = 0;
         loop {
             let line = timeout(patience, self.channel.receive())
                 .await
                 .map_err(|_| silent(method, patience))??;
             let message: Value = match serde_json::from_str(&line) {
-                Ok(message) => message,
+                Ok(message) => {
+                    garble = 0;
+                    message
+                }
                 Err(nonsense) => {
                     warn!("adapter said something that is not json-rpc: {nonsense}");
+                    garble += 1;
+                    if garble >= GARBLE_TOLERANCE {
+                        return Err(AcpError::Garbled {
+                            method: method.to_owned(),
+                            sample: sample_of(&line),
+                        });
+                    }
                     continue;
                 }
             };
@@ -1155,6 +1187,11 @@ mod tests {
         assert!(
             started.elapsed() < IMPATIENT,
             "the turn sat out its patience rather than failing on the garble (issue #65)"
+        );
+        assert!(
+            error.spent_the_connection() && !error.answered(),
+            "a stream nobody can read a message out of is not one the next turn \
+             can go over: {error}"
         );
     }
 

@@ -73,6 +73,10 @@ impl AcpTransport for DockerExec {
 /// One adapter's stdio, cut into newline-delimited messages. The bytes are
 /// held as bytes until a whole line is there: the daemon breaks the pipe
 /// wherever it likes, and a character broken in half is not text yet.
+///
+/// A whole line that is still not text is handed on with those bytes stood in
+/// for rather than dropped: it is one more line no message can be read out of,
+/// and only the parse it fails counts a stream as garbled (issue #65).
 pub struct ExecChannel {
     output: Pin<Box<dyn Stream<Item = Result<LogOutput, DockerError>> + Send>>,
     input: Pin<Box<dyn AsyncWrite + Send>>,
@@ -95,11 +99,15 @@ impl AcpChannel for ExecChannel {
     async fn receive(&mut self) -> Result<String, AcpError> {
         loop {
             if let Some(line) = take_line(&mut self.unread) {
-                match String::from_utf8(line) {
-                    Ok(message) => return Ok(message.trim().to_owned()),
-                    Err(nonsense) => warn!("{}", undecodable(&nonsense)),
-                }
-                continue;
+                return Ok(match String::from_utf8(line) {
+                    Ok(message) => message.trim().to_owned(),
+                    Err(nonsense) => {
+                        warn!("{}", undecodable(&nonsense));
+                        String::from_utf8_lossy(nonsense.as_bytes())
+                            .trim()
+                            .to_owned()
+                    }
+                });
             }
             match self.output.next().await {
                 Some(Ok(LogOutput::StdErr { message })) => {
