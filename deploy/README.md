@@ -125,6 +125,20 @@ serve a console whose every button would fail. A container that exits
 straight after `up` usually means the bind is missing or the daemon is not
 running — `docker compose --file deploy/compose.yaml logs` says which.
 
+### Logs and credentials
+
+`RUST_LOG` turns up the core's own modules — `RUST_LOG=debug` when something
+needs diagnosing. Raw Docker-API tracing is a different thing: the client
+library logs whole request bodies, and the body that spawns an agent carries
+that container's environment, `CLAUDE_CODE_OAUTH_TOKEN` and all. Anything at
+that level lands in `docker compose logs` in the clear.
+
+So `bollard`'s logs are capped at INFO in the binary, always — including when
+`RUST_LOG` names it outright, as in `RUST_LOG=bollard=trace`. The cap is not
+an operator setting; turning on debug for the core cannot silently dump
+credentials. Reading the wire needs a build with the cap lifted, on a box
+whose logs you are willing to treat as secret.
+
 ## 6. First boot
 
 1. Visit `http://<nas>:8080/` — you land on `/login`.
