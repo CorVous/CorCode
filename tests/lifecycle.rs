@@ -592,9 +592,9 @@ async fn a_refused_archive_says_why_in_the_chats_own_log() {
         .filter_map(|line| line["text"].as_str())
         .next_back()
         .unwrap_or_else(|| panic!("the refused archive was never told of: {told:?}"));
-    assert!(
-        refusal.contains("being woken"),
-        "the refusal does not say what the chat is doing: {refusal}"
+    assert_eq!(
+        refusal, "Chat not archived: this chat is being woken for a prompt.",
+        "the refusal does not say what was turned away, or why"
     );
     let page = app.body(&format!("/chats/{parked}/events")).await;
     assert!(

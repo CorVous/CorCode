@@ -148,9 +148,12 @@ on their behalf, which is the only answer it has: the core declares no client
 capabilities, and an unanswered request blocks the agent's whole turn.
 `refusal` says a prompt never went out, or an archive never ran, because of
 what the chat was already doing — taking a turn, being woken, being archived.
-A chat that is archived already is the one refusal the log is not told: its
-page says so, and its log is the record of a chat that is closed. `wake_failure` says a prompt never went out because the chat
-could not be brought back at all, and names what stopped it (ADR-0007).
+An archive refused because the chat is archived already is the one the log is
+deliberately not told: the page says so, and the log is the record of a chat
+that is closed. That is aim rather than guarantee — a chat refused mid-archive
+is told so in a log the archive it lost to may close a moment later.
+`wake_failure` says a prompt never went out because the chat could not be
+brought back at all, and names what stopped it (ADR-0007).
 `push_failure` says the archive gate got nothing onto the remote, so
 the chat is still open with its container up and can be archived again
 (ADR-0002 rule 3). `mode_notice` says the session opened in some other
