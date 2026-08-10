@@ -6,7 +6,7 @@ use chrono::TimeDelta;
 
 use crate::git::chat_branch;
 use crate::secrets::{Secret, Standing};
-use crate::status::{Slot, Status};
+use crate::status::{Containers, Slot, Status};
 use crate::store::RuntimeStatus;
 use crate::sweep::Swept;
 
@@ -26,6 +26,10 @@ const REPOS_LIST: &str = "repos";
 /// idle times move with the turns other pages are taking, so the line has to
 /// be polled to stay true; nothing here is worth the chat log's cadence.
 const POLL_SECONDS: u32 = 5;
+
+/// How the console says the container daemon did not answer, in the banner
+/// over the chats and in the status line alike (issue #25).
+const UNKNOWN_CONTAINERS: &str = "Container status unknown";
 
 /// The groups the chat list is stacked in, top to bottom (ADR-0002).
 const GROUPS: [RuntimeStatus; 3] = [
@@ -53,20 +57,26 @@ pub fn console_page(
              <script src=\"{HTMX_PATH}\" defer></script>",
             status_line(status),
             new_chat_form(repos),
-            chat_list(chats),
+            listing(chats, &status.containers),
             settings_panel(secrets),
         ),
     )
 }
 
+/// The chat list as the console shows it: grouped by runtime status where the
+/// plane answered for it, and ungrouped under a banner where it did not
+/// (issue #25).
+fn listing(chats: &[Chat], containers: &Containers) -> String {
+    match containers {
+        Containers::Known => chat_list(chats),
+        Containers::Unknown(_) => ungrouped_list(chats),
+    }
+}
+
 /// The chat list on its own, so htmx can swap it in without the page.
 #[must_use]
 pub fn chat_list(chats: &[Chat]) -> String {
-    let mut list = format!(
-        "<section id=\"chats\">\
-         <p><button hx-get=\"{CHATS_PATH}\" hx-target=\"#chats\" hx-swap=\"outerHTML\">\
-         Refresh</button></p>"
-    );
+    let mut list = opened_list();
     for status in GROUPS {
         write!(
             list,
@@ -78,6 +88,34 @@ pub fn chat_list(chats: &[Chat]) -> String {
     }
     list.push_str("</section>");
     list
+}
+
+/// Every chat with the live and parked headings taken away, because nothing
+/// answered for them: the open ones in one list, the archived ones where they
+/// always are, and the banner saying which distinction is missing.
+fn ungrouped_list(chats: &[Chat]) -> String {
+    format!(
+        "{}<p role=\"alert\">{UNKNOWN_CONTAINERS} — the chats below are ungrouped; \
+         the status line says what the daemon answered.</p>\
+         <h2>Open</h2>{}<h2>{}</h2>{}</section>",
+        opened_list(),
+        rows(
+            chats
+                .iter()
+                .filter(|(_, status)| *status != RuntimeStatus::Archived)
+        ),
+        status_word(RuntimeStatus::Archived),
+        group(chats, RuntimeStatus::Archived),
+    )
+}
+
+/// The head of the chat list, which refreshes itself however it is grouped.
+fn opened_list() -> String {
+    format!(
+        "<section id=\"chats\">\
+         <p><button hx-get=\"{CHATS_PATH}\" hx-target=\"#chats\" hx-swap=\"outerHTML\">\
+         Refresh</button></p>"
+    )
 }
 
 /// The container picture, expanding in place and polling itself (ADR-0008).
@@ -97,12 +135,16 @@ pub fn status_line(status: &Status) -> String {
 #[must_use]
 pub fn status_picture(status: &Status) -> String {
     let Status {
+        containers,
         pool,
         warm_pool,
         parked,
         image,
         sweep,
     } = status;
+    if let Containers::Unknown(quiet) = containers {
+        return unknown_containers(quiet, image, sweep.as_ref());
+    }
     let live = pool.len();
     format!(
         "<summary>pool {live}/{warm_pool} · parked {parked} · img {} · sweep {}</summary>\
@@ -115,6 +157,25 @@ pub fn status_picture(status: &Status) -> String {
         slots(pool),
         text(image),
         swept_in_full(sweep.as_ref()),
+    )
+}
+
+/// The picture with the pool left out, because the daemon that would have
+/// answered for it said `quiet` instead. What it said is spelled out here and
+/// nowhere else: this is the one place on the console with room for it
+/// (issue #25).
+fn unknown_containers(quiet: &str, image: &str, sweep: Option<&Swept>) -> String {
+    format!(
+        "<summary>containers unknown · img {} · sweep {}</summary>\
+         <dl><dt>Containers</dt><dd>{UNKNOWN_CONTAINERS} — the container daemon answered: \
+         {}</dd>\
+         <dt>Image</dt><dd>{}</dd>\
+         <dt>Sweep</dt><dd>{}</dd></dl>",
+        text(image_tag(image)),
+        swept_in_a_word(sweep),
+        text(quiet),
+        text(image),
+        swept_in_full(sweep),
     )
 }
 
@@ -253,7 +314,12 @@ fn in_group(chats: &[Chat], status: RuntimeStatus) -> impl Iterator<Item = &Chat
 }
 
 fn group(chats: &[Chat], status: RuntimeStatus) -> String {
-    let rows: String = in_group(chats, status).map(row).collect();
+    rows(in_group(chats, status))
+}
+
+/// A list of chats, or that there are none of them.
+fn rows<'a>(chats: impl Iterator<Item = &'a Chat>) -> String {
+    let rows: String = chats.map(row).collect();
     if rows.is_empty() {
         "<p>None.</p>".to_owned()
     } else {
@@ -350,6 +416,65 @@ mod tests {
             chat("resting", RuntimeStatus::Parked),
             chat("finished", RuntimeStatus::Archived),
         ]
+    }
+
+    /// Nothing answered for the containers, so the console says so and lists
+    /// the open chats as what it knows they are (issue #25).
+    #[test]
+    fn a_console_that_cannot_group_by_container_lists_the_open_chats_under_a_banner() {
+        let rendered = console_page(
+            &every_state(),
+            &Status {
+                containers: quiet_daemon(),
+                ..status()
+            },
+            &repos(),
+            &secrets(),
+        );
+
+        assert!(
+            rendered.contains("Container status unknown"),
+            "the console does not say the grouping is missing: {rendered}"
+        );
+        assert!(
+            position(&rendered, "running") < position(&rendered, "resting"),
+            "the open chats are not listed together: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<h2>Live</h2>") && !rendered.contains("<h2>Parked</h2>"),
+            "the console groups chats nothing answered for: {rendered}"
+        );
+        assert!(
+            position(&rendered, "<h2>Archived</h2>") < position(&rendered, "finished"),
+            "an archived chat left its own heading: {rendered}"
+        );
+    }
+
+    /// The daemon's own words are what the operator acts on, and the expanded
+    /// status line is where the console has room for them (issue #25).
+    #[test]
+    fn a_quiet_daemon_is_quoted_in_the_status_picture() {
+        let rendered = status_picture(&Status {
+            containers: quiet_daemon(),
+            ..status()
+        });
+
+        assert!(
+            rendered.contains("connection refused"),
+            "the status picture keeps why the daemon said nothing: {rendered}"
+        );
+        assert!(
+            !rendered.contains("pool 1/3"),
+            "the picture counts a pool nothing answered for: {rendered}"
+        );
+    }
+
+    /// What a plane whose daemon has stopped leaves the console with.
+    fn quiet_daemon() -> Containers {
+        Containers::Unknown(
+            "the container runtime failed to list the workspace containers: connection refused"
+                .to_owned(),
+        )
     }
 
     #[test]
@@ -567,6 +692,7 @@ mod tests {
     /// A pool holding the one live chat of [`every_state`], swept clean.
     fn status() -> Status {
         Status {
+            containers: Containers::Known,
             pool: vec![slot("running", TimeDelta::zero())],
             warm_pool: POOL,
             parked: 1,

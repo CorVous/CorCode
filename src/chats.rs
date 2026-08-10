@@ -19,13 +19,23 @@ use crate::plane::{ContainerPlane, PlaneError, ScriptRun, container_name};
 use crate::pool;
 use crate::resume::{self, Attempt, Rung, Step};
 use crate::secrets::{AnthropicCredential, Secret, Secrets, SecretsError};
-use crate::status::{Slot, Status};
+use crate::status::{Containers, Slot, Status};
 use crate::store::{
     self, ChatState, ChatStore, ContainerLiveness, Event, Manifest, NewChat, Owner, RuntimeStatus,
     runtime_status,
 };
 use crate::sweep::{self, Sweep, Swept};
 use crate::ui;
+
+/// One pass of the dataset, and whether the plane took part in it.
+///
+/// With the containers unknown every open chat reads as parked, which is why
+/// the console shows the statuses only where they were answered for
+/// (issue #25).
+pub struct Survey {
+    pub chats: Vec<ui::Chat>,
+    pub containers: Containers,
+}
 
 /// What the form asks for, before any of it is believed.
 pub struct WantedChat {
@@ -380,14 +390,16 @@ where
     /// The container picture as of `now`, over one pass of the dataset
     /// (ADR-0008).
     pub async fn status(&self, now: DateTime<Utc>) -> Result<Status> {
-        Ok(self.status_of(&self.survey().await?, now))
+        Ok(self.status_of(&self.survey_or_unknown().await?, now))
     }
 
     /// The same picture read off a survey the caller already has, so that
     /// rendering the whole console costs one pass and not two.
     #[must_use]
-    pub fn status_of(&self, chats: &[ui::Chat], now: DateTime<Utc>) -> Status {
+    pub fn status_of(&self, survey: &Survey, now: DateTime<Utc>) -> Status {
+        let chats = &survey.chats;
         Status {
+            containers: survey.containers.clone(),
             pool: chats
                 .iter()
                 .filter(|(_, status)| *status == RuntimeStatus::Live)
@@ -420,12 +432,34 @@ where
     /// Every chat on disk paired with the status it has right now.
     pub async fn survey(&self) -> Result<Vec<ui::Chat>> {
         let live = self.plane.live_chat_ids().await?;
+        self.scanned(&live)
+    }
+
+    /// The same pass, taken whether or not the plane will say which chats
+    /// hold a container: a dead daemon costs the live/parked distinction and
+    /// not the dataset (issue #25). Only the chats on disk are the plane's to
+    /// take away, and it holds none of them.
+    pub async fn survey_or_unknown(&self) -> Result<Survey> {
+        match self.plane.live_chat_ids().await {
+            Ok(live) => Ok(Survey {
+                chats: self.scanned(&live)?,
+                containers: Containers::Known,
+            }),
+            Err(quiet) => Ok(Survey {
+                chats: self.scanned(&HashSet::new())?,
+                containers: Containers::Unknown(with_causes(quiet.as_ref())),
+            }),
+        }
+    }
+
+    /// The dataset as it stands, each chat's status read against `live`.
+    fn scanned(&self, live: &HashSet<String>) -> Result<Vec<ui::Chat>> {
         Ok(self
             .store
             .scan()?
             .into_iter()
             .map(|manifest| {
-                let status = runtime_status(&manifest, &live);
+                let status = runtime_status(&manifest, live);
                 (manifest, status)
             })
             .collect())

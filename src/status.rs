@@ -11,8 +11,21 @@ pub struct Slot {
     pub idle: TimeDelta,
 }
 
+/// Whether the container plane answered the pass this picture was taken in.
+///
+/// It is the console's to say out loud: a picture that left it out would read
+/// as an empty pool rather than as no answer (issue #25).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Containers {
+    Known,
+    /// What the daemon said instead of answering, causes and all.
+    Unknown(String),
+}
+
 /// Everything the status line says, taken in one pass over the dataset.
 pub struct Status {
+    /// Whether the pool and parked counts below mean anything.
+    pub containers: Containers,
     /// The chats holding a container, most recently active first.
     pub pool: Vec<Slot>,
     /// How many containers this deployment keeps warm (ADR-0002 rule 2).
