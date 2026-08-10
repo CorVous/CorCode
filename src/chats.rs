@@ -1143,6 +1143,46 @@ where
 mod tests {
     use super::*;
 
+    use crate::plane::PlaneError;
+
+    /// The shape the operator actually met: a teardown the daemon refused,
+    /// with its refusal one level under the summary.
+    fn a_teardown_the_daemon_refused() -> PlaneError {
+        PlaneError::Runtime {
+            action: "tear down the container of chat 01K1TESTCHATID0000000000".to_owned(),
+            source: bollard::errors::Error::DockerResponseServerError {
+                status_code: 409,
+                message: "removal of container is already in progress".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_container_that_would_not_stop_is_logged_with_what_the_daemon_said() {
+        let logged = with_causes(&a_teardown_the_daemon_refused());
+
+        assert_eq!(
+            logged,
+            "the container runtime failed to tear down the container of chat \
+             01K1TESTCHATID0000000000: \
+             Docker responded with status code 409: \
+             removal of container is already in progress",
+            "the summary alone names nothing the operator can act on"
+        );
+    }
+
+    #[test]
+    fn displaying_the_stubborn_container_would_lose_the_daemons_complaint() {
+        let stubborn = a_teardown_the_daemon_refused();
+
+        assert_eq!(
+            stubborn.to_string(),
+            "the container runtime failed to tear down the container of chat \
+             01K1TESTCHATID0000000000",
+            "plain Display is what these warn sites used to get"
+        );
+    }
+
     #[test]
     fn a_key_value_line_becomes_one_variable() {
         let env = parse_env("EDITOR=helix").expect("a plain line should parse");
