@@ -10,7 +10,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::future::Future;
 use std::time::Duration;
 
-use log::{debug, info};
+use log::{debug, info, warn};
 use serde_json::{Value, json};
 use tokio::time::timeout;
 
@@ -493,7 +493,7 @@ impl<C: AcpChannel> Calls<C> {
             let message: Value = match serde_json::from_str(&line) {
                 Ok(message) => message,
                 Err(nonsense) => {
-                    debug!("adapter said something that is not json-rpc: {nonsense}");
+                    warn!("adapter said something that is not json-rpc: {nonsense}");
                     continue;
                 }
             };
