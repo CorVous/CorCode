@@ -1360,11 +1360,11 @@ mod tests {
         assert_ne!(with_causes(&stubborn), stubborn.to_string());
     }
 
-    /// The shape the operator actually met: a working tree the filesystem
-    /// would not delete, with its refusal one level under the summary.
-    fn a_removal_the_filesystem_refused() -> StoreError {
+    /// The shape the operator actually met: a write to `path` the filesystem
+    /// refused, with its refusal one level under the store's summary.
+    fn a_write_the_filesystem_refused(path: &str) -> StoreError {
         StoreError::Write {
-            path: "/srv/corcode/workspaces/01K1TESTCHATID0000000000".into(),
+            path: path.into(),
             source: std::io::ErrorKind::PermissionDenied.into(),
         }
     }
@@ -1374,7 +1374,7 @@ mod tests {
         let logged = stubborn_workspace(
             "01K1TESTCHATID0000000000",
             "a workspace",
-            &a_removal_the_filesystem_refused(),
+            &a_write_the_filesystem_refused("/srv/corcode/workspaces/01K1TESTCHATID0000000000"),
         );
 
         assert_eq!(
@@ -1390,13 +1390,15 @@ mod tests {
     fn a_turn_that_could_not_be_dated_is_logged_with_what_the_filesystem_said() {
         let logged = undated_turn(
             "01K1TESTCHATID0000000000",
-            &a_removal_the_filesystem_refused(),
+            &a_write_the_filesystem_refused(
+                "/srv/corcode/chats/01K1TESTCHATID0000000000/manifest.json",
+            ),
         );
 
         assert_eq!(
             logged,
             "01K1TESTCHATID0000000000 took a turn that could not be dated: \
-             /srv/corcode/workspaces/01K1TESTCHATID0000000000 could not be written: \
+             /srv/corcode/chats/01K1TESTCHATID0000000000/manifest.json could not be written: \
              permission denied",
             "a warm pool that stops being ordered is read from this line alone"
         );
@@ -1404,12 +1406,17 @@ mod tests {
 
     #[test]
     fn a_line_that_could_not_be_written_down_is_logged_with_what_the_filesystem_said() {
-        let logged = unwritten_line(REFUSAL, &a_removal_the_filesystem_refused());
+        let logged = unwritten_line(
+            REFUSAL,
+            &a_write_the_filesystem_refused(
+                "/srv/corcode/chats/01K1TESTCHATID0000000000/events.jsonl",
+            ),
+        );
 
         assert_eq!(
             logged,
             "a refusal line could not be written down: \
-             /srv/corcode/workspaces/01K1TESTCHATID0000000000 could not be written: \
+             /srv/corcode/chats/01K1TESTCHATID0000000000/events.jsonl could not be written: \
              permission denied",
             "the chat's own log just failed, so this line is all the operator gets"
         );
@@ -1417,7 +1424,8 @@ mod tests {
 
     #[test]
     fn displaying_the_stubborn_workspace_would_lose_the_filesystems_complaint() {
-        let stubborn = a_removal_the_filesystem_refused();
+        let stubborn =
+            a_write_the_filesystem_refused("/srv/corcode/workspaces/01K1TESTCHATID0000000000");
 
         assert_eq!(
             format!("{stubborn:#}"),
