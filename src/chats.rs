@@ -1443,7 +1443,107 @@ where
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::acp::ScriptedAdapter;
+    use crate::plane::MemoryPlane;
+
+    /// The session a woken chat comes back to.
+    const REMEMBERED: &str = "session-remembered";
+
+    /// A dataset the tests own outright, over an adapter that resumes at
+    /// ADR-0007's first rung and a plane whose containers cost nothing.
+    fn a_parked_chat() -> (TempDir, Chats<MemoryPlane, ScriptedAdapter>, String) {
+        let dir = tempfile::tempdir().expect("temp dir should be creatable");
+        let config = a_config(dir.path());
+        let store = ChatStore::new(dir.path());
+        store.prepare().expect("the dataset should prepare");
+        let manifest = store
+            .create_chat(NewChat {
+                title: "parked".to_owned(),
+                repo: "CorVous/CorCode".to_owned(),
+                branch: "chat/parked".to_owned(),
+                base_branch: "main".to_owned(),
+                env: BTreeMap::new(),
+                startup_script: None,
+            })
+            .expect("a chat should be created");
+        let chat_id = manifest.chat_id.clone();
+        store
+            .write_manifest(&Manifest {
+                acp_session_id: Some(REMEMBERED.to_owned()),
+                ..manifest
+            })
+            .expect("the session should be recorded");
+        let secrets = Arc::new(Secrets::from_config(&config));
+        let chats = Chats::new(
+            &config,
+            Owner::of(&config.data_dir).expect("we own the dataset we just made"),
+            MemoryPlane::default(),
+            ScriptedAdapter::resuming(REMEMBERED, &[]),
+            Remotes::new("file:///nowhere"),
+            secrets,
+        );
+        (dir, chats, chat_id)
+    }
+
+    fn a_config(data_dir: &std::path::Path) -> Config {
+        let vars = [
+            ("CORCODE_DATA_DIR", data_dir.to_str().expect("spellable")),
+            ("CORCODE_USERNAME", "cassidy"),
+            (
+                "CORCODE_PASSWORD_HASH",
+                "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA",
+            ),
+            (
+                "CORCODE_WORKSPACE_IMAGE",
+                "ghcr.io/corvous/corcode-workspace:2026-08-05",
+            ),
+            ("CORCODE_REPOS", "CorVous/CorCode"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()));
+        Config::from_vars(vars).expect("a test environment should load")
+    }
+
+    /// A wake pays for a container and hands the connection to the turn that
+    /// asked for it. The claim is the whole of what stops an archive taking
+    /// that container away, so it has to outlive the wake: a chat that is
+    /// woken but not yet turning is in neither `busy_chat_ids` nor `claimed`,
+    /// and an archive landing there finds an idle chat and tears down what the
+    /// wake just paid for (issue #101).
+    #[tokio::test]
+    async fn a_woken_chat_stays_claimed_until_its_turn_holds_the_connection() {
+        let (_dataset, chats, chat_id) = a_parked_chat();
+
+        let woken = chats
+            .wake(&chat_id)
+            .await
+            .expect("a parked chat with a session to come back to wakes");
+
+        assert!(
+            chats.claimed().contains(&chat_id),
+            "the woken chat is unclaimed before its turn begins: an archive \
+             landing here reads it as idle and tears its container down"
+        );
+        let connection = chats
+            .connections
+            .of(&chat_id)
+            .expect("a woken chat holds the connection its turn goes over");
+        let _turn = connection
+            .try_lock_owned()
+            .expect("nothing else is taking a turn");
+        drop(woken);
+        assert!(
+            chats.connections.busy_chat_ids().contains(&chat_id),
+            "the turn that took over the claim is not visible as a busy chat"
+        );
+        assert!(
+            !chats.claimed().contains(&chat_id),
+            "the claim outlived the turn it handed the chat over to"
+        );
+    }
 
     /// The shape the operator actually met: a teardown the daemon refused,
     /// with its refusal one level under the summary.
