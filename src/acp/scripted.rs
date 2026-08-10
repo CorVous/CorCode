@@ -421,8 +421,12 @@ impl ScriptedChannel {
 
     /// What the script says to `method`, unless this channel dies before it
     /// gets there. A method the script does not name is one this adapter has
-    /// never heard of, as a real one says rather than falling quiet.
+    /// never heard of, as a real one says rather than falling quiet; a
+    /// notification, carrying no id, is owed nothing at all.
     fn answer_to(&self, method: &str, id: &Value) -> Option<String> {
+        if id.is_null() {
+            return None;
+        }
         let withheld = match self.death {
             Death::None => false,
             Death::MidTurn => method == PROMPT,
