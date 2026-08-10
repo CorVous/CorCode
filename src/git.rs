@@ -1083,19 +1083,12 @@ mod tests {
     const STAMP_SPELLING: &str = "%Y%m%dT%H%M%S%3f";
     const STAMP_WIDTH: usize = "20260805T214033172".len();
 
-    fn stamp_of(checkpoint: &str) -> &str {
-        checkpoint
-            .strip_prefix(&format!("{CHAT_BRANCH}-chkpt-"))
-            .unwrap_or_else(|| panic!("the checkpoint is not named after the chat: {checkpoint}"))
-    }
-
-    /// Two archives of one chat a few seconds apart must not name the same
-    /// branch: the second push would be refused as a non-fast-forward.
-    #[test]
-    fn a_checkpoint_branch_is_named_after_the_chat_and_the_moment() {
-        let checkpoint = checkpoint_branch(CHAT_BRANCH);
-
-        let stamp = stamp_of(&checkpoint);
+    /// What a branch this core minted for the chat says about when: the stamp,
+    /// read back off a name that has to be the chat's own.
+    fn stamp_of<'a>(minted: &'a str, mark: &str) -> &'a str {
+        let stamp = minted
+            .strip_prefix(&format!("{CHAT_BRANCH}-{mark}-"))
+            .unwrap_or_else(|| panic!("the branch is not named after the chat: {minted}"));
         assert_eq!(
             stamp.len(),
             STAMP_WIDTH,
@@ -1106,8 +1099,24 @@ mod tests {
         });
         assert!(
             (Utc::now().naive_utc() - moment).num_seconds().abs() < 60,
-            "the checkpoint is stamped nowhere near now: {stamp}"
+            "the branch is stamped nowhere near now: {stamp}"
         );
+        stamp
+    }
+
+    /// Two archives of one chat a few seconds apart must not name the same
+    /// branch: the second push would be refused as a non-fast-forward.
+    #[test]
+    fn a_checkpoint_branch_is_named_after_the_chat_and_the_moment() {
+        stamp_of(&checkpoint_branch(CHAT_BRANCH), "chkpt");
+    }
+
+    /// The branch a refused archive falls back to is the chat's own with the
+    /// moment on it, so the operator reads which chat's work it holds and two
+    /// rescues never collide (issue #50).
+    #[test]
+    fn a_rescue_branch_is_named_after_the_chat_and_the_moment() {
+        stamp_of(&rescue_branch(CHAT_BRANCH), "rescue");
     }
 
     /// A refused push is retried at once: two checkpoints of one chat within
