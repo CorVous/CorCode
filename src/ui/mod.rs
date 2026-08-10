@@ -5,7 +5,7 @@ mod console;
 mod escape;
 mod settings;
 
-use crate::store::{Manifest, RuntimeStatus};
+use crate::store::{ChatState, Manifest, RuntimeStatus};
 
 pub use chat::{chat_page, event_log, hot_log};
 pub use console::{chat_list, console_page, status_line, status_picture};
@@ -136,7 +136,16 @@ pub fn page(title: &str, body: &str) -> String {
     )
 }
 
-/// How a chat's state is named wherever the UI says it out loud.
+/// How the state a chat's manifest carries is named wherever the UI says it
+/// out loud — all a page that asks the plane nothing can say (issue #25).
+const fn state_word(state: ChatState) -> &'static str {
+    match state {
+        ChatState::Open => "Open",
+        ChatState::Archived => "Archived",
+    }
+}
+
+/// How a chat's runtime status is named wherever the UI says it out loud.
 const fn status_word(status: RuntimeStatus) -> &'static str {
     match status {
         RuntimeStatus::Live => "Live",
