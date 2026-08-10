@@ -38,7 +38,7 @@ const SAID: &str = "ship the ladder";
 #[cfg(unix)]
 const ROOT: Owner = Owner { uid: 0, gid: 0 };
 
-const RESUME_SESSION: &str = "unstable_resumeSession";
+const RESUME_SESSION: &str = "session/resume";
 const LOAD_SESSION: &str = "session/load";
 
 #[tokio::test]

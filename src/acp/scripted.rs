@@ -8,9 +8,15 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::{
-    AcpChannel, AcpError, AcpTransport, LOAD_SESSION, NO_SUCH_METHOD, PROMPT, RESUME_SESSION,
-};
+use super::{AcpChannel, AcpError, AcpTransport, NO_SUCH_METHOD};
+
+/// The methods a real adapter answers, spelled as it hears them. The fake
+/// stands in for the adapter, not for the client, so it names them itself: a
+/// script written from the client's own constants would answer to whatever the
+/// client asked for and could never catch it asking for the wrong thing.
+const RESUME_SESSION: &str = "session/resume";
+const LOAD_SESSION: &str = "session/load";
+const PROMPT: &str = "session/prompt";
 
 /// A notification the fake volunteers before every answer, as a real adapter
 /// does: no client may assume the next line is the one it is waiting for.
