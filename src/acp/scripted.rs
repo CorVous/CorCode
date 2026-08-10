@@ -23,6 +23,11 @@ const PROMPT: &str = "session/prompt";
 /// does: no client may assume the next line is the one it is waiting for.
 const CHATTER: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"…"}}}"#;
 
+/// One line of the kind a process the agent ran leaves in the protocol stream
+/// when it writes to the agent's own stdout: text, with no message in it
+/// (issue #65).
+const GARBLE: &str = "\u{fffd}\u{fffd} building: 42% [====>      ]";
+
 /// What the script says to one method.
 #[derive(Clone)]
 enum Answer {
@@ -93,6 +98,7 @@ pub struct ScriptedAdapter {
     dies: Dies,
     replay_trails: bool,
     dawdle: Duration,
+    garble: usize,
 }
 
 /// Everything the fake was told, for the assertions to read back.
@@ -200,6 +206,17 @@ impl ScriptedAdapter {
     pub fn asking(session_id: &str, asks: &[Value], updates: &[Value]) -> Self {
         Self {
             asks: Arc::new(asks.to_vec()),
+            ..Self::answering(session_id, updates)
+        }
+    }
+
+    /// An adapter whose stream carries `junk` lines that are not JSON-RPC
+    /// before each turn's updates, as one whose stdout something else is
+    /// writing to does (issue #65).
+    #[must_use]
+    pub fn garbling(session_id: &str, junk: usize, updates: &[Value]) -> Self {
+        Self {
+            garble: junk,
             ..Self::answering(session_id, updates)
         }
     }
@@ -314,6 +331,7 @@ impl ScriptedAdapter {
             dies: Dies::Never,
             replay_trails: false,
             dawdle: Duration::ZERO,
+            garble: 0,
         }
     }
 
@@ -389,6 +407,7 @@ impl AcpTransport for ScriptedAdapter {
             death,
             replay_trails: self.replay_trails,
             dawdle: self.dawdle,
+            garble: self.garble,
         })
     }
 }
@@ -406,6 +425,7 @@ pub struct ScriptedChannel {
     death: Death,
     replay_trails: bool,
     dawdle: Duration,
+    garble: usize,
 }
 
 impl ScriptedChannel {
@@ -468,6 +488,9 @@ impl AcpChannel for ScriptedChannel {
         }
         self.unread.push_back(CHATTER.to_owned());
         if method == PROMPT {
+            for _ in 0..self.garble {
+                self.unread.push_back(GARBLE.to_owned());
+            }
             for ask in self.asks.iter() {
                 self.unread.push_back(ask.to_string());
             }

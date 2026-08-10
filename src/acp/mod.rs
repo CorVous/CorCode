@@ -525,7 +525,7 @@ impl<C: AcpChannel> Calls<C> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use serde_json::json;
 
@@ -1127,6 +1127,61 @@ mod tests {
                 }),
                 recorded("on i"),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_stops_being_json_ends_the_turn_instead_of_waiting_it_out() {
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::garbling(SESSION, GARBLE_TOLERANCE, &[]),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let started = Instant::now();
+
+        let error = connection
+            .take_turn("ship the ladder", &mut |_| Ok(()))
+            .await
+            .expect_err("a stream that is no longer json-rpc should end the turn");
+
+        assert!(
+            matches!(&error, AcpError::Garbled { method, sample }
+                if method == PROMPT && !sample.is_empty()),
+            "a desynced stream should say so and show what it read, got: {error}"
+        );
+        assert!(
+            started.elapsed() < IMPATIENT,
+            "the turn sat out its patience rather than failing on the garble (issue #65)"
+        );
+    }
+
+    #[tokio::test]
+    async fn noise_a_well_formed_message_follows_leaves_the_turn_alone() {
+        let adapter = Adapter::waiting(
+            ScriptedAdapter::garbling(SESSION, GARBLE_TOLERANCE - 1, &[update(SESSION, "on it")]),
+            IMPATIENT,
+        );
+        let mut connection = adapter
+            .open_session(CONTAINER)
+            .await
+            .expect("the scripted adapter should open a session");
+        let mut record = Vec::new();
+
+        connection
+            .take_turn("ship the ladder", &mut |payload| {
+                record.push(payload.clone());
+                Ok(())
+            })
+            .await
+            .expect("noise short of a desync should not cost the chat its turn");
+
+        assert_eq!(
+            record.last(),
+            Some(&recorded("on it")),
+            "the turn was cut short by noise it read past: {record:?}"
         );
     }
 

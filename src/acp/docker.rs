@@ -205,6 +205,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_line_that_is_not_text_arrives_with_its_bad_bytes_stood_in_for() {
+        let mut channel = channel_reading(&[b"{\"id\":\xff}\n"]);
+
+        let arrived = channel.receive().await.expect("the line should arrive");
+
+        assert_eq!(
+            arrived, "{\"id\":\u{fffd}}",
+            "a line dropped here never reaches the parse that calls the stream \
+             garbled (issue #65)"
+        );
+    }
+
+    #[tokio::test]
     async fn a_message_cut_through_a_character_arrives_whole() {
         let message = r#"{"jsonrpc":"2.0","id":1,"result":{"sessionId":"café"}}"#;
         let framed = format!("{message}\n").into_bytes();
