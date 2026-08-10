@@ -141,7 +141,10 @@ fn take_line(unread: &mut Vec<u8>) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use log::Level;
+
     use super::*;
+    use crate::logs::capturing_lines;
 
     #[test]
     fn a_line_that_is_not_text_is_logged_with_where_the_bytes_went_wrong() {
@@ -155,6 +158,38 @@ mod tests {
             "the adapter's stream carried a line that is not utf-8 \
              (invalid utf-8 sequence of 1 bytes from index 6): {\"id\":\u{fffd}}",
             "a parse failure without the line is a parse failure nobody can diagnose"
+        );
+    }
+
+    /// The line is only worth writing if a deployment reads it, and a
+    /// deployment reads warnings (issue #84).
+    #[tokio::test]
+    async fn a_line_that_is_not_text_reaches_the_operator_as_a_warning() {
+        let logged = capturing_lines();
+        let mut channel = channel_reading(&[b"{\"id\":\xff}\n"]);
+
+        channel.receive().await.expect_err("that stream ends");
+
+        assert_eq!(
+            logged.quietest_level_of("carried a line that is not utf-8"),
+            Some(Level::Warn),
+            "src/acp/docker.rs: an undecodable line below WARN is one the deployed core never says"
+        );
+    }
+
+    /// The adapter talking about itself is healthy chatter: worth having under
+    /// `RUST_LOG=info`, not worth warning a deployment about (issue #84).
+    #[tokio::test]
+    async fn the_adapters_own_stderr_is_forwarded_as_chatter_rather_than_a_warning() {
+        let logged = capturing_lines();
+        let mut channel = channel_hearing(b"npm notice: a new version is out");
+
+        channel.receive().await.expect_err("that stream ends");
+
+        assert_eq!(
+            logged.quietest_level_of("adapter stderr: npm notice"),
+            Some(Level::Info),
+            "src/acp/docker.rs: the adapter's stderr is forwarded at INFO"
         );
     }
 
@@ -187,16 +222,28 @@ mod tests {
     /// A channel over a stream that hands out exactly these chunks, as the
     /// daemon hands out whatever happened to be in the pipe.
     fn channel_reading(chunks: &[&[u8]]) -> ExecChannel {
-        let chunks: Vec<_> = chunks
-            .iter()
-            .map(|chunk| {
-                Ok(LogOutput::StdOut {
+        channel_over(
+            chunks
+                .iter()
+                .map(|chunk| LogOutput::StdOut {
                     message: chunk.to_vec().into(),
                 })
-            })
-            .collect();
+                .collect(),
+        )
+    }
+
+    /// A channel over a stream that carries one line of the adapter's own
+    /// stderr, which is what the daemon hands over when the adapter talks
+    /// about itself rather than to us.
+    fn channel_hearing(stderr: &[u8]) -> ExecChannel {
+        channel_over(vec![LogOutput::StdErr {
+            message: stderr.to_vec().into(),
+        }])
+    }
+
+    fn channel_over(output: Vec<LogOutput>) -> ExecChannel {
         ExecChannel {
-            output: Box::pin(futures_util::stream::iter(chunks)),
+            output: Box::pin(futures_util::stream::iter(output.into_iter().map(Ok))),
             input: Box::pin(tokio::io::sink()),
             unread: Vec::new(),
         }

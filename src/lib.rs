@@ -8,6 +8,7 @@ pub mod commands;
 pub mod config;
 pub mod failure;
 pub mod git;
+pub mod logs;
 pub mod plane;
 pub mod pool;
 pub mod resume;
