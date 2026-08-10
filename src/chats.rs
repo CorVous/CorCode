@@ -123,19 +123,19 @@ fn unarchived(failure: impl Into<anyhow::Error>) -> ArchiveError {
     ArchiveError::Broke(failure.into())
 }
 
-/// What the chat's log is told about an archive that stopped part way. A
-/// checkpoint that landed is named: it is where the operator's work is, and
+/// What the chat's log is told about an archive that stopped part way. Every
+/// branch that landed is named: that is where the operator's work is, and
 /// nothing else will tell them (ADR-0006).
 fn half_pushed(failure: &git::PushFailure) -> String {
     let retry = "The chat is still open and can be archived again.";
-    failure.landed.as_ref().map_or_else(
-        || format!("Nothing was archived: {failure}. {retry}"),
-        |landed| {
-            format!(
-                "The archive stopped part way: {failure}. \
-                 The work in flight is on the remote, on {landed}. {retry}"
-            )
-        },
+    let landed = failure.landed.branches();
+    if landed.is_empty() {
+        return format!("Nothing was archived: {failure}. {retry}");
+    }
+    format!(
+        "The archive stopped part way: {failure}. \
+         The work that got there is on the remote, on {}. {retry}",
+        landed.join(" and ")
     )
 }
 
@@ -1275,6 +1275,45 @@ mod tests {
             "plain Display is what these warn sites used to get"
         );
         assert_ne!(with_causes(&stubborn), stubborn.to_string());
+    }
+
+    const CHECKPOINT: &str = "chat/2026-08-09-archived-chkpt-20260809T214033172";
+    const RESCUE: &str = "chat/2026-08-09-archived-rescue-20260809T214033173";
+
+    fn a_gate_that_stopped(landed: git::Landed) -> git::PushFailure {
+        git::PushFailure {
+            landed,
+            source: git::GitError::Refused {
+                doing: "stand the workspace back on its branch".to_owned(),
+                complaint: "fatal: unable to check out".to_owned(),
+            },
+        }
+    }
+
+    /// A rescue branch that reached the remote before the gate stopped holds
+    /// the chat's whole work, and the log is the only place it is named
+    /// (issue #50).
+    #[test]
+    fn an_archive_that_stopped_names_every_branch_that_got_there() {
+        let told = half_pushed(&a_gate_that_stopped(git::Landed {
+            checkpoint: Some(CHECKPOINT.to_owned()),
+            rescue: Some(RESCUE.to_owned()),
+        }));
+
+        assert!(
+            told.contains(CHECKPOINT) && told.contains(RESCUE),
+            "the operator is sent looking for work that is on the remote: {told}"
+        );
+    }
+
+    #[test]
+    fn an_archive_that_got_nowhere_names_no_branch_at_all() {
+        let told = half_pushed(&a_gate_that_stopped(git::Landed::default()));
+
+        assert!(
+            told.contains("Nothing was archived"),
+            "a gate that got nowhere reads as a half-finished one: {told}"
+        );
     }
 
     #[test]
