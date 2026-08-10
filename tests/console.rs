@@ -66,6 +66,24 @@ async fn the_chat_view_renders_the_event_log_from_disk() {
     app.stop().await;
 }
 
+/// Reading a chat is a file read (ADR-0006), so it stands whatever the
+/// container daemon is doing (issue #25).
+#[tokio::test]
+async fn a_chat_renders_while_the_container_daemon_is_down() {
+    let (data_dir, chat_id) = fixture_chat();
+    let plane = MemoryPlane::default();
+    plane.refuse_to_list_containers();
+    let app = TestApp::start_over(data_dir, plane).await;
+
+    let body = app.body(&format!("/chats/{chat_id}")).await;
+
+    assert!(
+        body.contains("ship the ladder") && body.contains("on it"),
+        "the log did not render with the daemon down: {body}"
+    );
+    app.stop().await;
+}
+
 #[tokio::test]
 async fn a_corrupt_event_log_surfaces_as_an_error_rather_than_a_gap() {
     let (data_dir, chat_id) = fixture_chat();
@@ -86,6 +104,94 @@ async fn a_corrupt_event_log_surfaces_as_an_error_rather_than_a_gap() {
         "the error does not name the file: {body}"
     );
     app.stop().await;
+}
+
+/// A daemon that will not answer costs the live/parked grouping and nothing
+/// else: the chats are still on disk, and the operator is told why they are
+/// ungrouped (issue #25).
+#[tokio::test]
+async fn the_console_stands_while_the_container_daemon_is_down() {
+    let plane = MemoryPlane::default();
+    plane.refuse_to_list_containers();
+    let app = TestApp::start_over(with_fixture_chat(), plane).await;
+
+    let body = app.body("/").await;
+
+    assert!(
+        body.contains("Container status unknown"),
+        "the console does not say the plane went quiet: {body}"
+    );
+    assert!(
+        body.contains("Resume ladder"),
+        "the open chat is not listed: {body}"
+    );
+    assert!(
+        status_details(&body).contains("list the workspace containers"),
+        "the daemon's own words are not in the status details: {body}"
+    );
+    app.stop().await;
+}
+
+/// The console's Refresh button asks for this fragment, so it degrades where
+/// the console does or the button is a dead end (issue #25).
+#[tokio::test]
+async fn the_chat_list_fragment_stands_while_the_container_daemon_is_down() {
+    let plane = MemoryPlane::default();
+    plane.refuse_to_list_containers();
+    let app = TestApp::start_over(with_fixture_chat(), plane).await;
+
+    let body = app.body("/chats").await;
+
+    assert!(
+        body.contains("Container status unknown"),
+        "the fragment does not say the plane went quiet: {body}"
+    );
+    assert!(
+        body.contains("Resume ladder"),
+        "the open chat is not listed: {body}"
+    );
+    assert!(
+        !body.contains("<h2>Live</h2>") && !body.contains("<h2>Parked</h2>"),
+        "the fragment groups chats nothing answered for: {body}"
+    );
+    app.stop().await;
+}
+
+/// Reading degrades with the daemon down; changing something must not. A
+/// prompt that cannot reach a container is a failure, and says so
+/// (ADR-0007 rule 5).
+#[tokio::test]
+async fn a_prompt_still_fails_loudly_while_the_container_daemon_is_down() {
+    let (data_dir, chat_id) = fixture_chat();
+    let plane = MemoryPlane::default();
+    plane.refuse_to_list_containers();
+    let app = TestApp::start_over(data_dir, plane).await;
+
+    let response = app
+        .post(
+            &format!("/chats/{chat_id}/prompt"),
+            &[("prompt", "ship it")],
+        )
+        .await;
+
+    assert!(
+        response.status().is_server_error(),
+        "a prompt was answered as though the plane had spoken: {}",
+        response.status()
+    );
+    app.stop().await;
+}
+
+/// What the status line holds when it is expanded.
+fn status_details(console: &str) -> &str {
+    let details = console
+        .split_once("<details id=\"status\"")
+        .expect("the console carries a status line")
+        .1;
+    details
+        .split_once("</details>")
+        .expect("the status line is closed")
+        .0
 }
 
 #[tokio::test]
@@ -296,6 +402,10 @@ struct TestApp {
 
 impl TestApp {
     async fn start(data_dir: TempDir) -> Self {
+        Self::start_over(data_dir, MemoryPlane::default()).await
+    }
+
+    async fn start_over(data_dir: TempDir, plane: MemoryPlane) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("ephemeral port should bind");
@@ -310,7 +420,7 @@ impl TestApp {
             Chats::new(
                 &config,
                 Owner::of(&config.data_dir).expect("we own the dataset we just made"),
-                MemoryPlane::default(),
+                plane,
                 ScriptedAdapter::silent(),
                 Remotes::new(GITHUB),
                 Arc::clone(&secrets),
@@ -340,6 +450,16 @@ impl TestApp {
         client()
             .get(self.url(path))
             .header("cookie", &self.cookie)
+            .send()
+            .await
+            .expect("request")
+    }
+
+    async fn post(&self, path: &str, form: &[(&str, &str)]) -> reqwest::Response {
+        client()
+            .post(self.url(path))
+            .header("cookie", &self.cookie)
+            .form(form)
             .send()
             .await
             .expect("request")

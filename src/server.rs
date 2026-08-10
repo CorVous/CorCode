@@ -166,10 +166,16 @@ where
         Ok(statuses) => statuses,
         Err(failure) => return broken_invariant(&anyhow::Error::new(failure)),
     };
-    match chats.survey().await {
+    match chats.survey_or_unknown().await {
         Ok(survey) => {
             let status = chats.status_of(&survey, Utc::now());
-            Html(ui::console_page(&survey, &status, chats.repos(), &statuses)).into_response()
+            Html(ui::console_page(
+                &survey.chats,
+                &status,
+                chats.repos(),
+                &statuses,
+            ))
+            .into_response()
         }
         Err(failure) => broken_invariant(&failure),
     }
@@ -280,8 +286,8 @@ where
     P: ContainerPlane + ContainerLiveness + Send + Sync + 'static,
     T: AcpTransport + Send + Sync + 'static,
 {
-    match chats.survey().await {
-        Ok(survey) => Html(ui::chat_list(&survey)).into_response(),
+    match chats.survey_or_unknown().await {
+        Ok(survey) => Html(ui::chat_list(&survey.chats, &survey.containers)).into_response(),
         Err(failure) => broken_invariant(&failure),
     }
 }
@@ -363,10 +369,8 @@ where
     let Ok(chat_id) = chat_id.parse::<Ulid>() else {
         return no_such_chat();
     };
-    match chats.open(&chat_id).await {
-        Ok(Some(((manifest, status), events))) => {
-            Html(ui::chat_page(&manifest, status, &events)).into_response()
-        }
+    match chats.open(&chat_id) {
+        Ok(Some((manifest, events))) => Html(ui::chat_page(&manifest, &events)).into_response(),
         Ok(None) => no_such_chat(),
         Err(failure) => broken_invariant(&failure),
     }
