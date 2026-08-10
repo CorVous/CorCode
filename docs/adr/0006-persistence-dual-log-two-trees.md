@@ -156,15 +156,17 @@ permission mode than the one the image's managed settings ask for, which is
 otherwise invisible: an agent clamped into asking has every ask declined and
 reads as a mute one (ADR-0001). `connection_lost` says a turn ended in a
 failure rather than an answer, what became of the connection it went over, and
-that the prompt can be put again: without it the log stops at the prompt and
+what the operator can do about it: without it the log stops at the prompt and
 the page shows a chat that is still thinking (issue #65). It is the one kind
-whatever ended the turn. A channel some process the agent ran wrote over is
-told apart in the `text` rather than in the kind — it names the corruption and
-says to archive and revive a chat it keeps happening to — because it is the
-same news about the same chat, and the renderer says every kind out loud the
-same way. All of them belong in
-the log because the log
-is the whole of what the chat page renders (ADR-0008); a status code the
+whatever ended the turn, and what ended it is told in the `text`. A channel
+some process the agent ran wrote over reads differently there — it names the
+corruption and says to archive and revive a chat it keeps happening to — but
+it is the same news about the same chat, and ADR-0008's renderer says every
+kind out loud the same way. The line is a guarantee only where the connection
+broke: a turn lost because the dataset would not take it writes its notice
+through the store that just refused one, and can be lost with it. All of them
+belong in the log because the log is the whole of what the chat page renders
+(ADR-0008); a status code the
 browser swallows tells the operator nothing.
 
 ADR-0008 renders every core line as a block quote.

@@ -425,6 +425,16 @@ fn keep(record: &mut Record<'_>, payload: &Value) -> Result<(), AcpError> {
     record(payload).map_err(|source| AcpError::Unrecorded { source })
 }
 
+/// The message in `line`, where there is one. JSON-RPC numbers requests and
+/// names methods, so a line carrying neither is nobody's message however well
+/// it parses: a build tool asked for its output as JSON writes whole documents
+/// into the pipe, and reading those as protocol traffic is what leaves a turn
+/// waiting out its patience on a stream that has nothing for it (issue #65).
+fn protocol_message(line: &str) -> Option<Value> {
+    let message: Value = serde_json::from_str(line).ok()?;
+    (message.get("method").is_some() || message.get("id").is_some()).then_some(message)
+}
+
 /// As much of `line` as a failure carries, cut on a character boundary and
 /// marked where it was cut.
 fn sample_of(line: &str) -> String {
@@ -474,15 +484,33 @@ impl<C: AcpChannel> Calls<C> {
         self.answer_to(id, method, patience, overhear).await
     }
 
-    /// Read the channel until it has said nothing for `quiet`, answering what
-    /// it asks of us and keeping none of it. A pipe that breaks while it is
-    /// being emptied has nothing left to say and says so.
+    /// Read the channel until it has said nothing for `quiet`, and for no
+    /// longer than `limit` whatever it says: a container that fills the pipe
+    /// faster than the gap being waited for leaves no gap, and the reader must
+    /// come back for the chat's sake rather than keep it (issue #65).
     async fn drain(
         &mut self,
         quiet: Duration,
-        _limit: Duration,
+        limit: Duration,
         method: &str,
     ) -> Result<(), AcpError> {
+        let Ok(outcome) = timeout(limit, self.read_past(quiet, method)).await else {
+            warn!(
+                "the adapter was still replaying {method} after {}s and was left to it",
+                limit.as_secs()
+            );
+            return Ok(());
+        };
+        outcome
+    }
+
+    /// Read the channel until it has said nothing for `quiet`, answering what
+    /// it asks of us and keeping none of it. A pipe that breaks while it is
+    /// being emptied has nothing left to say and says so.
+    ///
+    /// Lines nothing can be read out of are read past rather than counted: a
+    /// replay is not a turn to fail, and there is no answer here to lose.
+    async fn read_past(&mut self, quiet: Duration, method: &str) -> Result<(), AcpError> {
         while let Ok(line) = timeout(quiet, self.channel.receive()).await {
             let Ok(message) = serde_json::from_str::<Value>(&line?) else {
                 continue;
@@ -527,23 +555,24 @@ impl<C: AcpChannel> Calls<C> {
             let line = timeout(patience, self.channel.receive())
                 .await
                 .map_err(|_| silent(method, patience))??;
-            let message: Value = match serde_json::from_str(&line) {
-                Ok(message) => {
-                    garble = 0;
-                    message
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Some(message) = protocol_message(&line) else {
+                warn!(
+                    "the adapter's stream carried no message: {}",
+                    sample_of(&line)
+                );
+                garble += 1;
+                if garble >= GARBLE_TOLERANCE {
+                    return Err(AcpError::Garbled {
+                        method: method.to_owned(),
+                        sample: sample_of(&line),
+                    });
                 }
-                Err(nonsense) => {
-                    warn!("adapter said something that is not json-rpc: {nonsense}");
-                    garble += 1;
-                    if garble >= GARBLE_TOLERANCE {
-                        return Err(AcpError::Garbled {
-                            method: method.to_owned(),
-                            sample: sample_of(&line),
-                        });
-                    }
-                    continue;
-                }
+                continue;
             };
+            garble = 0;
             if message.get("method").is_some() {
                 overhear(&message)?;
                 if let Some(answer) = owed(&message) {
