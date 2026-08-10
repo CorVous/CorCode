@@ -107,6 +107,16 @@ fn cli_rust_log_overrides_verbosity() {
 }
 
 #[test]
+fn cli_rust_log_naming_the_docker_client_still_reaches_the_capped_logger() {
+    let mut cmd = Command::cargo_bin(env!("CARGO_PKG_NAME")).expect("binary should build");
+    cmd.env("RUST_LOG", "bollard=trace,debug")
+        .arg("version")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("DEBUG:"));
+}
+
+#[test]
 fn cli_no_subcommand_serving_without_config_fails() {
     cli()
         .assert()
