@@ -146,8 +146,10 @@ Core-injected notices are the one payload that is not ACP. They carry a
 says the agent asked the operator for something and this client answered no
 on their behalf, which is the only answer it has: the core declares no client
 capabilities, and an unanswered request blocks the agent's whole turn.
-`refusal` says a prompt never went out because the chat was busy or already
-being woken. `wake_failure` says a prompt never went out because the chat
+`refusal` says a prompt never went out, or an archive never ran, because of
+what the chat was already doing — taking a turn, being woken, being archived.
+A chat that is archived already is the one refusal the log is not told: its
+page says so, and its log is the record of a chat that is closed. `wake_failure` says a prompt never went out because the chat
 could not be brought back at all, and names what stopped it (ADR-0007).
 `push_failure` says the archive gate got nothing onto the remote, so
 the chat is still open with its container up and can be archived again
