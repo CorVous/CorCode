@@ -210,10 +210,11 @@ A poll that names no cursor, or one this build cannot read — garbled, empty,
 or given twice — is answered with the whole render rather than an error. A
 section whose cursor has gone wrong therefore heals into a resync.
 
-## Amendment (2026-08-09): `rescue_branch`, a core line of its own
+## Amendment (2026-08-09): `rescue_branch` and `drift_notice`
 
 ```json
 {"corcode": "rescue_branch", "text": "..."}
+{"corcode": "drift_notice", "text": "..."}
 ```
 
 `rescue_branch` says the remote would not take the chat's own branch —
@@ -223,6 +224,12 @@ once more under a `chat/<name>-rescue-<timestamp>` name and finished (issue
 the chat is closed. The line exists because the log is the only place the
 operator can read where their work went. Nothing was forced, so what the
 remote holds on the chat's branch still stands.
+
+`drift_notice` says a revival came back on a commit the remote has since built
+on (ADR-0007 rule 4): the chat lost nothing, but its next archive is the push a
+remote can refuse, and the rescue should not be the first anyone hears of it.
+It sits beside the `reset_notice` rather than inside it — that one says what
+the revival cost, this one says what the remote has done since.
 
 ## Consequences
 

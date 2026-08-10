@@ -82,6 +82,21 @@ pub fn workspace_reset(branch: &str, standing_at: &str, last_pushed: &str) -> St
     )
 }
 
+/// What a chat is told when it came back on a commit the remote has since
+/// built on (ADR-0007 rule 4, issue #50).
+///
+/// The work is still there and the revival is sound; what has changed is that
+/// this chat's next archive is a push the remote can refuse, and a rescue
+/// branch nobody was warned about reads as something going wrong.
+#[must_use]
+pub fn remote_drift(branch: &str, standing_at: &str, tip: &str) -> String {
+    format!(
+        "This chat comes back at {branch}@{standing_at}, which the remote has moved past: \
+         {branch} is on {tip} there. Nothing here was lost, but work pushed from this commit \
+         can be refused at archive and land on a rescue branch of its own."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

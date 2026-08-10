@@ -163,6 +163,10 @@ const RESCUE_BRANCH: &str = "rescue_branch";
 /// not get back, or a workspace that came back as a fresh clone (ADR-0006).
 const RESET_NOTICE: &str = "reset_notice";
 
+/// What a chat revived behind the branch it works on calls itself there
+/// (issue #50).
+const DRIFT_NOTICE: &str = "drift_notice";
+
 /// What a prompt that never got as far as an agent calls itself there.
 const WAKE_FAILURE: &str = "wake_failure";
 
@@ -888,8 +892,8 @@ where
             "this chat is archived but something is already in its workspace at {}",
             workspace.display()
         );
-        let standing_at = match self.clone_back(&manifest, &last_pushed).await {
-            Ok(standing_at) => standing_at,
+        let standing = match self.clone_back(&manifest, &last_pushed).await {
+            Ok(standing) => standing,
             Err(failure) => {
                 self.wipe_the_half_clone(&manifest.chat_id);
                 return Err(failure);
@@ -903,8 +907,15 @@ where
         self.note(
             &revived.chat_id,
             RESET_NOTICE,
-            &resume::workspace_reset(&revived.branch, &standing_at, &last_pushed),
+            &resume::workspace_reset(&revived.branch, &standing.standing_at, &last_pushed),
         );
+        if standing.behind_the_tip() {
+            self.note(
+                &revived.chat_id,
+                DRIFT_NOTICE,
+                &resume::remote_drift(&revived.branch, &standing.standing_at, &standing.tip),
+            );
+        }
         Ok(revived)
     }
 
@@ -921,16 +932,16 @@ where
     /// Clone the chat's branch back into its workspace at `commit` and hand
     /// the clone to the agent that will work in it: a revived workspace is as
     /// new as a created one. Git blocks, so it runs off the runtime.
-    async fn clone_back(&self, manifest: &Manifest, commit: &str) -> Result<String> {
+    async fn clone_back(&self, manifest: &Manifest, commit: &str) -> Result<git::Revived> {
         let origin = self.origin(&manifest.repo)?;
         let workspace = self.store.workspace_dir(&manifest.chat_id);
         let branch = manifest.branch.clone();
         let commit = commit.to_owned();
         let agent = self.store.agent();
-        tokio::task::spawn_blocking(move || -> Result<String> {
-            let standing_at = git::revive_at(&origin, &branch, &commit, &workspace)?;
+        tokio::task::spawn_blocking(move || -> Result<git::Revived> {
+            let standing = git::revive_at(&origin, &branch, &commit, &workspace)?;
             store::hand_tree_to(&workspace, agent)?;
-            Ok(standing_at)
+            Ok(standing)
         })
         .await
         .expect("the git task should not panic")

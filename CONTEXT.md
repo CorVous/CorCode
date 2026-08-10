@@ -57,6 +57,13 @@ Code. Decisions live in `docs/adr/`; this file holds the vocabulary.
 - **Checkpoint branch** — `<branch>-chkpt-<stamp>`, minted by the
   close/archive gate when dirty state can't land on the chat branch
   (ADR-0005).
+- **Rescue branch** — `<branch>-rescue-<stamp>`, minted by the archive gate
+  when the remote refuses the chat's own branch: the same work, offered once
+  more under a name nothing else holds, so the archive finishes and no chat is
+  unclosable. Never a force push (ADR-0005, ADR-0006).
+- **Drift notice** — the line a revival adds when it comes back behind the
+  branch tip: the chat lost nothing, but its next archive can be rescued
+  (ADR-0006, ADR-0007).
 - **Bump PR** — the weekly scheduled PR that moves the image's exact
   `@anthropic-ai/claude-agent-sdk` override pin to the newest release;
   merging it triggers the CI image build. The freshness loop's only
