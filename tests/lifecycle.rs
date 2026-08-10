@@ -584,7 +584,10 @@ async fn a_prompt_arriving_mid_archive_is_turned_away_rather_than_waking_the_cha
 
     assert_eq!(refused.status(), StatusCode::CONFLICT);
     assert_eq!(
-        archiving.await.expect("the archive should not panic").status(),
+        archiving
+            .await
+            .expect("the archive should not panic")
+            .status(),
         StatusCode::OK
     );
     assert_eq!(app.manifest(&closing)["state"], "archived");

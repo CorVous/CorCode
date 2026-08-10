@@ -439,7 +439,7 @@ where
             )
                 .into_response()
         }
-        Err(refusal @ (PromptError::Busy | PromptError::Waking)) => {
+        Err(refusal @ (PromptError::Busy | PromptError::Waking | PromptError::Archiving)) => {
             (StatusCode::CONFLICT, format!("{refusal}.\n")).into_response()
         }
         Err(failure @ PromptError::Unrecorded(_)) => {
