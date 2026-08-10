@@ -120,6 +120,8 @@ A second is not fine enough
 ([#68](https://github.com/CorVous/CorCode/issues/68)): two archives of one
 chat can fall inside the same second, and the second push is refused as a
 non-fast-forward on a branch the remote already has. The stamp now carries
-milliseconds (`-chkpt-20260805T214033172`), and the core never mints two
-checkpoints from the same millisecond — it waits for the clock — so a name
-collision is not merely unlikely but impossible.
+milliseconds (`-chkpt-20260805T214033172`), and a core process never mints two
+checkpoints from the same millisecond: a stamp no later than the last one is
+taken to be the millisecond after it, so names rise even when the clock does
+not. A collision is impossible within a process; across processes the
+millisecond makes it improbable.

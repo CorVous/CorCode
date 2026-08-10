@@ -348,8 +348,9 @@ pub fn create_branch(workspace: &Path, branch: &str) -> Result<(), GitError> {
 /// The branch a chat's unpushed work is checkpointed onto (ADR-0005).
 ///
 /// The chat's own branch, stamped to the millisecond and never twice with the
-/// same millisecond, so that no two checkpoints — however close together the
-/// archives fall — can name the same branch and collide on the remote.
+/// same millisecond, so that no two checkpoints this core mints — however
+/// close together the archives fall — can name the same branch and collide on
+/// the remote.
 #[must_use]
 pub fn checkpoint_branch(branch: &str) -> String {
     format!(
@@ -361,17 +362,21 @@ pub fn checkpoint_branch(branch: &str) -> String {
 /// The last millisecond a checkpoint branch was stamped with.
 static STAMPED_THROUGH: AtomicI64 = AtomicI64::new(i64::MIN);
 
-/// Now, once the clock has reached a millisecond no checkpoint carries yet.
+/// Now, or the millisecond after the last checkpoint if now is not past it.
+///
+/// Nothing waits for the clock: a clock that steps backwards under NTP would
+/// hold an archive up for as long as it stepped, and the archive's business is
+/// a name no other checkpoint has, not the exact time of day.
 fn unstamped_millisecond() -> DateTime<Utc> {
-    loop {
-        let now = Utc::now();
-        if STAMPED_THROUGH.fetch_max(now.timestamp_millis(), Ordering::Relaxed)
-            < now.timestamp_millis()
-        {
-            return now;
-        }
-        std::thread::yield_now();
-    }
+    let now = Utc::now().timestamp_millis();
+    let past = |stamped: i64| now.max(stamped.saturating_add(1));
+    let (Ok(stamped) | Err(stamped)) =
+        STAMPED_THROUGH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |stamped| {
+            Some(past(stamped))
+        });
+
+    DateTime::from_timestamp_millis(past(stamped))
+        .expect("a millisecond of this era is a timestamp")
 }
 
 /// What the archive gate got onto the remote (ADR-0005).
@@ -721,6 +726,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
+    use chrono::NaiveDateTime;
     use tempfile::TempDir;
 
     use super::*;
@@ -1072,30 +1078,48 @@ mod tests {
     const BARE: &str = "CorVous/fixture.git";
     const CHAT_BRANCH: &str = "chat/2026-08-05-archived";
 
+    /// The shape an operator reads a checkpoint branch by: the chat's own
+    /// name, then the moment, spelled to the millisecond.
+    const STAMP_SPELLING: &str = "%Y%m%dT%H%M%S%3f";
+    const STAMP_WIDTH: usize = "20260805T214033172".len();
+
+    fn stamp_of(checkpoint: &str) -> &str {
+        checkpoint
+            .strip_prefix(&format!("{CHAT_BRANCH}-chkpt-"))
+            .unwrap_or_else(|| panic!("the checkpoint is not named after the chat: {checkpoint}"))
+    }
+
     /// Two archives of one chat a few seconds apart must not name the same
     /// branch: the second push would be refused as a non-fast-forward.
     #[test]
     fn a_checkpoint_branch_is_named_after_the_chat_and_the_moment() {
-        let stamp = Utc::now().format("%Y%m%dT%H%M%S");
         let checkpoint = checkpoint_branch(CHAT_BRANCH);
 
+        let stamp = stamp_of(&checkpoint);
+        assert_eq!(
+            stamp.len(),
+            STAMP_WIDTH,
+            "the stamp is not spelled to the millisecond: {stamp}"
+        );
+        let moment = NaiveDateTime::parse_from_str(stamp, STAMP_SPELLING).unwrap_or_else(|error| {
+            panic!("the stamp does not read as a moment: {stamp} ({error})")
+        });
         assert!(
-            checkpoint.starts_with(&format!("{CHAT_BRANCH}-chkpt-{stamp}")),
-            "the checkpoint branch does not read as the chat's, at this second: {checkpoint}"
+            (Utc::now().naive_utc() - moment).num_seconds().abs() < 60,
+            "the checkpoint is stamped nowhere near now: {stamp}"
         );
     }
 
     /// A refused push is retried at once: two checkpoints of one chat within
-    /// the same second must still name two branches.
+    /// the same second must still name two branches, and later ones must sort
+    /// after earlier ones however slow the clock is to move.
     #[test]
     fn checkpoints_minted_back_to_back_are_named_apart() {
         let names: Vec<String> = (0..100).map(|_| checkpoint_branch(CHAT_BRANCH)).collect();
-        let distinct: std::collections::HashSet<&String> = names.iter().collect();
 
-        assert_eq!(
-            distinct.len(),
-            names.len(),
-            "checkpoints minted back to back collided: {names:?}"
+        assert!(
+            names.windows(2).all(|pair| pair[0] < pair[1]),
+            "checkpoints minted back to back collided or fell out of order: {names:?}"
         );
     }
 
