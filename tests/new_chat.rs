@@ -25,7 +25,7 @@ use cor_code::config::{
     DEFAULT_WARM_POOL,
 };
 use cor_code::git::Remotes;
-use cor_code::plane::MemoryPlane;
+use cor_code::plane::{MemoryPlane, managed_default_mode};
 use cor_code::secrets::Secrets;
 use cor_code::server;
 use cor_code::settings::Settings;
@@ -39,6 +39,9 @@ const BARE: &str = "CorVous/fixture.git";
 /// A repository this deployment was never configured with.
 const UNLISTED: &str = "Someone/else";
 const SESSION: &str = "3f2b1c4d-0000-4000-8000-000000000001";
+/// The mode a session the adapter clamped comes back in: Claude Code's
+/// interactive default, where every call is an ask this client declines.
+const CLAMPED: &str = "default";
 /// The only user that can give a tree away, and so the only one this suite
 /// can watch a handover under.
 #[cfg(unix)]
@@ -143,6 +146,50 @@ async fn a_new_chat_arrives_live_with_a_checked_out_workspace_and_a_session() {
         "the new chat is not live on the console: {console}"
     );
     app.stop().await;
+}
+
+/// The adapter clamps a session out of the managed mode when the model will
+/// not take it, and says so to its own stderr and nowhere else (ADR-0001's
+/// blind spot). A chat clamped into asking declines every ask and reads as a
+/// mute agent, so the transcript is where it has to be visible.
+#[tokio::test]
+async fn a_session_clamped_out_of_the_managed_mode_says_so_in_the_chats_own_log() {
+    let (data_dir, _origin, chats) = chats_over(ScriptedAdapter::opening_in_mode(SESSION, CLAMPED));
+
+    let chat_id = chats
+        .create(wanted("clamped"))
+        .await
+        .expect("the chat should be created");
+
+    let notices = core_lines(data_dir.path(), &chat_id);
+    let [notice] = notices.as_slice() else {
+        panic!("a clamped session left the chat nothing to read: {notices:?}");
+    };
+    assert_eq!(notice["corcode"], "mode_notice");
+    let text = notice["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains(CLAMPED) && text.contains(managed_default_mode()),
+        "the notice says neither the mode the session is in nor the one it should be in: {text}"
+    );
+}
+
+#[tokio::test]
+async fn a_session_that_opened_in_the_managed_mode_leaves_the_log_alone() {
+    let (data_dir, _origin, chats) = chats_over(ScriptedAdapter::opening_in_mode(
+        SESSION,
+        managed_default_mode(),
+    ));
+
+    let chat_id = chats
+        .create(wanted("as asked"))
+        .await
+        .expect("the chat should be created");
+
+    let notices = core_lines(data_dir.path(), &chat_id);
+    assert!(
+        notices.is_empty(),
+        "a session in the mode it was asked for is not news: {notices:?}"
+    );
 }
 
 #[tokio::test]
@@ -519,6 +566,53 @@ async fn a_core_on_the_host_binds_the_very_paths_it_reads_itself() {
     assert_eq!(mounts.workspace, app.workspace(&chat_id));
     assert_eq!(mounts.claude, app.chat_dir(&chat_id).join("claude"));
     app.stop().await;
+}
+
+/// A chats service over a dataset of its own, prepared as serving prepares
+/// it, talking to `adapter` and to a plane that starts nothing. The dirs come
+/// back with it: dropping either takes the dataset out from under the test.
+fn chats_over(adapter: ScriptedAdapter) -> (TempDir, TempDir, Chats<MemoryPlane, ScriptedAdapter>) {
+    let data_dir = TempDir::new().expect("temp dir should be creatable");
+    let (origin, remotes) = seeded_repository();
+    let config = test_config(data_dir.path().to_path_buf(), data_dir.path().to_path_buf());
+    ChatStore::new(data_dir.path())
+        .prepare()
+        .expect("the dataset should prepare, as serving does");
+    let secrets = Arc::new(Secrets::from_config(&config));
+    let chats = Chats::new(
+        &config,
+        Owner::of(&config.data_dir).expect("we own the dataset we just made"),
+        MemoryPlane::default(),
+        adapter,
+        remotes,
+        secrets,
+    );
+    (data_dir, origin, chats)
+}
+
+/// A chat asked for the way the console asks for one.
+fn wanted(slug: &str) -> WantedChat {
+    WantedChat {
+        repo: REPO.to_owned(),
+        base_branch: "main".to_owned(),
+        slug: slug.to_owned(),
+        direct_on_base: false,
+        env: std::collections::BTreeMap::new(),
+        startup_script: None,
+    }
+}
+
+/// The lines the core wrote in a chat's log in its own voice, in order
+/// (ADR-0006).
+fn core_lines(data_dir: &Path, chat_id: &str) -> Vec<Value> {
+    fs::read_to_string(data_dir.join("chats").join(chat_id).join("events.jsonl"))
+        .expect("the event log should exist")
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).expect("a line should be json")["event"].clone()
+        })
+        .filter(|event| event["corcode"].is_string())
+        .collect()
 }
 
 /// The chat id the redirect points a browser at.
