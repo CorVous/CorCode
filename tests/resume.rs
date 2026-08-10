@@ -70,6 +70,32 @@ async fn a_prompt_into_a_parked_chat_spins_it_up_and_resumes_the_session_it_had(
     assert_eq!(dataset.manifest(&chat)["acp_session_id"], FORGOTTEN);
 }
 
+/// A rung the adapter has never heard of is answered -32601 and the ladder
+/// climbs on, so the chat resumes either way and only the price says which
+/// rung paid for it. The methods one wake put on the wire are pinned here,
+/// where a wrong name cannot hide behind the fallthrough (issue #56).
+#[tokio::test]
+async fn a_wake_asks_for_the_resume_method_the_adapter_answers_and_stops_there() {
+    let dataset = Dataset::of(ScriptedAdapter::resuming(
+        SESSION,
+        &[update(FORGOTTEN, "on it")],
+    ));
+    let chat = dataset.create("resumed").await;
+    dataset.forget_the_session(&chat);
+    dataset.park(&chat).await;
+
+    dataset
+        .prompt(&chat, SAID)
+        .await
+        .expect("a parked chat should wake");
+
+    assert_eq!(
+        dataset.methods_asked_over(FORGOTTEN),
+        ["session/resume", "session/prompt"],
+        "the wake did not resume at rung 1 and then prompt"
+    );
+}
+
 /// The replay is the whole point of rung 2 and the whole risk of it: it
 /// rebuilds agent memory and must land nowhere the operator reads
 /// (ADR-0007 rule 3).
@@ -656,6 +682,16 @@ impl Dataset {
             .iter()
             .filter(|request| request["method"] == method)
             .map(|request| request["params"]["sessionId"].to_string().replace('"', ""))
+            .collect()
+    }
+
+    /// The methods the adapter was asked about one session, in order.
+    fn methods_asked_over(&self, session_id: &str) -> Vec<String> {
+        self.adapter
+            .requests()
+            .iter()
+            .filter(|request| request["params"]["sessionId"] == session_id)
+            .map(|request| request["method"].to_string().replace('"', ""))
             .collect()
     }
 
