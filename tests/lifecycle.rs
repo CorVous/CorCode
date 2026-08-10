@@ -570,6 +570,43 @@ async fn an_archive_over_a_chat_being_woken_is_refused_and_tears_nothing_down() 
     assert_eq!(group(&app.body("/").await, &parked), "Live");
 }
 
+/// htmx drops the answer to a refused archive, so the 409 reaches nobody: the
+/// chat's own log is the only place the operator, who is looking at the chat
+/// page, can read why the Archive button did nothing (issue #102).
+#[tokio::test]
+async fn a_refused_archive_says_why_in_the_chats_own_log() {
+    let app = TestApp::dawdling().await;
+    let parked = app.create_chat("first").await;
+    app.create_chat("second").await;
+    app.create_chat("third").await;
+
+    let waking = app.spawn_prompt(&parked, "still there?");
+    tokio::time::sleep(DAWDLE).await;
+    let refused = app.archive(&parked).await;
+
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let told = app.told(&parked);
+    let refusal = told
+        .iter()
+        .filter(|line| line["corcode"] == "refusal")
+        .filter_map(|line| line["text"].as_str())
+        .next_back()
+        .unwrap_or_else(|| panic!("the refused archive was never told of: {told:?}"));
+    assert_eq!(
+        refusal, "Chat not archived: this chat is being woken for a prompt.",
+        "the refusal does not say what was turned away, or why"
+    );
+    let page = app.body(&format!("/chats/{parked}/events")).await;
+    assert!(
+        page.contains(refusal),
+        "the chat page does not show the refusal the operator is waiting on: {page}"
+    );
+    assert_eq!(
+        waking.await.expect("the turn should not panic").status(),
+        StatusCode::OK
+    );
+}
+
 /// The other order: the archive is already committing and deleting a working
 /// tree when the prompt arrives. Waking the chat now would put a container over
 /// a workspace that is about to go, so the prompt is turned away and told what

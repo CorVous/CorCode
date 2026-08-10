@@ -3,6 +3,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Display;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -139,6 +140,15 @@ impl ArchiveError {
             Self::AlreadyArchived | Self::Busy | Self::Waking | Self::Archiving
         )
     }
+
+    /// Whether the chat's own log is where this refusal belongs. It is the
+    /// only place the operator reads a refused archive, since the browser
+    /// throws the answer away (issue #102) — but a chat that is archived
+    /// already says so on its own page, and its log is the record of a chat
+    /// that is closed, not a place to write down what was asked of it after.
+    const fn is_worth_noting(&self) -> bool {
+        self.is_refusal() && !matches!(self, Self::AlreadyArchived)
+    }
 }
 
 fn unarchived(failure: impl Into<anyhow::Error>) -> ArchiveError {
@@ -173,6 +183,12 @@ fn rescued(branch: &str, rescue: &str) -> String {
 
 /// What a refusal calls itself in a chat's own log (ADR-0006).
 const REFUSAL: &str = "refusal";
+
+/// What a refused prompt says went nowhere.
+const PROMPT_NOT_SENT: &str = "Prompt not sent";
+
+/// What a refused archive says went nowhere (issue #102).
+const NOT_ARCHIVED: &str = "Chat not archived";
 
 /// What an archive that got nothing onto the remote calls itself there.
 const PUSH_FAILURE: &str = "push_failure";
@@ -689,7 +705,9 @@ where
         let outcome = self.turn(&chat_id, said).await;
         match &outcome {
             Ok(()) => self.touch(&chat_id),
-            Err(refusal) if refusal.is_refusal() => self.note_refusal(&chat_id, refusal),
+            Err(refusal) if refusal.is_refusal() => {
+                self.note_refusal(&chat_id, PROMPT_NOT_SENT, refusal);
+            }
             Err(_) => {}
         }
         self.cap_the_pool().await;
@@ -827,15 +845,30 @@ where
     /// A chat holding no connection has nothing in its container but the
     /// keep-alive, so the stop asks for no grace and the archive costs the
     /// request nothing (issue #40).
+    ///
+    /// A refusal is written into the chat's own log, which is where the
+    /// operator is looking: the browser throws the answer to an archive away
+    /// (issue #102).
     pub async fn archive(&self, chat_id: &Ulid) -> Result<(), ArchiveError> {
         let chat_id = chat_id.to_string();
+        let outcome = self.close(&chat_id).await;
+        if let Err(refusal) = &outcome {
+            if refusal.is_worth_noting() {
+                self.note_refusal(&chat_id, NOT_ARCHIVED, refusal);
+            }
+        }
+        outcome
+    }
+
+    /// The archive itself, from the claim to the emptied workspace.
+    async fn close(&self, chat_id: &str) -> Result<(), ArchiveError> {
         let _claim = self
-            .claim(&chat_id, Doing::Archiving)
+            .claim(chat_id, Doing::Archiving)
             .map_err(|held| match held {
                 Doing::Waking => ArchiveError::Waking,
                 Doing::Archiving => ArchiveError::Archiving,
             })?;
-        let manifest = match self.store.read_manifest(&chat_id) {
+        let manifest = match self.store.read_manifest(chat_id) {
             Ok(manifest) => manifest,
             Err(failure) if failure.is_missing() => return Err(ArchiveError::NoSuchChat),
             Err(failure) => return Err(unarchived(failure)),
@@ -843,17 +876,17 @@ where
         if manifest.state != ChatState::Open {
             return Err(ArchiveError::AlreadyArchived);
         }
-        let _turn = self.idle(&chat_id)?;
+        let _turn = self.idle(chat_id)?;
         let origin = self.origin(&manifest.repo).map_err(unarchived)?;
         let pushed = match self.push_everything(origin, &manifest).await {
             Ok(pushed) => pushed,
             Err(failure) => {
-                self.note(&chat_id, PUSH_FAILURE, &half_pushed(&failure));
+                self.note(chat_id, PUSH_FAILURE, &half_pushed(&failure));
                 return Err(ArchiveError::NotPushed(failure.into()));
             }
         };
         if let Some(rescue) = &pushed.rescue_branch {
-            self.note(&chat_id, RESCUE_BRANCH, &rescued(&manifest.branch, rescue));
+            self.note(chat_id, RESCUE_BRANCH, &rescued(&manifest.branch, rescue));
         }
         self.store
             .write_manifest(&Manifest {
@@ -863,9 +896,9 @@ where
                 ..manifest
             })
             .map_err(unarchived)?;
-        self.release(&chat_id, "archived", self.grace_owed(&chat_id))
+        self.release(chat_id, "archived", self.grace_owed(chat_id))
             .await;
-        self.store.remove_workspace(&chat_id).map_err(unarchived)?;
+        self.store.remove_workspace(chat_id).map_err(unarchived)?;
         self.sweep().await;
         Ok(())
     }
@@ -1007,11 +1040,12 @@ where
         }
     }
 
-    /// A refusal in the chat's own log. The page renders nothing else, so
-    /// this is the only place the operator can read why their prompt went
-    /// nowhere; the next poll brings it (ADR-0006).
-    fn note_refusal(&self, chat_id: &str, refusal: &PromptError) {
-        self.note(chat_id, REFUSAL, &format!("Prompt not sent: {refusal}."));
+    /// A refusal in the chat's own log, under what it turned away. The page
+    /// renders nothing else, so this is the only place the operator can read
+    /// why what they asked for went nowhere; the next poll brings it
+    /// (ADR-0006).
+    fn note_refusal(&self, chat_id: &str, turned_away: &str, refusal: &dyn Display) {
+        self.note(chat_id, REFUSAL, &format!("{turned_away}: {refusal}."));
     }
 
     /// Say in the chat's log when its session runs in some mode other than the
