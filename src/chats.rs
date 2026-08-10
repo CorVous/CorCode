@@ -497,6 +497,15 @@ impl Drop for Claim<'_> {
     }
 }
 
+/// A chat ready to be prompted: the connection the turn goes over and, where
+/// this prompt woke the chat, the claim it was woken under. The claim outlives
+/// the wake and ends where the turn lock begins, so a woken chat is never for
+/// an instant one an archive can read as idle (issue #101).
+struct Woken<'a, C> {
+    connection: Held<C>,
+    claim: Option<Claim<'a>>,
+}
+
 /// Where a wake found its agent: a container that was already up, or one this
 /// wake started and is therefore this wake's to give back.
 struct Housing {
@@ -959,13 +968,21 @@ where
             .expect("the git task should not panic")
     }
 
+    /// Take one turn over the chat's connection, waking it first if it holds
+    /// none. A wake hands its claim over with the connection, and the turn lets
+    /// go of it only once it holds the connection itself: between the two there
+    /// is no instant in which the chat reads as idle to an archive (issue #101).
     async fn turn(&self, chat_id: &str, said: &str) -> Result<(), PromptError> {
-        let connection = match self.connections.of(chat_id) {
-            Some(held) => held,
+        let woken = match self.connections.of(chat_id) {
+            Some(connection) => Woken {
+                connection,
+                claim: None,
+            },
             None => self.wake(chat_id).await?,
         };
         let turn = {
-            let mut agent = connection.try_lock().map_err(|_| PromptError::Busy)?;
+            let mut agent = woken.connection.try_lock().map_err(|_| PromptError::Busy)?;
+            drop(woken.claim);
             agent
                 .take_turn(said, &mut |payload| {
                     self.store.append_event(chat_id, payload)?;
@@ -1027,15 +1044,22 @@ where
     ///
     /// One wake at a time: a second prompt arriving mid-wake is turned away
     /// rather than left to clone over the first one's workspace.
-    async fn wake(&self, chat_id: &str) -> Result<Held<T::Channel>, PromptError> {
-        let _claim = self
+    ///
+    /// The claim goes back with the connection rather than ending here: a chat
+    /// woken but not yet taking a turn is one an archive would read as idle and
+    /// tear the fresh container from (issue #101).
+    async fn wake(&self, chat_id: &str) -> Result<Woken<'_, T::Channel>, PromptError> {
+        let claim = self
             .claim(chat_id, Doing::Waking)
             .map_err(|held| match held {
                 Doing::Waking => PromptError::Waking,
                 Doing::Archiving => PromptError::Archiving,
             })?;
         match self.woken(chat_id).await {
-            Ok(held) => Ok(held),
+            Ok(connection) => Ok(Woken {
+                connection,
+                claim: Some(claim),
+            }),
             Err(failure) => {
                 self.note(
                     chat_id,
